@@ -21,10 +21,8 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("TOKEN", "f9LHodD0cOJlllLX1fR59yrbAD6H3UWttud4hPu4zQOQnY2SwNo5NIJtSRA5feJviS8obhPIQ2954lD9YGNp")
 BASE_URL = "https://platform-api2.max.ru"
 
-# ПУТЬ К СЕРТИФИКАТУ (файл должен лежать в папке с app.py)
+# ПУТЬ К СЕРТИФИКАТУ
 CERT_PATH = os.path.join(os.path.dirname(__file__), 'russian_trusted_root_ca_gost_2025')
-
-# Если сертификат не найден — используем verify=False
 USE_CERT = os.path.exists(CERT_PATH)
 if USE_CERT:
     logger.info(f"✅ Сертификат найден: {CERT_PATH}")
@@ -36,15 +34,15 @@ user_states = {}
 user_folders = {}
 user_publication_status = {}
 
-# ========== ОТПРАВКА ==========
+# ========== ОТПРАВКА (ЧЕРЕЗ user_id) ==========
 
-def send_message(chat_id, text):
-    """Отправка сообщения в чат"""
+def send_message(user_id, text):
+    """Отправка сообщения в личный чат по user_id"""
     try:
         r = requests.post(
             f"{BASE_URL}/messages",
             headers={"Authorization": TOKEN, "Content-Type": "application/json"},
-            json={"chat_id": chat_id, "text": text},
+            json={"user_id": user_id, "text": text},
             timeout=10,
             verify=CERT_PATH if USE_CERT else False
         )
@@ -54,15 +52,15 @@ def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
         return False
 
-def send_keyboard(chat_id, text, buttons):
-    """Отправка сообщения с кнопками"""
+def send_keyboard(user_id, text, buttons):
+    """Отправка клавиатуры в личный чат по user_id"""
     try:
         kb = []
         for b in buttons:
             kb.append([{"text": b["text"], "type": "callback", "payload": b["payload"]}])
         
         payload = {
-            "chat_id": chat_id,
+            "user_id": user_id,
             "text": text,
             "attachments": [{
                 "type": "inline_keyboard",
@@ -84,7 +82,7 @@ def send_keyboard(chat_id, text, buttons):
         return False
 
 def send_to_group(chat_id, text):
-    """Отправка поста в группу"""
+    """Отправка в группу (используем chat_id)"""
     try:
         r = requests.post(
             f"{BASE_URL}/messages",
@@ -100,7 +98,6 @@ def send_to_group(chat_id, text):
 # ========== РАБОТА С ПАПКАМИ ==========
 
 def get_folders(base_path):
-    """Получает список подпапок с ID групп"""
     try:
         path = Path(base_path)
         if not path.exists():
@@ -123,7 +120,6 @@ def get_folders(base_path):
         return []
 
 def get_post_text(folder_path):
-    """Получает текст поста из папки"""
     try:
         path = Path(folder_path)
         text_files = list(path.glob("*.txt")) + list(path.glob("*.md"))
@@ -136,16 +132,14 @@ def get_post_text(folder_path):
         return None
 
 def human_delay():
-    """Реалистичная задержка"""
     return random.randint(60, 180)
 
 # ========== МЕНЮ ==========
 
-def show_main_menu(chat_id):
-    """Главное меню"""
-    folder = user_folders.get(chat_id, "Не выбрана")
+def show_main_menu(user_id):
+    folder = user_folders.get(user_id, "Не выбрана")
     send_keyboard(
-        chat_id,
+        user_id,
         f"🏠 **Главное меню**\n\n📂 Папка: `{folder}`\n\nВыберите действие:",
         [
             {"text": "📂 Выбрать папку", "payload": "choose_folder"},
@@ -155,12 +149,11 @@ def show_main_menu(chat_id):
         ]
     )
 
-def show_folder_selection(chat_id):
-    """Выбор папки"""
-    current = user_folders.get(chat_id)
+def show_folder_selection(user_id):
+    current = user_folders.get(user_id)
     if current:
         send_keyboard(
-            chat_id,
+            user_id,
             f"📂 **Текущая папка:**\n`{current}`\n\nЧто хотите сделать?",
             [
                 {"text": "📁 Изменить папку", "payload": "change_folder"},
@@ -170,7 +163,7 @@ def show_folder_selection(chat_id):
         )
     else:
         send_message(
-            chat_id,
+            user_id,
             "📁 **Укажите путь к папке с постами**\n\n"
             "📂 **Структура:**\n"
             "```\n"
@@ -184,29 +177,28 @@ def show_folder_selection(chat_id):
             "💡 ID группы в имени папки (с минусом)\n"
             "📝 Введите путь:"
         )
-        user_states[chat_id] = "waiting_folder"
+        user_states[user_id] = "waiting_folder"
 
-def publish_posts(chat_id, folder_path):
-    """Публикация постов"""
-    if user_publication_status.get(chat_id, False):
-        send_message(chat_id, "⚠️ Публикация уже запущена!")
+def publish_posts(user_id, folder_path):
+    if user_publication_status.get(user_id, False):
+        send_message(user_id, "⚠️ Публикация уже запущена!")
         return
     
     folders = get_folders(folder_path)
     if not folders:
-        send_message(chat_id, "❌ Нет папок с файлами!")
+        send_message(user_id, "❌ Нет папок с файлами!")
         return
     
-    user_publication_status[chat_id] = True
+    user_publication_status[user_id] = True
     total = len(folders)
     published = 0
     skipped = 0
     
-    send_message(chat_id, f"📁 Найдено: {total}\n🔄 Начинаю публикацию...")
+    send_message(user_id, f"📁 Найдено: {total}\n🔄 Начинаю публикацию...")
     
     for i, folder in enumerate(folders, 1):
-        if not user_publication_status.get(chat_id, True):
-            send_message(chat_id, f"⏹ Остановлено! Опубликовано: {published}/{total}")
+        if not user_publication_status.get(user_id, True):
+            send_message(user_id, f"⏹ Остановлено! Опубликовано: {published}/{total}")
             break
         
         group_id = folder.get("group_id")
@@ -226,26 +218,26 @@ def publish_posts(chat_id, folder_path):
         
         if result:
             published += 1
-            send_message(chat_id, f"✅ Пост {i}/{total} опубликован в {group_id}")
+            send_message(user_id, f"✅ Пост {i}/{total} опубликован в {group_id}")
         else:
             skipped += 1
-            send_message(chat_id, f"❌ Ошибка публикации в {group_id}")
+            send_message(user_id, f"❌ Ошибка публикации в {group_id}")
         
-        if i < total and user_publication_status.get(chat_id, True):
+        if i < total and user_publication_status.get(user_id, True):
             delay = human_delay()
             mins = delay // 60
             secs = delay % 60
-            send_message(chat_id, f"⏳ Следующий пост через {mins}м {secs}с")
+            send_message(user_id, f"⏳ Следующий пост через {mins}м {secs}с")
             time.sleep(delay)
     
-    if user_publication_status.get(chat_id, True):
+    if user_publication_status.get(user_id, True):
         send_message(
-            chat_id,
+            user_id,
             f"✅ **ГОТОВО!**\nОпубликовано: {published}/{total}\nПропущено: {skipped}"
         )
     
-    user_publication_status[chat_id] = False
-    show_main_menu(chat_id)
+    user_publication_status[user_id] = False
+    show_main_menu(user_id)
 
 # ========== ВЕБХУК ==========
 
@@ -262,96 +254,99 @@ def webhook():
         
         # ===== ИЗВЛЕКАЕМ ДАННЫЕ =====
         chat_id = None
-        text = ""
         user_id = None
+        text = ""
         
         # Прямые поля
         if 'chat_id' in data:
             chat_id = data.get('chat_id')
-        if 'text' in data:
-            text = data.get('text', '')
         if 'user_id' in data:
             user_id = data.get('user_id')
+        if 'text' in data:
+            text = data.get('text', '')
         
         # В message
         if 'message' in data:
             msg = data['message']
-            if 'chat_id' not in data and 'recipient' in msg:
+            if 'recipient' in msg:
                 chat_id = msg.get('recipient', {}).get('chat_id')
-            if 'body' in msg:
-                text = msg.get('body', {}).get('text', '')
             if 'sender' in msg:
                 user_id = msg.get('sender', {}).get('user_id')
+            if 'body' in msg:
+                text = msg.get('body', {}).get('text', '')
         
-        # Если chat_id всё ещё None
-        if not chat_id:
-            chat_id = data.get('recipient', {}).get('chat_id')
-        if not chat_id:
-            chat_id = data.get('chat', {}).get('id')
+        # Если user_id всё ещё None
+        if not user_id:
+            user_id = data.get('sender', {}).get('user_id')
+        if not user_id:
+            user_id = data.get('from', {}).get('id')
         
-        logger.info(f"💬 chat_id: {chat_id}, user_id: {user_id}, text: '{text}'")
+        logger.info(f"💬 user_id: {user_id}, chat_id: {chat_id}, text: '{text}'")
         
-        if not chat_id:
-            logger.error("❌ Нет chat_id!")
-            return jsonify({"ok": False, "error": "No chat_id"}), 400
+        if not user_id:
+            logger.error("❌ Нет user_id!")
+            return jsonify({"ok": False, "error": "No user_id"}), 400
         
         # ===== ОБРАБОТКА =====
         if text == "/start":
-            show_main_menu(chat_id)
-            user_states[chat_id] = None
+            show_main_menu(user_id)
+            user_states[user_id] = None
         
-        elif chat_id in user_states and user_states[chat_id] == "waiting_folder":
+        elif user_id in user_states and user_states[user_id] == "waiting_folder":
             folder_path = text.strip()
             if os.path.exists(folder_path):
-                user_folders[chat_id] = folder_path
-                user_states[chat_id] = None
+                user_folders[user_id] = folder_path
+                user_states[user_id] = None
                 folders = get_folders(folder_path)
-                send_message(chat_id, f"✅ Папка установлена!\nНайдено папок: {len(folders)}")
-                show_main_menu(chat_id)
+                send_message(user_id, f"✅ Папка установлена!\nНайдено папок: {len(folders)}")
+                show_main_menu(user_id)
             else:
-                send_message(chat_id, f"❌ Папка не найдена: {folder_path}")
+                send_message(user_id, f"❌ Папка не найдена: {folder_path}")
         
         elif text:
-            show_main_menu(chat_id)
+            show_main_menu(user_id)
         
         # ===== КНОПКИ =====
         if "callback_query" in data:
             cb = data["callback_query"]
-            chat_id = cb.get("chat_id")
+            user_id = cb.get("user_id")
             payload = cb.get("payload", "")
             
             logger.info(f"🔘 Нажата кнопка: {payload}")
             
+            if not user_id:
+                user_id = cb.get("from", {}).get("id")
+            
             if payload == "main_menu":
-                show_main_menu(chat_id)
+                show_main_menu(user_id)
             elif payload == "choose_folder" or payload == "change_folder":
-                show_folder_selection(chat_id)
+                show_folder_selection(user_id)
             elif payload == "start_publish":
-                folder = user_folders.get(chat_id)
+                folder = user_folders.get(user_id)
                 if folder:
-                    if user_publication_status.get(chat_id, False):
-                        send_message(chat_id, "⚠️ Публикация уже запущена!")
+                    if user_publication_status.get(user_id, False):
+                        send_message(user_id, "⚠️ Публикация уже запущена!")
                     else:
-                        send_message(chat_id, "🚀 Начинаю публикацию...")
-                        publish_posts(chat_id, folder)
+                        send_message(user_id, "🚀 Начинаю публикацию...")
+                        publish_posts(user_id, folder)
                 else:
-                    send_message(chat_id, "❌ Сначала выберите папку!")
-                    show_folder_selection(chat_id)
+                    send_message(user_id, "❌ Сначала выберите папку!")
+                    show_folder_selection(user_id)
             elif payload == "stop_publication":
-                user_publication_status[chat_id] = False
-                send_message(chat_id, "⏹ Останавливаю публикацию...")
+                user_publication_status[user_id] = False
+                send_message(user_id, "⏹ Останавливаю публикацию...")
                 time.sleep(2)
-                show_main_menu(chat_id)
+                show_main_menu(user_id)
             elif payload == "help":
                 send_message(
-                    chat_id,
+                    user_id,
                     "📖 **Помощь**\n\n"
                     "1. Выберите папку\n"
                     "2. Нажмите «Начать публикацию»\n"
                     "3. Бот опубликует посты\n\n"
                     "📂 Имя папки: название -ID_группы"
                 )
-                show_main_menu(chat_id)
+                show_main_menu(user_id)
         
         logger.info("=" * 50)
         return jsonify({"ok": True}), 200
