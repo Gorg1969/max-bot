@@ -4,15 +4,16 @@ import json
 import logging
 import os
 import time
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TOKEN = os.environ.get("TOKEN", "f9LHodD0cOJlllLX1fR59yrbAD6H3UWttud4hPu4zQOQnY2SwNo5NIJtSRA5feJviS8obhPIQ2954lD9YGNp")
+TOKEN = os.environ.get("TOKEN", "ВАШ_ТОКЕН_БОТА")
 BASE_URL = "https://platform-api2.max.ru"
-
-# ========== ОТПРАВКА ==========
 
 def send_message(chat_id, text):
     try:
@@ -29,7 +30,30 @@ def send_message(chat_id, text):
         logger.error(f"❌ Ошибка: {e}")
         return False
 
-# ========== ВЕБХУК (ПРИНИМАЕТ POST!) ==========
+def send_keyboard(chat_id, text, buttons):
+    try:
+        kb = []
+        for b in buttons:
+            kb.append([{"text": b["text"], "type": "callback", "payload": b["payload"]}])
+        
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "attachments": [{"type": "inline_keyboard", "payload": {"buttons": kb}}]
+        }
+        
+        r = requests.post(
+            f"{BASE_URL}/messages",
+            headers={"Authorization": TOKEN, "Content-Type": "application/json"},
+            json=payload,
+            timeout=10,
+            verify=False
+        )
+        logger.info(f"⌨️ Клавиатура: {r.status_code}")
+        return r.status_code == 200
+    except Exception as e:
+        logger.error(f"❌ Ошибка клавиатуры: {e}")
+        return False
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -42,25 +66,42 @@ def webhook():
         if not data:
             return jsonify({"ok": True}), 200
         
-        # Обработка сообщения
-        if "message" in data:
-            msg = data["message"]
-            chat_id = msg.get("recipient", {}).get("chat_id")
-            text = msg.get("body", {}).get("text", "")
-            
-            logger.info(f"💬 Чат: {chat_id}, Текст: {text}")
-            
-            if chat_id:
-                send_message(chat_id, f"✅ Бот получил: {text}")
+        # ===== ИЗВЛЕКАЕМ CHAT_ID =====
+        # Пробуем из разных полей
+        chat_id = data.get('chat_id')
+        if not chat_id:
+            chat_id = data.get('recipient', {}).get('chat_id')
+        if not chat_id:
+            chat_id = data.get('message', {}).get('recipient', {}).get('chat_id')
         
-        # Обработка кнопок
-        elif "callback_query" in data:
-            cb = data["callback_query"]
-            chat_id = cb.get("chat_id")
-            payload = cb.get("payload", "")
-            logger.info(f"🔘 Кнопка: {payload}")
-            if chat_id:
-                send_message(chat_id, f"✅ Нажата кнопка: {payload}")
+        # ===== ИЗВЛЕКАЕМ ТЕКСТ =====
+        text = data.get('body', {}).get('text', '')
+        if not text:
+            text = data.get('message', {}).get('body', {}).get('text', '')
+        
+        # ===== ИЗВЛЕКАЕМ USER_ID =====
+        user_id = data.get('user_id')
+        if not user_id:
+            user_id = data.get('sender', {}).get('user_id')
+        if not user_id:
+            user_id = data.get('message', {}).get('sender', {}).get('user_id')
+        
+        logger.info(f"💬 chat_id: {chat_id}, user_id: {user_id}, text: {text}")
+        
+        if chat_id:
+            # Отвечаем на любое сообщение
+            send_message(chat_id, f"✅ Бот получил: {text}")
+            
+            if text == "/start":
+                send_keyboard(
+                    chat_id,
+                    "🏠 **Главное меню**\n\nВыберите действие:",
+                    [
+                        {"text": "📂 Выбрать папку", "payload": "choose_folder"},
+                        {"text": "▶️ Начать публикацию", "payload": "start_publish"},
+                        {"text": "ℹ️ Помощь", "payload": "help"}
+                    ]
+                )
         
         logger.info("=" * 50)
         return jsonify({"ok": True}), 200
@@ -68,8 +109,6 @@ def webhook():
     except Exception as e:
         logger.error(f"❌ ОШИБКА: {e}")
         return jsonify({"ok": False}), 500
-
-# ========== СТРАНИЦЫ ==========
 
 @app.route('/')
 def index():
