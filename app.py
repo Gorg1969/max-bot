@@ -7,6 +7,10 @@ import time
 import re
 import random
 from pathlib import Path
+import urllib3
+
+# ОТКЛЮЧАЕМ ПРЕДУПРЕЖДЕНИЯ SSL
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 
@@ -21,7 +25,7 @@ user_states = {}
 user_folders = {}
 user_publication_status = {}
 
-# ========== ОТПРАВКА СООБЩЕНИЙ ==========
+# ========== ОТПРАВКА СООБЩЕНИЙ (С ОТКЛЮЧЕНИЕМ SSL) ==========
 
 def send_message_to_chat(chat_id, text):
     try:
@@ -29,7 +33,8 @@ def send_message_to_chat(chat_id, text):
             f"{BASE_URL}/messages",
             headers={"Authorization": TOKEN, "Content-Type": "application/json"},
             json={"chat_id": chat_id, "text": text},
-            timeout=10
+            timeout=10,
+            verify=False  # ОТКЛЮЧАЕМ SSL!
         )
         logger.info(f"   Отправка: {r.status_code}")
         return r.status_code == 200
@@ -60,7 +65,8 @@ def send_keyboard_to_chat(chat_id, text, buttons):
             f"{BASE_URL}/messages",
             headers={"Authorization": TOKEN, "Content-Type": "application/json"},
             json=payload,
-            timeout=10
+            timeout=10,
+            verify=False  # ОТКЛЮЧАЕМ SSL!
         )
         logger.info(f"   Клавиатура: {r.status_code}")
         return r.status_code == 200
@@ -139,7 +145,8 @@ def setup_webhook():
         requests.delete(
             "https://platform-api2.max.ru/subscriptions",
             headers={"Authorization": token},
-            timeout=10
+            timeout=10,
+            verify=False  # ОТКЛЮЧАЕМ SSL!
         )
         
         # Настраиваем новую
@@ -147,7 +154,8 @@ def setup_webhook():
             "https://platform-api2.max.ru/subscriptions",
             headers={"Authorization": token, "Content-Type": "application/json"},
             json={"url": webhook_url},
-            timeout=10
+            timeout=10,
+            verify=False  # ОТКЛЮЧАЕМ SSL!
         )
         return f"✅ Статус: {r.status_code}\n✅ Ответ: {r.text}"
     except Exception as e:
