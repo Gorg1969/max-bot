@@ -13,7 +13,7 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TOKEN = os.environ.get("TOKEN", "ВАШ_ТОКЕН_БОТА")
+TOKEN = os.environ.get("TOKEN", "f9LHodD0cOJlllLX1fR59yrbAD6H3UWttud4hPu4zQOQnY2SwNo5NIJtSRA5feJviS8obhPIQ2954lD9YGNp")
 BASE_URL = "https://platform-api2.max.ru"
 
 # Хранилища
