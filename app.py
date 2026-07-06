@@ -55,14 +55,12 @@ def send_message(user_id, text):
 def send_keyboard(user_id, text, buttons):
     """
     Отправка клавиатуры в личный чат по user_id
-    ПРАВИЛЬНАЯ структура: buttons = [[{...}, {...}], [{...}]]
+    ПРАВИЛЬНАЯ структура: каждая кнопка в отдельном ряду
     """
     try:
-        # ПРАВИЛЬНАЯ структура клавиатуры
-        # Каждый ряд кнопок - это отдельный список
+        # ПРАВИЛЬНАЯ СТРУКТУРА: каждая кнопка — отдельный ряд (массив из одной кнопки)
         keyboard_rows = []
         for button in buttons:
-            # Каждая кнопка - объект в строке
             keyboard_rows.append([{
                 "text": button["text"],
                 "type": "callback",
@@ -75,7 +73,7 @@ def send_keyboard(user_id, text, buttons):
             "attachments": [{
                 "type": "inline_keyboard",
                 "payload": {
-                    "buttons": keyboard_rows  # <--- ПРАВИЛЬНАЯ СТРУКТУРА
+                    "buttons": keyboard_rows
                 }
             }]
         }
@@ -305,11 +303,18 @@ def webhook():
         
         logger.info(f"💬 user_id: {user_id}, chat_id: {chat_id}, text: '{text}'")
         
-        # ===== ОБРАБОТКА ТОЛЬКО СООБЩЕНИЙ =====
-        # Проверяем, что это именно сообщение (не служебное событие)
-        is_message = 'message' in data and user_id is not None
+        if not user_id:
+            logger.error("❌ Нет user_id!")
+            return jsonify({"ok": False, "error": "No user_id"}), 400
         
-        if is_message:
+        # ===== ОБРАБОТКА ТОЛЬКО СООБЩЕНИЙ С ТЕКСТОМ =====
+        is_message_with_text = (
+            'message' in data 
+            and isinstance(text, str) 
+            and text.strip() != ''
+        )
+        
+        if is_message_with_text:
             logger.info(f"📨 Обработка сообщения от {user_id}")
             
             if text == "/start":
@@ -326,18 +331,16 @@ def webhook():
                     show_main_menu(user_id)
                 else:
                     send_message(user_id, f"❌ Папка не найдена: {folder_path}")
-            
-            elif text:
-                show_main_menu(user_id)
         
         # ===== ОБРАБОТКА КНОПОК (callback_query) =====
         if "callback_query" in data:
             cb = data["callback_query"]
-            user_id = cb.get("user_id")
+            user_id = cb.get("user_id") or cb.get("from", {}).get("id")
             payload = cb.get("payload", "")
             
             if not user_id:
-                user_id = cb.get("from", {}).get("id")
+                logger.error("❌ Нет user_id в callback!")
+                return jsonify({"ok": True}), 200
             
             logger.info(f"🔘 Нажата кнопка: {payload} от {user_id}")
             
