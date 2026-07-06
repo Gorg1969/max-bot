@@ -34,7 +34,7 @@ user_states = {}
 user_folders = {}
 user_publication_status = {}
 
-# ========== ОТПРАВКА (ЧЕРЕЗ user_id) ==========
+# ========== ОТПРАВКА ==========
 
 def send_message(user_id, text):
     """Отправка сообщения в личный чат по user_id"""
@@ -53,20 +53,35 @@ def send_message(user_id, text):
         return False
 
 def send_keyboard(user_id, text, buttons):
-    """Отправка клавиатуры в личный чат по user_id"""
+    """
+    Отправка клавиатуры в личный чат по user_id
+    ПРАВИЛЬНАЯ структура: buttons = [[{...}, {...}], [{...}]]
+    """
     try:
-        kb = []
-        for b in buttons:
-            kb.append([{"text": b["text"], "type": "callback", "payload": b["payload"]}])
+        # ПРАВИЛЬНАЯ структура клавиатуры
+        # Каждый ряд кнопок - это отдельный список
+        keyboard_rows = []
+        for button in buttons:
+            # Каждая кнопка - объект в строке
+            keyboard_rows.append([{
+                "text": button["text"],
+                "type": "callback",
+                "payload": button["payload"]
+            }])
         
         payload = {
             "user_id": user_id,
             "text": text,
             "attachments": [{
                 "type": "inline_keyboard",
-                "payload": {"buttons": kb}
+                "payload": {
+                    "buttons": keyboard_rows  # <--- ПРАВИЛЬНАЯ СТРУКТУРА
+                }
             }]
         }
+        
+        # ЛОГИРУЕМ структуру для проверки
+        logger.info(f"🔍 Отправляемая клавиатура: {json.dumps(payload, ensure_ascii=False)}")
         
         r = requests.post(
             f"{BASE_URL}/messages",
@@ -82,7 +97,7 @@ def send_keyboard(user_id, text, buttons):
         return False
 
 def send_to_group(chat_id, text):
-    """Отправка в группу (используем chat_id)"""
+    """Отправка в группу"""
     try:
         r = requests.post(
             f"{BASE_URL}/messages",
@@ -137,6 +152,7 @@ def human_delay():
 # ========== МЕНЮ ==========
 
 def show_main_menu(user_id):
+    """Главное меню"""
     folder = user_folders.get(user_id, "Не выбрана")
     send_keyboard(
         user_id,
@@ -150,6 +166,7 @@ def show_main_menu(user_id):
     )
 
 def show_folder_selection(user_id):
+    """Выбор папки"""
     current = user_folders.get(user_id)
     if current:
         send_keyboard(
@@ -180,6 +197,7 @@ def show_folder_selection(user_id):
         user_states[user_id] = "waiting_folder"
 
 def publish_posts(user_id, folder_path):
+    """Публикация постов"""
     if user_publication_status.get(user_id, False):
         send_message(user_id, "⚠️ Публикация уже запущена!")
         return
@@ -252,26 +270,30 @@ def webhook():
         if not data:
             return jsonify({"ok": True}), 200
         
+        # ===== ПРОВЕРЯЕМ ТИП СОБЫТИЯ =====
+        update_type = data.get('update_type', '')
+        logger.info(f"📌 Тип события: {update_type}")
+        
         # ===== ИЗВЛЕКАЕМ ДАННЫЕ =====
-        chat_id = None
         user_id = None
+        chat_id = None
         text = ""
         
         # Прямые поля
-        if 'chat_id' in data:
-            chat_id = data.get('chat_id')
         if 'user_id' in data:
             user_id = data.get('user_id')
+        if 'chat_id' in data:
+            chat_id = data.get('chat_id')
         if 'text' in data:
             text = data.get('text', '')
         
-        # В message
+        # В message (ТОЛЬКО если это сообщение)
         if 'message' in data:
             msg = data['message']
-            if 'recipient' in msg:
-                chat_id = msg.get('recipient', {}).get('chat_id')
             if 'sender' in msg:
                 user_id = msg.get('sender', {}).get('user_id')
+            if 'recipient' in msg:
+                chat_id = msg.get('recipient', {}).get('chat_id')
             if 'body' in msg:
                 text = msg.get('body', {}).get('text', '')
         
@@ -283,39 +305,41 @@ def webhook():
         
         logger.info(f"💬 user_id: {user_id}, chat_id: {chat_id}, text: '{text}'")
         
-        if not user_id:
-            logger.error("❌ Нет user_id!")
-            return jsonify({"ok": False, "error": "No user_id"}), 400
+        # ===== ОБРАБОТКА ТОЛЬКО СООБЩЕНИЙ =====
+        # Проверяем, что это именно сообщение (не служебное событие)
+        is_message = 'message' in data and user_id is not None
         
-        # ===== ОБРАБОТКА =====
-        if text == "/start":
-            show_main_menu(user_id)
-            user_states[user_id] = None
-        
-        elif user_id in user_states and user_states[user_id] == "waiting_folder":
-            folder_path = text.strip()
-            if os.path.exists(folder_path):
-                user_folders[user_id] = folder_path
-                user_states[user_id] = None
-                folders = get_folders(folder_path)
-                send_message(user_id, f"✅ Папка установлена!\nНайдено папок: {len(folders)}")
+        if is_message:
+            logger.info(f"📨 Обработка сообщения от {user_id}")
+            
+            if text == "/start":
                 show_main_menu(user_id)
-            else:
-                send_message(user_id, f"❌ Папка не найдена: {folder_path}")
+                user_states[user_id] = None
+            
+            elif user_id in user_states and user_states[user_id] == "waiting_folder":
+                folder_path = text.strip()
+                if os.path.exists(folder_path):
+                    user_folders[user_id] = folder_path
+                    user_states[user_id] = None
+                    folders = get_folders(folder_path)
+                    send_message(user_id, f"✅ Папка установлена!\nНайдено папок: {len(folders)}")
+                    show_main_menu(user_id)
+                else:
+                    send_message(user_id, f"❌ Папка не найдена: {folder_path}")
+            
+            elif text:
+                show_main_menu(user_id)
         
-        elif text:
-            show_main_menu(user_id)
-        
-        # ===== КНОПКИ =====
+        # ===== ОБРАБОТКА КНОПОК (callback_query) =====
         if "callback_query" in data:
             cb = data["callback_query"]
             user_id = cb.get("user_id")
             payload = cb.get("payload", "")
             
-            logger.info(f"🔘 Нажата кнопка: {payload}")
-            
             if not user_id:
                 user_id = cb.get("from", {}).get("id")
+            
+            logger.info(f"🔘 Нажата кнопка: {payload} от {user_id}")
             
             if payload == "main_menu":
                 show_main_menu(user_id)
