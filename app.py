@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ========== КОНФИГ ==========
-TOKEN = os.environ.get("TOKEN", "YOUR_TOKEN_HERE")
+TOKEN = os.environ.get("TOKEN", "f9LHodD0cOJlllLX1fR59yrbAD6H3UWttud4hPu4zQOQnY2SwNo5NIJtSRA5feJviS8obhPIQ2954lD9YGNp")
 BASE_URL = "https://platform-api2.max.ru"
 
 # ПУТЬ К СЕРТИФИКАТУ
