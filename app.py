@@ -39,7 +39,6 @@ user_publication_status = {}
 def send_message(chat_id, text, parse_mode="Markdown"):
     """Отправка сообщения в чат по chat_id"""
     try:
-        # Правильный формат для MAX API
         payload = {
             "chat_id": chat_id,
             "text": text
@@ -54,62 +53,65 @@ def send_message(chat_id, text, parse_mode="Markdown"):
             timeout=10,
             verify=CERT_PATH if USE_CERT else False
         )
-        logger.info(f"📤 Отправка сообщения: {r.status_code} - {r.text[:200]}")
+        logger.info(f"📤 Отправка: {r.status_code} - {r.text[:100]}")
         return r.status_code == 200
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
         return False
 
 def send_keyboard(chat_id, text, buttons):
-    """Отправка клавиатуры в чат по chat_id"""
+    """Отправка клавиатуры в чат по chat_id с тестированием разных форматов"""
     try:
         # Формируем клавиатуру
-        keyboard = []
+        keyboard_buttons = []
         for button in buttons:
-            keyboard.append([{
+            keyboard_buttons.append([{
                 "text": button["text"],
                 "type": "callback",
                 "payload": button["payload"]
             }])
 
-        # Правильный формат для MAX API
-        payload = {
+        # ПРОБУЕМ РАЗНЫЕ ФОРМАТЫ ПО ОЧЕРЕДИ
+        
+        # Формат 1: Стандартный MAX формат (как в документации)
+        payload1 = {
             "chat_id": chat_id,
             "text": text,
             "parse_mode": "Markdown",
             "keyboard": {
-                "buttons": keyboard,
-                "type": "inline",
-                "resize_keyboard": True
+                "buttons": keyboard_buttons,
+                "type": "inline"
             }
         }
-
-        logger.info(f"🔍 Отправка клавиатуры: {json.dumps(payload, ensure_ascii=False)[:300]}")
-
-        r = requests.post(
+        
+        logger.info(f"🔍 Формат 1: {json.dumps(payload1, ensure_ascii=False)[:300]}")
+        
+        r1 = requests.post(
             f"{BASE_URL}/messages",
             headers={"Authorization": TOKEN, "Content-Type": "application/json"},
-            json=payload,
+            json=payload1,
             timeout=10,
             verify=CERT_PATH if USE_CERT else False
         )
         
-        logger.info(f"⌨️ Ответ клавиатуры: {r.status_code} - {r.text[:200]}")
-        
-        if r.status_code == 200:
+        if r1.status_code == 200:
+            logger.info("✅ Формат 1 работает!")
             return True
         
-        # Если не получилось, пробуем через attachments
-        logger.info("🔍 Пробую альтернативный формат через attachments")
+        logger.warning(f"❌ Формат 1 не работает: {r1.status_code} - {r1.text}")
+        
+        # Формат 2: Через attachments
         payload2 = {
             "chat_id": chat_id,
             "text": text,
             "parse_mode": "Markdown",
             "attachments": [{
                 "type": "inline_keyboard",
-                "payload": {"buttons": keyboard}
+                "payload": {"buttons": keyboard_buttons}
             }]
         }
+        
+        logger.info(f"🔍 Формат 2: {json.dumps(payload2, ensure_ascii=False)[:300]}")
         
         r2 = requests.post(
             f"{BASE_URL}/messages",
@@ -119,32 +121,87 @@ def send_keyboard(chat_id, text, buttons):
             verify=CERT_PATH if USE_CERT else False
         )
         
-        logger.info(f"⌨️ Ответ альтернативный: {r2.status_code} - {r2.text[:200]}")
-        return r2.status_code == 200
+        if r2.status_code == 200:
+            logger.info("✅ Формат 2 работает!")
+            return True
+        
+        logger.warning(f"❌ Формат 2 не работает: {r2.status_code} - {r2.text}")
+        
+        # Формат 3: Простая клавиатура (без inline)
+        payload3 = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "keyboard": {
+                "buttons": keyboard_buttons,
+                "type": "keyboard"
+            }
+        }
+        
+        logger.info(f"🔍 Формат 3: {json.dumps(payload3, ensure_ascii=False)[:300]}")
+        
+        r3 = requests.post(
+            f"{BASE_URL}/messages",
+            headers={"Authorization": TOKEN, "Content-Type": "application/json"},
+            json=payload3,
+            timeout=10,
+            verify=CERT_PATH if USE_CERT else False
+        )
+        
+        if r3.status_code == 200:
+            logger.info("✅ Формат 3 работает!")
+            return True
+        
+        logger.warning(f"❌ Формат 3 не работает: {r3.status_code} - {r3.text}")
+        
+        # Формат 4: Только клавиатура без текста
+        payload4 = {
+            "chat_id": chat_id,
+            "text": text,
+            "keyboard": {
+                "buttons": keyboard_buttons,
+                "type": "inline"
+            }
+        }
+        
+        logger.info(f"🔍 Формат 4: {json.dumps(payload4, ensure_ascii=False)[:300]}")
+        
+        r4 = requests.post(
+            f"{BASE_URL}/messages",
+            headers={"Authorization": TOKEN, "Content-Type": "application/json"},
+            json=payload4,
+            timeout=10,
+            verify=CERT_PATH if USE_CERT else False
+        )
+        
+        if r4.status_code == 200:
+            logger.info("✅ Формат 4 работает!")
+            return True
+        
+        logger.warning(f"❌ Формат 4 не работает: {r4.status_code} - {r4.text}")
+        
+        # Если ничего не работает, отправляем обычное сообщение
+        logger.error("❌ Все форматы клавиатуры не работают! Отправляю обычное сообщение.")
+        return send_message(chat_id, text + "\n\n(Клавиатура не поддерживается)")
         
     except Exception as e:
         logger.error(f"❌ Ошибка клавиатуры: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False
 
 def send_to_group(chat_id, text):
     """Отправка в группу"""
     try:
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown"
-        }
         r = requests.post(
             f"{BASE_URL}/messages",
             headers={"Authorization": TOKEN, "Content-Type": "application/json"},
-            json=payload,
+            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
             timeout=10,
             verify=CERT_PATH if USE_CERT else False
         )
-        logger.info(f"📤 Отправка в группу {chat_id}: {r.status_code}")
         return r.status_code == 200
-    except Exception as e:
-        logger.error(f"❌ Ошибка отправки в группу: {e}")
+    except:
         return False
 
 # ========== РАБОТА С ПАПКАМИ ==========
@@ -203,6 +260,18 @@ def show_main_menu(chat_id):
     )
     if not success:
         logger.error("❌ Не удалось отправить клавиатуру!")
+        # Отправляем простое сообщение с инструкцией
+        send_message(
+            chat_id,
+            "🏠 **Главное меню**\n\n"
+            "📂 Папка: `" + folder + "`\n\n"
+            "К сожалению, клавиатура не поддерживается.\n"
+            "Используйте команды:\n"
+            "/choose - выбрать папку\n"
+            "/start_publish - начать публикацию\n"
+            "/stop - остановить\n"
+            "/help - помощь"
+        )
     return success
 
 def show_folder_selection(chat_id):
@@ -339,19 +408,13 @@ def webhook():
             if user_id and chat_id and payload:
                 return handle_callback(user_id, chat_id, payload)
 
-        # Извлекаем из сообщения (как в вашем логе)
+        # Извлекаем из сообщения
         if 'message' in data:
             msg = data['message']
-            
-            # user_id отправителя
             if 'sender' in msg:
                 user_id = msg['sender'].get('user_id')
-            
-            # chat_id получателя
             if 'recipient' in msg:
                 chat_id = msg['recipient'].get('chat_id')
-            
-            # текст сообщения
             if 'body' in msg:
                 text = msg['body'].get('text', '')
 
@@ -373,7 +436,7 @@ def webhook():
         if text:
             logger.info(f"📨 Обработка сообщения от {user_id}: {text[:50]}")
 
-            if text == "/start":
+            if text == "/start" or text == "start":
                 show_main_menu(chat_id)
                 user_states[user_id] = None
                 return jsonify({"ok": True}), 200
@@ -465,15 +528,12 @@ def setup_webhook():
     webhook_url = "https://max-bot-ulzl.onrender.com/webhook"
 
     try:
-        # Удаляем старую подписку
         requests.delete(
             f"{BASE_URL}/subscriptions",
             headers={"Authorization": token},
             timeout=10,
             verify=CERT_PATH if USE_CERT else False
         )
-        
-        # Создаем новую подписку
         r = requests.post(
             f"{BASE_URL}/subscriptions",
             headers={"Authorization": token, "Content-Type": "application/json"},
