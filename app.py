@@ -60,9 +60,8 @@ def send_message(chat_id, text, parse_mode="Markdown"):
         return False
 
 def send_keyboard(chat_id, text, buttons):
-    """Отправка клавиатуры в чат по chat_id с тестированием разных форматов"""
+    """Отправка клавиатуры в чат по chat_id"""
     try:
-        # Формируем клавиатуру
         keyboard_buttons = []
         for button in buttons:
             keyboard_buttons.append([{
@@ -71,10 +70,8 @@ def send_keyboard(chat_id, text, buttons):
                 "payload": button["payload"]
             }])
 
-        # ПРОБУЕМ РАЗНЫЕ ФОРМАТЫ ПО ОЧЕРЕДИ
-        
-        # Формат 1: Стандартный MAX формат (как в документации)
-        payload1 = {
+        # Пробуем основной формат
+        payload = {
             "chat_id": chat_id,
             "text": text,
             "parse_mode": "Markdown",
@@ -83,24 +80,24 @@ def send_keyboard(chat_id, text, buttons):
                 "type": "inline"
             }
         }
-        
-        logger.info(f"🔍 Формат 1: {json.dumps(payload1, ensure_ascii=False)[:300]}")
-        
-        r1 = requests.post(
+
+        logger.info(f"🔍 Отправка клавиатуры: {json.dumps(payload, ensure_ascii=False)[:300]}")
+
+        r = requests.post(
             f"{BASE_URL}/messages",
             headers={"Authorization": TOKEN, "Content-Type": "application/json"},
-            json=payload1,
+            json=payload,
             timeout=10,
             verify=CERT_PATH if USE_CERT else False
         )
         
-        if r1.status_code == 200:
-            logger.info("✅ Формат 1 работает!")
+        if r.status_code == 200:
+            logger.info("✅ Клавиатура отправлена!")
             return True
         
-        logger.warning(f"❌ Формат 1 не работает: {r1.status_code} - {r1.text}")
+        logger.warning(f"❌ Ошибка: {r.status_code} - {r.text}")
         
-        # Формат 2: Через attachments
+        # Если не работает, пробуем через attachments
         payload2 = {
             "chat_id": chat_id,
             "text": text,
@@ -111,8 +108,6 @@ def send_keyboard(chat_id, text, buttons):
             }]
         }
         
-        logger.info(f"🔍 Формат 2: {json.dumps(payload2, ensure_ascii=False)[:300]}")
-        
         r2 = requests.post(
             f"{BASE_URL}/messages",
             headers={"Authorization": TOKEN, "Content-Type": "application/json"},
@@ -122,72 +117,15 @@ def send_keyboard(chat_id, text, buttons):
         )
         
         if r2.status_code == 200:
-            logger.info("✅ Формат 2 работает!")
+            logger.info("✅ Клавиатура отправлена (через attachments)!")
             return True
         
-        logger.warning(f"❌ Формат 2 не работает: {r2.status_code} - {r2.text}")
-        
-        # Формат 3: Простая клавиатура (без inline)
-        payload3 = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown",
-            "keyboard": {
-                "buttons": keyboard_buttons,
-                "type": "keyboard"
-            }
-        }
-        
-        logger.info(f"🔍 Формат 3: {json.dumps(payload3, ensure_ascii=False)[:300]}")
-        
-        r3 = requests.post(
-            f"{BASE_URL}/messages",
-            headers={"Authorization": TOKEN, "Content-Type": "application/json"},
-            json=payload3,
-            timeout=10,
-            verify=CERT_PATH if USE_CERT else False
-        )
-        
-        if r3.status_code == 200:
-            logger.info("✅ Формат 3 работает!")
-            return True
-        
-        logger.warning(f"❌ Формат 3 не работает: {r3.status_code} - {r3.text}")
-        
-        # Формат 4: Только клавиатура без текста
-        payload4 = {
-            "chat_id": chat_id,
-            "text": text,
-            "keyboard": {
-                "buttons": keyboard_buttons,
-                "type": "inline"
-            }
-        }
-        
-        logger.info(f"🔍 Формат 4: {json.dumps(payload4, ensure_ascii=False)[:300]}")
-        
-        r4 = requests.post(
-            f"{BASE_URL}/messages",
-            headers={"Authorization": TOKEN, "Content-Type": "application/json"},
-            json=payload4,
-            timeout=10,
-            verify=CERT_PATH if USE_CERT else False
-        )
-        
-        if r4.status_code == 200:
-            logger.info("✅ Формат 4 работает!")
-            return True
-        
-        logger.warning(f"❌ Формат 4 не работает: {r4.status_code} - {r4.text}")
-        
-        # Если ничего не работает, отправляем обычное сообщение
-        logger.error("❌ Все форматы клавиатуры не работают! Отправляю обычное сообщение.")
-        return send_message(chat_id, text + "\n\n(Клавиатура не поддерживается)")
+        logger.error(f"❌ Все форматы не работают! Отправляю обычное сообщение.")
+        send_message(chat_id, text + "\n\n(Клавиатура не поддерживается)")
+        return False
         
     except Exception as e:
         logger.error(f"❌ Ошибка клавиатуры: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
         return False
 
 def send_to_group(chat_id, text):
@@ -248,7 +186,7 @@ def human_delay():
 def show_main_menu(chat_id):
     """Главное меню"""
     folder = user_folders.get(chat_id, "Не выбрана")
-    success = send_keyboard(
+    send_keyboard(
         chat_id,
         f"🏠 **Главное меню**\n\n📂 Папка: `{folder}`\n\nВыберите действие:",
         [
@@ -258,21 +196,6 @@ def show_main_menu(chat_id):
             {"text": "ℹ️ Помощь", "payload": "help"}
         ]
     )
-    if not success:
-        logger.error("❌ Не удалось отправить клавиатуру!")
-        # Отправляем простое сообщение с инструкцией
-        send_message(
-            chat_id,
-            "🏠 **Главное меню**\n\n"
-            "📂 Папка: `" + folder + "`\n\n"
-            "К сожалению, клавиатура не поддерживается.\n"
-            "Используйте команды:\n"
-            "/choose - выбрать папку\n"
-            "/start_publish - начать публикацию\n"
-            "/stop - остановить\n"
-            "/help - помощь"
-        )
-    return success
 
 def show_folder_selection(chat_id):
     """Выбор папки"""
@@ -381,8 +304,9 @@ def webhook():
         chat_id = None
         text = ""
         payload = ""
+        event_type = None
 
-        # Проверяем системные события
+        # 1. Проверяем системные события
         if 'event' in data:
             event_type = data.get('event')
             chat_id = data.get('chat_id')
@@ -393,10 +317,9 @@ def webhook():
                 show_main_menu(chat_id)
             elif event_type == 'bot_stopped' and chat_id:
                 send_message(chat_id, "⏹ Бот остановлен. Для запуска используйте /start")
-            
             return jsonify({"ok": True}), 200
 
-        # Извлекаем из callback_query (кнопки)
+        # 2. Проверяем callback_query (нажатия кнопок)
         if 'callback_query' in data:
             cb = data['callback_query']
             user_id = cb.get('user_id') or cb.get('from', {}).get('id')
@@ -406,9 +329,10 @@ def webhook():
             logger.info(f"🔘 Нажата кнопка: payload='{payload}', user_id={user_id}, chat_id={chat_id}")
             
             if user_id and chat_id and payload:
-                return handle_callback(user_id, chat_id, payload)
+                handle_callback(user_id, chat_id, payload)
+                return jsonify({"ok": True}), 200
 
-        # Извлекаем из сообщения
+        # 3. Извлекаем из объекта message
         if 'message' in data:
             msg = data['message']
             if 'sender' in msg:
@@ -417,31 +341,47 @@ def webhook():
                 chat_id = msg['recipient'].get('chat_id')
             if 'body' in msg:
                 text = msg['body'].get('text', '')
-
-        # Если не нашли через message, пробуем прямые поля
+        
+        # 4. Если есть прямой chat_id на верхнем уровне (как в вашем логе)
+        if 'chat_id' in data and not chat_id:
+            chat_id = data.get('chat_id')
+            logger.info(f"📌 Найден chat_id на верхнем уровне: {chat_id}")
+        
+        # 5. Если есть user на верхнем уровне
+        if 'user' in data and not user_id:
+            user_data = data.get('user', {})
+            user_id = user_data.get('user_id')
+            logger.info(f"📌 Найден user на верхнем уровне: {user_id}")
+        
+        # 6. Прямые поля
         if not user_id and 'user_id' in data:
             user_id = data.get('user_id')
-        if not chat_id and 'chat_id' in data:
-            chat_id = data.get('chat_id')
         if not text and 'text' in data:
             text = data.get('text', '')
 
+        # 7. Если есть только chat_id, а user_id нет - используем chat_id как user_id
+        if chat_id and not user_id:
+            user_id = chat_id
+            logger.info(f"🔄 Использую chat_id как user_id: {user_id}")
+
         logger.info(f"💬 Итог: user_id={user_id}, chat_id={chat_id}, text='{text}'")
 
-        if not user_id or not chat_id:
-            logger.error("❌ Нет user_id или chat_id!")
-            return jsonify({"ok": False, "error": "Missing IDs"}), 400
+        # Если нет chat_id - игнорируем
+        if not chat_id:
+            logger.warning("⚠️ Нет chat_id, пропускаем")
+            return jsonify({"ok": True}), 200
 
         # ===== ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ =====
         if text:
             logger.info(f"📨 Обработка сообщения от {user_id}: {text[:50]}")
 
-            if text == "/start" or text == "start":
+            if text == "/start":
                 show_main_menu(chat_id)
-                user_states[user_id] = None
+                if user_id:
+                    user_states[user_id] = None
                 return jsonify({"ok": True}), 200
 
-            if user_id in user_states and user_states[user_id] == "waiting_folder":
+            if user_id and user_id in user_states and user_states[user_id] == "waiting_folder":
                 folder_path = text.strip()
                 if os.path.exists(folder_path):
                     user_folders[user_id] = folder_path
