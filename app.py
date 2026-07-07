@@ -30,37 +30,11 @@ user_states = {}
 user_folders = {}
 user_publication_status = {}
 
-# ========== ДИАГНОСТИКА ==========
-
-def test_api_connection():
-    """Тестирование подключения к API"""
-    try:
-        # Пробуем отправить тестовое сообщение самому себе
-        test_payload = {
-            "chat_id": 473730202,  # Ваш chat_id из логов
-            "text": "🔍 Тестовое сообщение от бота"
-        }
-        
-        r = requests.post(
-            f"{BASE_URL}/messages",
-            headers={"Authorization": TOKEN, "Content-Type": "application/json"},
-            json=test_payload,
-            timeout=10,
-            verify=CERT_PATH if USE_CERT else False
-        )
-        
-        logger.info(f"🔍 Тест API: {r.status_code} - {r.text}")
-        return r.status_code == 200
-    except Exception as e:
-        logger.error(f"❌ Ошибка теста API: {e}")
-        return False
-
 # ========== ОТПРАВКА ==========
 
 def send_message(chat_id, text, parse_mode="Markdown"):
     """Отправка сообщения в чат по chat_id"""
     try:
-        # Пробуем отправить как есть
         payload = {
             "chat_id": chat_id,
             "text": text
@@ -117,7 +91,7 @@ def send_keyboard(chat_id, text, buttons):
                 "payload": button["payload"]
             }])
 
-        # Пробуем формат 1: через attachments
+        # Пробуем формат через attachments
         payload = {
             "chat_id": chat_id,
             "text": text,
@@ -130,7 +104,7 @@ def send_keyboard(chat_id, text, buttons):
             }]
         }
 
-        logger.info(f"🔍 Отправка клавиатуры...")
+        logger.info(f"🔍 Отправка клавиатуры в chat_id={chat_id}")
 
         r = requests.post(
             f"{BASE_URL}/messages",
@@ -146,7 +120,7 @@ def send_keyboard(chat_id, text, buttons):
         
         logger.error(f"❌ Ошибка клавиатуры: {r.status_code} - {r.text}")
         
-        # Пробуем формат 2: без parse_mode
+        # Пробуем без parse_mode
         payload2 = {
             "chat_id": chat_id,
             "text": text,
@@ -352,6 +326,43 @@ def publish_posts(chat_id, folder_path):
 
 # ========== ВЕБХУК ==========
 
+def extract_ids_from_data(data):
+    """Универсальное извлечение user_id и chat_id из любого формата данных"""
+    user_id = None
+    chat_id = None
+    text = ""
+    
+    # Рекурсивный поиск по всем полям
+    def search(obj, path=""):
+        nonlocal user_id, chat_id, text
+        
+        if isinstance(obj, dict):
+            # Ищем chat_id
+            if 'chat_id' in obj and obj['chat_id']:
+                chat_id = obj['chat_id']
+                logger.info(f"🔍 Найден chat_id: {chat_id} в {path}")
+            
+            # Ищем user_id
+            if 'user_id' in obj and obj['user_id']:
+                user_id = obj['user_id']
+                logger.info(f"🔍 Найден user_id: {user_id} в {path}")
+            
+            # Ищем текст
+            if 'text' in obj and obj['text']:
+                text = obj['text']
+                logger.info(f"🔍 Найден текст: {text[:30]}... в {path}")
+            
+            # Рекурсивно ищем во всех значениях
+            for key, value in obj.items():
+                search(value, f"{path}.{key}")
+                
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                search(item, f"{path}[{i}]")
+    
+    search(data)
+    return user_id, chat_id, text
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -363,67 +374,26 @@ def webhook():
         if not data:
             return jsonify({"ok": True}), 200
 
-        # ===== ИЗВЛЕКАЕМ ДАННЫЕ =====
-        user_id = None
-        chat_id = None
-        text = ""
-        payload = ""
-
-        # 1. Проверяем системные события
-        if 'event' in data or 'update_type' in data:
-            event_type = data.get('event') or data.get('update_type', '')
-            chat_id = data.get('chat_id')
-            
-            # Если есть user в данных
-            if 'user' in data and not user_id:
-                user_data = data.get('user', {})
-                user_id = user_data.get('user_id')
-            
-            logger.info(f"⚙️ Событие: {event_type}, chat_id: {chat_id}, user_id: {user_id}")
-            
-            # Отвечаем на системные события
-            if chat_id:
-                if event_type == 'bot_started':
-                    send_message(chat_id, "🤖 Бот запущен! Используйте /start")
-                    show_main_menu(chat_id)
-                elif event_type == 'bot_stopped':
-                    send_message(chat_id, "⏹ Бот остановлен. Для запуска используйте /start")
-            
-            return jsonify({"ok": True}), 200
-
-        # 2. Проверяем callback_query (нажатия кнопок)
-        if 'callback_query' in data:
-            cb = data['callback_query']
-            user_id = cb.get('user_id') or cb.get('from', {}).get('id')
-            chat_id = cb.get('chat_id') or data.get('chat_id')
-            payload = cb.get('payload', '')
-            
-            logger.info(f"🔘 Нажата кнопка: payload='{payload}', user_id={user_id}, chat_id={chat_id}")
-            
-            if user_id and chat_id and payload:
-                handle_callback(user_id, chat_id, payload)
-                return jsonify({"ok": True}), 200
-
-        # 3. Извлекаем из объекта message
-        if 'message' in data:
-            msg = data['message']
-            if 'sender' in msg:
-                user_id = msg['sender'].get('user_id')
-            if 'recipient' in msg:
-                chat_id = msg['recipient'].get('chat_id')
-            if 'body' in msg:
-                text = msg['body'].get('text', '')
+        # ===== УНИВЕРСАЛЬНОЕ ИЗВЛЕЧЕНИЕ ДАННЫХ =====
+        user_id, chat_id, text = extract_ids_from_data(data)
         
-        # 4. Если есть прямой chat_id на верхнем уровне
-        if 'chat_id' in data and not chat_id:
+        # Если chat_id не найден, пробуем прямые поля
+        if not chat_id:
             chat_id = data.get('chat_id')
         
-        # 5. Если есть user на верхнем уровне
-        if 'user' in data and not user_id:
+        # Если user_id не найден, пробуем прямые поля
+        if not user_id:
             user_data = data.get('user', {})
             user_id = user_data.get('user_id')
+            if not user_id:
+                user_id = data.get('user_id')
 
         logger.info(f"💬 Итог: user_id={user_id}, chat_id={chat_id}, text='{text}'")
+
+        # Если нет chat_id - пробуем использовать user_id как chat_id
+        if not chat_id and user_id:
+            chat_id = user_id
+            logger.info(f"🔄 Использую user_id как chat_id: {chat_id}")
 
         if not chat_id:
             logger.warning("⚠️ Нет chat_id, пропускаем")
@@ -498,58 +468,6 @@ def webhook():
         logger.error(traceback.format_exc())
         return jsonify({"ok": False}), 500
 
-def handle_callback(user_id, chat_id, payload):
-    """Обработка нажатий кнопок"""
-    try:
-        logger.info(f"🔘 Обработка callback: {payload} от {user_id}")
-        
-        if payload == "main_menu":
-            show_main_menu(chat_id)
-            
-        elif payload == "choose_folder" or payload == "change_folder":
-            show_folder_selection(chat_id)
-            
-        elif payload == "start_publish":
-            folder = user_folders.get(user_id)
-            if folder:
-                if user_publication_status.get(user_id, False):
-                    send_message(chat_id, "⚠️ Публикация уже запущена!")
-                else:
-                    send_message(chat_id, "🚀 Начинаю публикацию...")
-                    publish_posts(chat_id, folder)
-            else:
-                send_message(chat_id, "❌ Сначала выберите папку!")
-                show_folder_selection(chat_id)
-                
-        elif payload == "stop_publication":
-            user_publication_status[user_id] = False
-            send_message(chat_id, "⏹ Останавливаю публикацию...")
-            time.sleep(1)
-            show_main_menu(chat_id)
-            
-        elif payload == "help":
-            send_message(
-                chat_id,
-                "📖 **Помощь**\n\n"
-                "Команды:\n"
-                "/start - Главное меню\n"
-                "/choose - Выбрать папку\n"
-                "/publish - Начать публикацию\n"
-                "/stop - Остановить публикацию\n"
-                "/help - Эта справка\n\n"
-                "📂 Имя папки: название -ID_группы"
-            )
-            show_main_menu(chat_id)
-            
-        else:
-            logger.warning(f"⚠️ Неизвестный payload: {payload}")
-            
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка обработки callback: {e}")
-        return False
-
 @app.route('/')
 def index():
     return "🤖 MAX Bot is running on Render.com!", 200
@@ -562,13 +480,37 @@ def health():
 def test():
     """Тестовый эндпоинт для проверки API"""
     chat_id = request.args.get('chat_id', 473730202)
-    result = test_api_connection()
-    return {
-        "status": "ok",
-        "api_connection": result,
-        "chat_id": chat_id,
-        "token": TOKEN[:10] + "..."
-    }
+    
+    try:
+        # Пробуем отправить тестовое сообщение
+        payload = {
+            "chat_id": chat_id,
+            "text": "🔍 Тестовое сообщение от бота"
+        }
+        
+        r = requests.post(
+            f"{BASE_URL}/messages",
+            headers={"Authorization": TOKEN, "Content-Type": "application/json"},
+            json=payload,
+            timeout=10,
+            verify=CERT_PATH if USE_CERT else False
+        )
+        
+        return {
+            "status": "ok",
+            "api_connection": r.status_code == 200,
+            "status_code": r.status_code,
+            "response": r.text,
+            "chat_id": chat_id,
+            "token": TOKEN[:10] + "...",
+            "cert_used": USE_CERT,
+            "cert_path": CERT_PATH
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
 
 @app.route('/setup_webhook')
 def setup_webhook():
