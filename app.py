@@ -60,28 +60,32 @@ def send_message(chat_id, text, parse_mode="Markdown"):
         return False
 
 def send_keyboard(chat_id, text, buttons):
-    """Отправка клавиатуры в чат по chat_id"""
+    """Отправка клавиатуры в чат по chat_id - НОВЫЙ ФОРМАТ"""
     try:
-        keyboard_buttons = []
+        # Формируем правильную структуру для нового API
+        keyboard_rows = []
         for button in buttons:
-            keyboard_buttons.append([{
+            # Каждая кнопка - отдельная строка
+            keyboard_rows.append([{
                 "text": button["text"],
                 "type": "callback",
                 "payload": button["payload"]
             }])
 
-        # Пробуем основной формат
+        # НОВЫЙ ФОРМАТ - только через attachments
         payload = {
             "chat_id": chat_id,
             "text": text,
             "parse_mode": "Markdown",
-            "keyboard": {
-                "buttons": keyboard_buttons,
-                "type": "inline"
-            }
+            "attachments": [{
+                "type": "inline_keyboard",
+                "payload": {
+                    "buttons": keyboard_rows
+                }
+            }]
         }
 
-        logger.info(f"🔍 Отправка клавиатуры: {json.dumps(payload, ensure_ascii=False)[:300]}")
+        logger.info(f"🔍 Отправка клавиатуры (новый формат): {json.dumps(payload, ensure_ascii=False)[:300]}")
 
         r = requests.post(
             f"{BASE_URL}/messages",
@@ -95,19 +99,21 @@ def send_keyboard(chat_id, text, buttons):
             logger.info("✅ Клавиатура отправлена!")
             return True
         
-        logger.warning(f"❌ Ошибка: {r.status_code} - {r.text}")
+        logger.error(f"❌ Ошибка: {r.status_code} - {r.text}")
         
-        # Если не работает, пробуем через attachments
+        # Если не работает, пробуем без parse_mode
         payload2 = {
             "chat_id": chat_id,
             "text": text,
-            "parse_mode": "Markdown",
             "attachments": [{
                 "type": "inline_keyboard",
-                "payload": {"buttons": keyboard_buttons}
+                "payload": {
+                    "buttons": keyboard_rows
+                }
             }]
         }
         
+        logger.info(f"🔍 Пробую без parse_mode")
         r2 = requests.post(
             f"{BASE_URL}/messages",
             headers={"Authorization": TOKEN, "Content-Type": "application/json"},
@@ -117,29 +123,41 @@ def send_keyboard(chat_id, text, buttons):
         )
         
         if r2.status_code == 200:
-            logger.info("✅ Клавиатура отправлена (через attachments)!")
+            logger.info("✅ Клавиатура отправлена (без parse_mode)!")
             return True
         
-        logger.error(f"❌ Все форматы не работают! Отправляю обычное сообщение.")
-        send_message(chat_id, text + "\n\n(Клавиатура не поддерживается)")
+        logger.error(f"❌ Ошибка: {r2.status_code} - {r2.text}")
+        
+        # Если совсем не работает, отправляем обычное сообщение
+        send_message(chat_id, text)
+        send_message(chat_id, "📌 Доступные команды:\n/choose - выбрать папку\n/start_publish - начать публикацию\n/stop - остановить\n/help - помощь")
         return False
         
     except Exception as e:
         logger.error(f"❌ Ошибка клавиатуры: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False
 
 def send_to_group(chat_id, text):
     """Отправка в группу"""
     try:
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown"
+        }
         r = requests.post(
             f"{BASE_URL}/messages",
             headers={"Authorization": TOKEN, "Content-Type": "application/json"},
-            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+            json=payload,
             timeout=10,
             verify=CERT_PATH if USE_CERT else False
         )
+        logger.info(f"📤 Отправка в группу {chat_id}: {r.status_code}")
         return r.status_code == 200
-    except:
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки в группу: {e}")
         return False
 
 # ========== РАБОТА С ПАПКАМИ ==========
@@ -186,7 +204,7 @@ def human_delay():
 def show_main_menu(chat_id):
     """Главное меню"""
     folder = user_folders.get(chat_id, "Не выбрана")
-    send_keyboard(
+    success = send_keyboard(
         chat_id,
         f"🏠 **Главное меню**\n\n📂 Папка: `{folder}`\n\nВыберите действие:",
         [
@@ -196,6 +214,8 @@ def show_main_menu(chat_id):
             {"text": "ℹ️ Помощь", "payload": "help"}
         ]
     )
+    if not success:
+        logger.error("❌ Не удалось отправить клавиатуру!")
 
 def show_folder_selection(chat_id):
     """Выбор папки"""
@@ -304,19 +324,14 @@ def webhook():
         chat_id = None
         text = ""
         payload = ""
-        event_type = None
 
         # 1. Проверяем системные события
         if 'event' in data:
             event_type = data.get('event')
             chat_id = data.get('chat_id')
             logger.info(f"⚙️ Системное событие: {event_type}, chat_id: {chat_id}")
-            
-            if event_type == 'bot_started' and chat_id:
-                send_message(chat_id, "🤖 Бот запущен! Используйте /start для начала работы.")
-                show_main_menu(chat_id)
-            elif event_type == 'bot_stopped' and chat_id:
-                send_message(chat_id, "⏹ Бот остановлен. Для запуска используйте /start")
+            if chat_id:
+                send_message(chat_id, f"🤖 Бот {event_type}")
             return jsonify({"ok": True}), 200
 
         # 2. Проверяем callback_query (нажатия кнопок)
@@ -332,7 +347,7 @@ def webhook():
                 handle_callback(user_id, chat_id, payload)
                 return jsonify({"ok": True}), 200
 
-        # 3. Извлекаем из объекта message
+        # 3. Извлекаем из объекта message (основной способ)
         if 'message' in data:
             msg = data['message']
             if 'sender' in msg:
@@ -342,31 +357,17 @@ def webhook():
             if 'body' in msg:
                 text = msg['body'].get('text', '')
         
-        # 4. Если есть прямой chat_id на верхнем уровне (как в вашем логе)
+        # 4. Если есть прямой chat_id на верхнем уровне
         if 'chat_id' in data and not chat_id:
             chat_id = data.get('chat_id')
-            logger.info(f"📌 Найден chat_id на верхнем уровне: {chat_id}")
         
         # 5. Если есть user на верхнем уровне
         if 'user' in data and not user_id:
             user_data = data.get('user', {})
             user_id = user_data.get('user_id')
-            logger.info(f"📌 Найден user на верхнем уровне: {user_id}")
-        
-        # 6. Прямые поля
-        if not user_id and 'user_id' in data:
-            user_id = data.get('user_id')
-        if not text and 'text' in data:
-            text = data.get('text', '')
-
-        # 7. Если есть только chat_id, а user_id нет - используем chat_id как user_id
-        if chat_id and not user_id:
-            user_id = chat_id
-            logger.info(f"🔄 Использую chat_id как user_id: {user_id}")
 
         logger.info(f"💬 Итог: user_id={user_id}, chat_id={chat_id}, text='{text}'")
 
-        # Если нет chat_id - игнорируем
         if not chat_id:
             logger.warning("⚠️ Нет chat_id, пропускаем")
             return jsonify({"ok": True}), 200
@@ -375,12 +376,50 @@ def webhook():
         if text:
             logger.info(f"📨 Обработка сообщения от {user_id}: {text[:50]}")
 
-            if text == "/start":
+            # Обработка команд
+            if text.lower() in ["/start", "start"]:
                 show_main_menu(chat_id)
                 if user_id:
                     user_states[user_id] = None
                 return jsonify({"ok": True}), 200
 
+            if text.lower() == "/choose":
+                show_folder_selection(chat_id)
+                return jsonify({"ok": True}), 200
+
+            if text.lower() == "/start_publish":
+                if user_id:
+                    folder = user_folders.get(user_id)
+                    if folder:
+                        publish_posts(chat_id, folder)
+                    else:
+                        send_message(chat_id, "❌ Сначала выберите папку!")
+                        show_folder_selection(chat_id)
+                return jsonify({"ok": True}), 200
+
+            if text.lower() == "/stop":
+                if user_id:
+                    user_publication_status[user_id] = False
+                    send_message(chat_id, "⏹ Останавливаю публикацию...")
+                    show_main_menu(chat_id)
+                return jsonify({"ok": True}), 200
+
+            if text.lower() == "/help":
+                send_message(
+                    chat_id,
+                    "📖 **Помощь**\n\n"
+                    "Команды:\n"
+                    "/start - Главное меню\n"
+                    "/choose - Выбрать папку\n"
+                    "/start_publish - Начать публикацию\n"
+                    "/stop - Остановить публикацию\n"
+                    "/help - Эта справка\n\n"
+                    "📂 Имя папки: название -ID_группы"
+                )
+                show_main_menu(chat_id)
+                return jsonify({"ok": True}), 200
+
+            # Обработка ввода пути к папке
             if user_id and user_id in user_states and user_states[user_id] == "waiting_folder":
                 folder_path = text.strip()
                 if os.path.exists(folder_path):
@@ -435,9 +474,12 @@ def handle_callback(user_id, chat_id, payload):
             send_message(
                 chat_id,
                 "📖 **Помощь**\n\n"
-                "1. Выберите папку\n"
-                "2. Нажмите «Начать публикацию»\n"
-                "3. Бот опубликует посты\n\n"
+                "Команды:\n"
+                "/start - Главное меню\n"
+                "/choose - Выбрать папку\n"
+                "/start_publish - Начать публикацию\n"
+                "/stop - Остановить публикацию\n"
+                "/help - Эта справка\n\n"
                 "📂 Имя папки: название -ID_группы"
             )
             show_main_menu(chat_id)
