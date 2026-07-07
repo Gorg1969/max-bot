@@ -267,12 +267,26 @@ def webhook():
         if not data:
             return jsonify({"ok": True}), 200
 
-        # ===== ИЗВЛЕКАЕМ ДАННЫЕ =====
-        user_id = None
-        chat_id = None
-        text = ""
+        # ===== ПРОВЕРКА НА СИСТЕМНОЕ СОБЫТИЕ =====
+        # Системные события: bot_started, bot_stopped и т.д.
+        if 'event' in data:
+            event_type = data.get('event')
+            chat_id = data.get('chat_id')
+            
+            logger.info(f"⚙️ Системное событие: {event_type}, chat_id: {chat_id}")
+            
+            if event_type == 'bot_started':
+                if chat_id:
+                    send_message(chat_id, "🤖 Бот запущен! Используйте /start для начала работы.")
+                    show_main_menu(chat_id)
+            
+            elif event_type == 'bot_stopped':
+                if chat_id:
+                    send_message(chat_id, "⏹ Бот остановлен. Для запуска используйте /start")
+            
+            return jsonify({"ok": True}), 200
 
-        # Проверяем наличие callback_query
+        # ===== ПРОВЕРКА НА CALLBACK_QUERY (КНОПКИ) =====
         if "callback_query" in data:
             cb = data["callback_query"]
             user_id = cb.get("user_id") or cb.get("from", {}).get("id")
@@ -315,15 +329,12 @@ def webhook():
                 
                 return jsonify({"ok": True}), 200
 
-        # Прямые поля
-        if 'user_id' in data:
-            user_id = data.get('user_id')
-        if 'chat_id' in data:
-            chat_id = data.get('chat_id')
-        if 'text' in data:
-            text = data.get('text', '')
+        # ===== ОБЫЧНОЕ СООБЩЕНИЕ =====
+        user_id = None
+        chat_id = None
+        text = ""
 
-        # В message (ТОЛЬКО если это сообщение)
+        # Извлекаем из message
         if 'message' in data:
             msg = data['message']
             if 'sender' in msg:
@@ -333,17 +344,26 @@ def webhook():
             if 'body' in msg:
                 text = msg.get('body', {}).get('text', '')
 
-        # Если chat_id всё ещё None
-        if not chat_id:
+        # Альтернативные пути для прямых полей
+        if not user_id and 'user_id' in data:
+            user_id = data.get('user_id')
+        if not chat_id and 'chat_id' in data:
             chat_id = data.get('chat_id')
+        if not text and 'text' in data:
+            text = data.get('text', '')
 
         logger.info(f"💬 user_id: {user_id}, chat_id: {chat_id}, text: '{text}'")
 
-        if not user_id or not chat_id:
-            logger.error("❌ Нет user_id или chat_id!")
-            return jsonify({"ok": False, "error": "Missing IDs"}), 400
+        # Для обычных сообщений user_id обязателен
+        if not user_id:
+            logger.warning("⚠️ Нет user_id, но это может быть системное событие")
+            return jsonify({"ok": True}), 200
 
-        # ===== ОБРАБОТКА ТОЛЬКО СООБЩЕНИЙ С ТЕКСТОМ =====
+        if not chat_id:
+            logger.error("❌ Нет chat_id!")
+            return jsonify({"ok": False, "error": "Missing chat_id"}), 400
+
+        # ===== ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ =====
         if text:
             logger.info(f"📨 Обработка сообщения от {user_id}")
 
