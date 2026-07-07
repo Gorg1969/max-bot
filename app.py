@@ -30,11 +30,35 @@ user_states = {}
 user_folders = {}
 user_publication_status = {}
 
+# ========== ПРОВЕРКА ТОКЕНА ==========
+
+def check_token():
+    """Проверка валидности токена"""
+    try:
+        # Пробуем получить информацию о боте
+        r = requests.get(
+            f"{BASE_URL}/me",
+            headers={"Authorization": TOKEN},
+            timeout=10,
+            verify=CERT_PATH if USE_CERT else False
+        )
+        logger.info(f"🔍 Проверка токена: {r.status_code} - {r.text[:200]}")
+        return r.status_code == 200
+    except Exception as e:
+        logger.error(f"❌ Ошибка проверки токена: {e}")
+        return False
+
 # ========== ОТПРАВКА ==========
 
 def send_message(chat_id, text, parse_mode="Markdown"):
     """Отправка сообщения в чат по chat_id"""
     try:
+        # Пробуем отправить с разными заголовками
+        headers = {
+            "Authorization": TOKEN,
+            "Content-Type": "application/json"
+        }
+        
         payload = {
             "chat_id": chat_id,
             "text": text
@@ -42,11 +66,11 @@ def send_message(chat_id, text, parse_mode="Markdown"):
         if parse_mode:
             payload["parse_mode"] = parse_mode
             
-        logger.info(f"📤 Отправка в chat_id={chat_id}: {text[:50]}...")
+        logger.info(f"📤 Отправка в chat_id={chat_id}: {text[:30]}...")
         
         r = requests.post(
             f"{BASE_URL}/messages",
-            headers={"Authorization": TOKEN, "Content-Type": "application/json"},
+            headers=headers,
             json=payload,
             timeout=10,
             verify=CERT_PATH if USE_CERT else False
@@ -56,24 +80,48 @@ def send_message(chat_id, text, parse_mode="Markdown"):
         
         if r.status_code == 200:
             return True
-        else:
-            # Если ошибка 400, пробуем без parse_mode
-            if r.status_code == 400:
-                logger.info("🔄 Пробую без parse_mode...")
-                payload2 = {
-                    "chat_id": chat_id,
-                    "text": text
-                }
-                r2 = requests.post(
-                    f"{BASE_URL}/messages",
-                    headers={"Authorization": TOKEN, "Content-Type": "application/json"},
-                    json=payload2,
-                    timeout=10,
-                    verify=CERT_PATH if USE_CERT else False
-                )
-                logger.info(f"📤 Ответ без parse_mode: {r2.status_code} - {r2.text[:200]}")
-                return r2.status_code == 200
+            
+        # Если ошибка 400, пробуем другие форматы
+        if r.status_code == 400:
+            # Пробуем без parse_mode
+            logger.info("🔄 Пробую без parse_mode...")
+            payload2 = {
+                "chat_id": chat_id,
+                "text": text
+            }
+            r2 = requests.post(
+                f"{BASE_URL}/messages",
+                headers=headers,
+                json=payload2,
+                timeout=10,
+                verify=CERT_PATH if USE_CERT else False
+            )
+            logger.info(f"📤 Ответ без parse_mode: {r2.status_code} - {r2.text[:200]}")
+            
+            if r2.status_code == 200:
+                return True
+            
+            # Пробуем другой формат авторизации
+            logger.info("🔄 Пробую другой формат авторизации...")
+            headers2 = {
+                "Authorization": f"Bearer {TOKEN}",
+                "Content-Type": "application/json"
+            }
+            r3 = requests.post(
+                f"{BASE_URL}/messages",
+                headers=headers2,
+                json=payload2,
+                timeout=10,
+                verify=CERT_PATH if USE_CERT else False
+            )
+            logger.info(f"📤 Ответ с Bearer: {r3.status_code} - {r3.text[:200]}")
+            
+            if r3.status_code == 200:
+                return True
+            
             return False
+            
+        return False
             
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
@@ -90,6 +138,11 @@ def send_keyboard(chat_id, text, buttons):
                 "type": "callback",
                 "payload": button["payload"]
             }])
+
+        headers = {
+            "Authorization": TOKEN,
+            "Content-Type": "application/json"
+        }
 
         # Пробуем формат через attachments
         payload = {
@@ -108,7 +161,7 @@ def send_keyboard(chat_id, text, buttons):
 
         r = requests.post(
             f"{BASE_URL}/messages",
-            headers={"Authorization": TOKEN, "Content-Type": "application/json"},
+            headers=headers,
             json=payload,
             timeout=10,
             verify=CERT_PATH if USE_CERT else False
@@ -134,7 +187,7 @@ def send_keyboard(chat_id, text, buttons):
         
         r2 = requests.post(
             f"{BASE_URL}/messages",
-            headers={"Authorization": TOKEN, "Content-Type": "application/json"},
+            headers=headers,
             json=payload2,
             timeout=10,
             verify=CERT_PATH if USE_CERT else False
@@ -160,6 +213,10 @@ def send_keyboard(chat_id, text, buttons):
 def send_to_group(chat_id, text):
     """Отправка в группу"""
     try:
+        headers = {
+            "Authorization": TOKEN,
+            "Content-Type": "application/json"
+        }
         payload = {
             "chat_id": chat_id,
             "text": text,
@@ -167,7 +224,7 @@ def send_to_group(chat_id, text):
         }
         r = requests.post(
             f"{BASE_URL}/messages",
-            headers={"Authorization": TOKEN, "Content-Type": "application/json"},
+            headers=headers,
             json=payload,
             timeout=10,
             verify=CERT_PATH if USE_CERT else False
@@ -332,27 +389,17 @@ def extract_ids_from_data(data):
     chat_id = None
     text = ""
     
-    # Рекурсивный поиск по всем полям
     def search(obj, path=""):
         nonlocal user_id, chat_id, text
         
         if isinstance(obj, dict):
-            # Ищем chat_id
             if 'chat_id' in obj and obj['chat_id']:
                 chat_id = obj['chat_id']
-                logger.info(f"🔍 Найден chat_id: {chat_id} в {path}")
-            
-            # Ищем user_id
             if 'user_id' in obj and obj['user_id']:
                 user_id = obj['user_id']
-                logger.info(f"🔍 Найден user_id: {user_id} в {path}")
-            
-            # Ищем текст
             if 'text' in obj and obj['text']:
                 text = obj['text']
-                logger.info(f"🔍 Найден текст: {text[:30]}... в {path}")
             
-            # Рекурсивно ищем во всех значениях
             for key, value in obj.items():
                 search(value, f"{path}.{key}")
                 
@@ -369,7 +416,7 @@ def webhook():
         data = request.get_json()
         logger.info("=" * 50)
         logger.info("📩 ПОЛУЧЕН ВЕБХУК!")
-        logger.info(f"📦 Данные: {json.dumps(data, ensure_ascii=False)[:500]}")
+        logger.info(f"📦 Данные: {json.dumps(data, ensure_ascii=False)[:300]}")
 
         if not data:
             return jsonify({"ok": True}), 200
@@ -377,23 +424,20 @@ def webhook():
         # ===== УНИВЕРСАЛЬНОЕ ИЗВЛЕЧЕНИЕ ДАННЫХ =====
         user_id, chat_id, text = extract_ids_from_data(data)
         
-        # Если chat_id не найден, пробуем прямые поля
         if not chat_id:
             chat_id = data.get('chat_id')
-        
-        # Если user_id не найден, пробуем прямые поля
         if not user_id:
             user_data = data.get('user', {})
             user_id = user_data.get('user_id')
             if not user_id:
                 user_id = data.get('user_id')
 
-        logger.info(f"💬 Итог: user_id={user_id}, chat_id={chat_id}, text='{text}'")
-
-        # Если нет chat_id - пробуем использовать user_id как chat_id
+        # Если есть только user_id и нет chat_id
         if not chat_id and user_id:
             chat_id = user_id
             logger.info(f"🔄 Использую user_id как chat_id: {chat_id}")
+
+        logger.info(f"💬 user_id={user_id}, chat_id={chat_id}, text='{text[:30] if text else ''}'")
 
         if not chat_id:
             logger.warning("⚠️ Нет chat_id, пропускаем")
@@ -401,9 +445,8 @@ def webhook():
 
         # ===== ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ =====
         if text:
-            logger.info(f"📨 Обработка сообщения от {user_id}: {text[:50]}")
+            logger.info(f"📨 Обработка: {text[:50]}")
 
-            # Обработка команд
             if text.lower() in ["/start", "start"]:
                 show_main_menu(chat_id)
                 if user_id:
@@ -434,32 +477,23 @@ def webhook():
             if text.lower() == "/help":
                 send_message(
                     chat_id,
-                    "📖 **Помощь**\n\n"
-                    "Команды:\n"
-                    "/start - Главное меню\n"
-                    "/choose - Выбрать папку\n"
-                    "/publish - Начать публикацию\n"
-                    "/stop - Остановить публикацию\n"
-                    "/help - Эта справка\n\n"
-                    "📂 Имя папки: название -ID_группы"
+                    "📖 **Помощь**\n\nКоманды:\n/start - Главное меню\n/choose - Выбрать папку\n/publish - Начать публикацию\n/stop - Остановить\n/help - Справка"
                 )
                 show_main_menu(chat_id)
                 return jsonify({"ok": True}), 200
 
-            # Обработка ввода пути к папке
             if user_id and user_id in user_states and user_states[user_id] == "waiting_folder":
                 folder_path = text.strip()
                 if os.path.exists(folder_path):
                     user_folders[user_id] = folder_path
                     user_states[user_id] = None
                     folders = get_folders(folder_path)
-                    send_message(chat_id, f"✅ Папка установлена!\nНайдено папок: {len(folders)}")
+                    send_message(chat_id, f"✅ Папка установлена! Найдено папок: {len(folders)}")
                     show_main_menu(chat_id)
                 else:
                     send_message(chat_id, f"❌ Папка не найдена: {folder_path}")
                 return jsonify({"ok": True}), 200
 
-        logger.info("=" * 50)
         return jsonify({"ok": True}), 200
 
     except Exception as e:
@@ -476,41 +510,33 @@ def index():
 def health():
     return {"status": "ok", "time": time.strftime('%Y-%m-%d %H:%M:%S')}, 200
 
+@app.route('/check_token')
+def check_token_route():
+    """Проверка токена"""
+    result = check_token()
+    return {
+        "token_valid": result,
+        "token": TOKEN[:10] + "...",
+        "cert_used": USE_CERT,
+        "cert_path": CERT_PATH if USE_CERT else "Not used"
+    }
+
 @app.route('/test')
 def test():
-    """Тестовый эндпоинт для проверки API"""
+    """Тестовый эндпоинт"""
     chat_id = request.args.get('chat_id', 473730202)
+    result = check_token()
     
-    try:
-        # Пробуем отправить тестовое сообщение
-        payload = {
-            "chat_id": chat_id,
-            "text": "🔍 Тестовое сообщение от бота"
-        }
-        
-        r = requests.post(
-            f"{BASE_URL}/messages",
-            headers={"Authorization": TOKEN, "Content-Type": "application/json"},
-            json=payload,
-            timeout=10,
-            verify=CERT_PATH if USE_CERT else False
-        )
-        
-        return {
-            "status": "ok",
-            "api_connection": r.status_code == 200,
-            "status_code": r.status_code,
-            "response": r.text,
-            "chat_id": chat_id,
-            "token": TOKEN[:10] + "...",
-            "cert_used": USE_CERT,
-            "cert_path": CERT_PATH
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e)
-        }
+    # Пробуем отправить тестовое сообщение
+    test_result = send_message(chat_id, "🔍 Тестовое сообщение от бота")
+    
+    return {
+        "token_valid": result,
+        "message_sent": test_result,
+        "chat_id": chat_id,
+        "token": TOKEN[:10] + "...",
+        "cert_used": USE_CERT
+    }
 
 @app.route('/setup_webhook')
 def setup_webhook():
@@ -521,10 +547,12 @@ def setup_webhook():
     webhook_url = "https://max-bot-ulzl.onrender.com/webhook"
 
     try:
+        headers = {"Authorization": token, "Content-Type": "application/json"}
+        
         # Удаляем старую подписку
         r_del = requests.delete(
             f"{BASE_URL}/subscriptions",
-            headers={"Authorization": token},
+            headers=headers,
             timeout=10,
             verify=CERT_PATH if USE_CERT else False
         )
@@ -533,7 +561,7 @@ def setup_webhook():
         # Создаем новую подписку
         r = requests.post(
             f"{BASE_URL}/subscriptions",
-            headers={"Authorization": token, "Content-Type": "application/json"},
+            headers=headers,
             json={"url": webhook_url},
             timeout=10,
             verify=CERT_PATH if USE_CERT else False
