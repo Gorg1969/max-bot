@@ -24,21 +24,43 @@ BASE_URL = "https://platform-api2.max.ru"
 # ПУТЬ К СЕРТИФИКАТУ
 CERT_PATH = os.path.join(os.path.dirname(__file__), 'russian_trusted_root_ca_gost_2025')
 USE_CERT = os.path.exists(CERT_PATH)
-if USE_CERT:
-    logger.info(f"✅ Сертификат найден: {CERT_PATH}")
-else:
-    logger.warning("⚠️ Сертификат не найден! Использую verify=False")
 
 # ========== ХРАНИЛИЩА ==========
 user_states = {}
 user_folders = {}
 user_publication_status = {}
 
+# ========== ДИАГНОСТИКА ==========
+
+def test_api_connection():
+    """Тестирование подключения к API"""
+    try:
+        # Пробуем отправить тестовое сообщение самому себе
+        test_payload = {
+            "chat_id": 473730202,  # Ваш chat_id из логов
+            "text": "🔍 Тестовое сообщение от бота"
+        }
+        
+        r = requests.post(
+            f"{BASE_URL}/messages",
+            headers={"Authorization": TOKEN, "Content-Type": "application/json"},
+            json=test_payload,
+            timeout=10,
+            verify=CERT_PATH if USE_CERT else False
+        )
+        
+        logger.info(f"🔍 Тест API: {r.status_code} - {r.text}")
+        return r.status_code == 200
+    except Exception as e:
+        logger.error(f"❌ Ошибка теста API: {e}")
+        return False
+
 # ========== ОТПРАВКА ==========
 
 def send_message(chat_id, text, parse_mode="Markdown"):
     """Отправка сообщения в чат по chat_id"""
     try:
+        # Пробуем отправить как есть
         payload = {
             "chat_id": chat_id,
             "text": text
@@ -46,6 +68,8 @@ def send_message(chat_id, text, parse_mode="Markdown"):
         if parse_mode:
             payload["parse_mode"] = parse_mode
             
+        logger.info(f"📤 Отправка в chat_id={chat_id}: {text[:50]}...")
+        
         r = requests.post(
             f"{BASE_URL}/messages",
             headers={"Authorization": TOKEN, "Content-Type": "application/json"},
@@ -53,26 +77,47 @@ def send_message(chat_id, text, parse_mode="Markdown"):
             timeout=10,
             verify=CERT_PATH if USE_CERT else False
         )
-        logger.info(f"📤 Отправка: {r.status_code} - {r.text[:100]}")
-        return r.status_code == 200
+        
+        logger.info(f"📤 Ответ: {r.status_code} - {r.text[:200]}")
+        
+        if r.status_code == 200:
+            return True
+        else:
+            # Если ошибка 400, пробуем без parse_mode
+            if r.status_code == 400:
+                logger.info("🔄 Пробую без parse_mode...")
+                payload2 = {
+                    "chat_id": chat_id,
+                    "text": text
+                }
+                r2 = requests.post(
+                    f"{BASE_URL}/messages",
+                    headers={"Authorization": TOKEN, "Content-Type": "application/json"},
+                    json=payload2,
+                    timeout=10,
+                    verify=CERT_PATH if USE_CERT else False
+                )
+                logger.info(f"📤 Ответ без parse_mode: {r2.status_code} - {r2.text[:200]}")
+                return r2.status_code == 200
+            return False
+            
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
         return False
 
 def send_keyboard(chat_id, text, buttons):
-    """Отправка клавиатуры в чат по chat_id - НОВЫЙ ФОРМАТ"""
+    """Отправка клавиатуры в чат по chat_id"""
     try:
-        # Формируем правильную структуру для нового API
+        # Формируем клавиатуру
         keyboard_rows = []
         for button in buttons:
-            # Каждая кнопка - отдельная строка
             keyboard_rows.append([{
                 "text": button["text"],
                 "type": "callback",
                 "payload": button["payload"]
             }])
 
-        # НОВЫЙ ФОРМАТ - только через attachments
+        # Пробуем формат 1: через attachments
         payload = {
             "chat_id": chat_id,
             "text": text,
@@ -85,7 +130,7 @@ def send_keyboard(chat_id, text, buttons):
             }]
         }
 
-        logger.info(f"🔍 Отправка клавиатуры (новый формат): {json.dumps(payload, ensure_ascii=False)[:300]}")
+        logger.info(f"🔍 Отправка клавиатуры...")
 
         r = requests.post(
             f"{BASE_URL}/messages",
@@ -99,9 +144,9 @@ def send_keyboard(chat_id, text, buttons):
             logger.info("✅ Клавиатура отправлена!")
             return True
         
-        logger.error(f"❌ Ошибка: {r.status_code} - {r.text}")
+        logger.error(f"❌ Ошибка клавиатуры: {r.status_code} - {r.text}")
         
-        # Если не работает, пробуем без parse_mode
+        # Пробуем формат 2: без parse_mode
         payload2 = {
             "chat_id": chat_id,
             "text": text,
@@ -113,7 +158,6 @@ def send_keyboard(chat_id, text, buttons):
             }]
         }
         
-        logger.info(f"🔍 Пробую без parse_mode")
         r2 = requests.post(
             f"{BASE_URL}/messages",
             headers={"Authorization": TOKEN, "Content-Type": "application/json"},
@@ -126,11 +170,11 @@ def send_keyboard(chat_id, text, buttons):
             logger.info("✅ Клавиатура отправлена (без parse_mode)!")
             return True
         
-        logger.error(f"❌ Ошибка: {r2.status_code} - {r2.text}")
+        logger.error(f"❌ Ошибка клавиатуры (2): {r2.status_code} - {r2.text}")
         
-        # Если совсем не работает, отправляем обычное сообщение
+        # Если ничего не работает, отправляем обычное сообщение
         send_message(chat_id, text)
-        send_message(chat_id, "📌 Доступные команды:\n/choose - выбрать папку\n/start_publish - начать публикацию\n/stop - остановить\n/help - помощь")
+        send_message(chat_id, "📌 Команды:\n/start - меню\n/choose - выбрать папку\n/publish - начать публикацию\n/stop - остановить\n/help - помощь")
         return False
         
     except Exception as e:
@@ -326,12 +370,25 @@ def webhook():
         payload = ""
 
         # 1. Проверяем системные события
-        if 'event' in data:
-            event_type = data.get('event')
+        if 'event' in data or 'update_type' in data:
+            event_type = data.get('event') or data.get('update_type', '')
             chat_id = data.get('chat_id')
-            logger.info(f"⚙️ Системное событие: {event_type}, chat_id: {chat_id}")
+            
+            # Если есть user в данных
+            if 'user' in data and not user_id:
+                user_data = data.get('user', {})
+                user_id = user_data.get('user_id')
+            
+            logger.info(f"⚙️ Событие: {event_type}, chat_id: {chat_id}, user_id: {user_id}")
+            
+            # Отвечаем на системные события
             if chat_id:
-                send_message(chat_id, f"🤖 Бот {event_type}")
+                if event_type == 'bot_started':
+                    send_message(chat_id, "🤖 Бот запущен! Используйте /start")
+                    show_main_menu(chat_id)
+                elif event_type == 'bot_stopped':
+                    send_message(chat_id, "⏹ Бот остановлен. Для запуска используйте /start")
+            
             return jsonify({"ok": True}), 200
 
         # 2. Проверяем callback_query (нажатия кнопок)
@@ -347,7 +404,7 @@ def webhook():
                 handle_callback(user_id, chat_id, payload)
                 return jsonify({"ok": True}), 200
 
-        # 3. Извлекаем из объекта message (основной способ)
+        # 3. Извлекаем из объекта message
         if 'message' in data:
             msg = data['message']
             if 'sender' in msg:
@@ -387,7 +444,7 @@ def webhook():
                 show_folder_selection(chat_id)
                 return jsonify({"ok": True}), 200
 
-            if text.lower() == "/start_publish":
+            if text.lower() == "/publish":
                 if user_id:
                     folder = user_folders.get(user_id)
                     if folder:
@@ -411,7 +468,7 @@ def webhook():
                     "Команды:\n"
                     "/start - Главное меню\n"
                     "/choose - Выбрать папку\n"
-                    "/start_publish - Начать публикацию\n"
+                    "/publish - Начать публикацию\n"
                     "/stop - Остановить публикацию\n"
                     "/help - Эта справка\n\n"
                     "📂 Имя папки: название -ID_группы"
@@ -477,7 +534,7 @@ def handle_callback(user_id, chat_id, payload):
                 "Команды:\n"
                 "/start - Главное меню\n"
                 "/choose - Выбрать папку\n"
-                "/start_publish - Начать публикацию\n"
+                "/publish - Начать публикацию\n"
                 "/stop - Остановить публикацию\n"
                 "/help - Эта справка\n\n"
                 "📂 Имя папки: название -ID_группы"
@@ -501,6 +558,18 @@ def index():
 def health():
     return {"status": "ok", "time": time.strftime('%Y-%m-%d %H:%M:%S')}, 200
 
+@app.route('/test')
+def test():
+    """Тестовый эндпоинт для проверки API"""
+    chat_id = request.args.get('chat_id', 473730202)
+    result = test_api_connection()
+    return {
+        "status": "ok",
+        "api_connection": result,
+        "chat_id": chat_id,
+        "token": TOKEN[:10] + "..."
+    }
+
 @app.route('/setup_webhook')
 def setup_webhook():
     token = request.args.get('token')
@@ -510,12 +579,16 @@ def setup_webhook():
     webhook_url = "https://max-bot-ulzl.onrender.com/webhook"
 
     try:
-        requests.delete(
+        # Удаляем старую подписку
+        r_del = requests.delete(
             f"{BASE_URL}/subscriptions",
             headers={"Authorization": token},
             timeout=10,
             verify=CERT_PATH if USE_CERT else False
         )
+        logger.info(f"DELETE subscriptions: {r_del.status_code}")
+        
+        # Создаем новую подписку
         r = requests.post(
             f"{BASE_URL}/subscriptions",
             headers={"Authorization": token, "Content-Type": "application/json"},
@@ -523,7 +596,7 @@ def setup_webhook():
             timeout=10,
             verify=CERT_PATH if USE_CERT else False
         )
-        return f"✅ Статус: {r.status_code}\n✅ Ответ: {r.text}"
+        return f"✅ DELETE: {r_del.status_code}\n✅ POST: {r.status_code} - {r.text}"
     except Exception as e:
         return f"❌ Ошибка: {e}", 500
 
