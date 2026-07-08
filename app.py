@@ -24,28 +24,21 @@ BASE_URL = "https://platform-api2.max.ru"
 # ========== ПРОВЕРКА СЕРТИФИКАТА ==========
 CERT_FILE = 'russian_trusted_root_ca_gost_2025.cer'
 CERT_PATH = os.path.join(os.path.dirname(__file__), CERT_FILE)
-USE_CERT = False  # ПОКА ОТКЛЮЧЕН
+USE_CERT = False
 
 if os.path.exists(CERT_PATH):
     logger.info(f"✅ Сертификат найден: {CERT_PATH}, но пока отключен")
 else:
     logger.warning(f"⚠️ Сертификат НЕ НАЙДЕН: {CERT_PATH}")
 
-# ========== ФУНКЦИЯ ЗАПРОСОВ К МАХ ==========
+# ========== ФУНКЦИЯ ЗАПРОСОВ ==========
 def max_request(method, endpoint, data=None, headers=None):
-    """Универсальный запрос к API МАХ"""
     url = f"{BASE_URL}{endpoint}"
     
     request_headers = {}
-    
     if TOKEN:
         request_headers["Authorization"] = TOKEN
-        logger.info(f"🔑 Токен добавлен: {TOKEN[:4]}...{TOKEN[-4:]}")
-    else:
-        logger.error("❌ ТОКЕН НЕ НАЙДЕН!")
-    
     request_headers["Content-Type"] = "application/json"
-    
     if headers:
         request_headers.update(headers)
     
@@ -60,7 +53,6 @@ def max_request(method, endpoint, data=None, headers=None):
         )
         logger.info(f"📤 {method} {endpoint} -> {response.status_code}")
         return response
-        
     except Exception as e:
         logger.error(f"❌ Ошибка запроса: {e}")
         raise
@@ -68,28 +60,24 @@ def max_request(method, endpoint, data=None, headers=None):
 # ========== ФУНКЦИИ ДЛЯ РАБОТЫ С СООБЩЕНИЯМИ ==========
 
 def get_headers():
-    """Получение заголовков с токеном"""
     if not TOKEN:
         logger.error("❌ ТОКЕН НЕ УСТАНОВЛЕН!")
         return None
-    
     return {
         "Authorization": TOKEN,
         "Content-Type": "application/json"
     }
 
 def send_message(chat_id, text, parse_mode="Markdown"):
-    """Отправка сообщения в МАХ (ТОЛЬКО НА CHAT_ID!)"""
+    """Отправка сообщения в МАХ"""
     try:
         headers = get_headers()
         if not headers:
             return False
             
-        # ✅ ПРАВИЛЬНЫЙ ФОРМАТ ДЛЯ МАХ - ТОЛЬКО CHAT_ID
+        # ✅ ПРАВИЛЬНЫЙ ФОРМАТ - НА ВЕРХНЕМ УРОВНЕ!
         payload = {
-            "recipient": {
-                "chat_id": chat_id  # <-- ТОЛЬКО chat_id!
-            },
+            "chat_id": chat_id,
             "text": text,
             "parse_mode": parse_mode
         }
@@ -113,9 +101,7 @@ def send_message(chat_id, text, parse_mode="Markdown"):
         if response.status_code == 400:
             logger.info("🔄 Пробую без parse_mode...")
             payload2 = {
-                "recipient": {
-                    "chat_id": chat_id  # <-- ТОЛЬКО chat_id!
-                },
+                "chat_id": chat_id,
                 "text": text
             }
             response2 = requests.post(
@@ -135,7 +121,7 @@ def send_message(chat_id, text, parse_mode="Markdown"):
         return False
 
 def send_keyboard(chat_id, text, buttons):
-    """Отправка клавиатуры в МАХ (ТОЛЬКО НА CHAT_ID!)"""
+    """Отправка клавиатуры в МАХ"""
     try:
         headers = get_headers()
         if not headers:
@@ -149,11 +135,9 @@ def send_keyboard(chat_id, text, buttons):
                 "payload": button["payload"]
             }])
 
-        # ✅ ПРАВИЛЬНЫЙ ФОРМАТ ДЛЯ МАХ - ТОЛЬКО CHAT_ID
+        # ✅ ПРАВИЛЬНЫЙ ФОРМАТ - НА ВЕРХНЕМ УРОВНЕ!
         payload = {
-            "recipient": {
-                "chat_id": chat_id  # <-- ТОЛЬКО chat_id!
-            },
+            "chat_id": chat_id,
             "text": text,
             "parse_mode": "Markdown",
             "attachments": [{
@@ -184,9 +168,7 @@ def send_keyboard(chat_id, text, buttons):
         if response.status_code == 400:
             logger.info("🔄 Пробую без parse_mode...")
             payload2 = {
-                "recipient": {
-                    "chat_id": chat_id  # <-- ТОЛЬКО chat_id!
-                },
+                "chat_id": chat_id,
                 "text": text,
                 "attachments": [{
                     "type": "inline_keyboard",
@@ -216,7 +198,6 @@ def send_keyboard(chat_id, text, buttons):
         return False
 
 def show_main_menu(chat_id):
-    """Главное меню"""
     send_keyboard(
         chat_id,
         "🏠 **Главное меню**\n\nВыберите действие:",
@@ -251,7 +232,6 @@ def health():
 
 @app.route('/debug')
 def debug():
-    """Отладка"""
     return {
         "token": "✅" if TOKEN else "❌",
         "token_preview": f"{TOKEN[:4]}...{TOKEN[-4:]}" if TOKEN else None,
@@ -322,7 +302,6 @@ def setup_webhook():
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Обработка вебхука от МАХ (ТОЛЬКО CHAT_ID!)"""
     try:
         data = request.get_json()
         logger.info("=" * 50)
@@ -331,11 +310,9 @@ def webhook():
         if not data:
             return jsonify({"ok": True}), 200
 
-        # ========== ИЩЕМ ТОЛЬКО CHAT_ID ==========
         chat_id = None
         text = None
         
-        # Рекурсивный поиск chat_id и text
         def search(obj):
             nonlocal chat_id, text
             if isinstance(obj, dict):
@@ -352,37 +329,26 @@ def webhook():
         search(data)
         
         if not chat_id:
-            logger.warning("⚠️ Не удалось найти chat_id в данных")
-            logger.info(f"📦 Данные: {json.dumps(data, indent=2, ensure_ascii=False)[:500]}")
+            logger.warning("⚠️ Не удалось найти chat_id")
             return jsonify({"ok": True}), 200
 
         logger.info(f"💬 chat_id={chat_id}, text='{text}'")
 
-        # ========== ОБРАБОТКА КОМАНД ==========
         if text and isinstance(text, str):
             text_lower = text.lower().strip()
             
             if text_lower in ["/start", "start"]:
-                show_main_menu(chat_id)  # <-- ТОЛЬКО chat_id!
+                show_main_menu(chat_id)
                 return jsonify({"ok": True}), 200
 
             if text_lower == "/help":
-                send_message(
-                    chat_id,  # <-- ТОЛЬКО chat_id!
-                    "📖 **Помощь**\n\nКоманды:\n/start - Главное меню\n/choose - Выбрать папку\n/publish - Начать публикацию\n/stop - Остановить\n/help - Справка"
-                )
-                return jsonify({"ok": True}), 200
-
-            if text_lower == "/choose":
-                send_message(chat_id, "📁 Выберите папку (функция в разработке)")
+                send_message(chat_id, "📖 **Помощь**\n\nКоманды:\n/start - Главное меню\n/choose - Выбрать папку\n/publish - Начать публикацию\n/stop - Остановить\n/help - Справка")
                 return jsonify({"ok": True}), 200
 
         return jsonify({"ok": True}), 200
 
     except Exception as e:
         logger.error(f"❌ ОШИБКА: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
         return jsonify({"ok": False}), 500
 
 # ========== ЗАПУСК ==========
