@@ -346,22 +346,33 @@ def webhook():
         chat_id = None
         text = None
         
-        # Структура МАХ: recipient.chat_id и body.text
-        if 'recipient' in data:
-            recipient = data['recipient']
-            chat_id = recipient.get('chat_id')
+        # Структура МАХ: message.recipient.chat_id и message.body.text
+        if 'message' in data:
+            message = data['message']
             
-            if 'body' in data:
-                body = data['body']
+            # Извлекаем chat_id из recipient
+            if 'recipient' in message:
+                recipient = message['recipient']
+                chat_id = recipient.get('chat_id')
+            
+            # Извлекаем текст из body
+            if 'body' in message:
+                body = message['body']
                 text = body.get('text')
         
-        # Fallback: если структура другая
+        # Если не нашли через message - пробуем другие варианты
         if not chat_id:
-            chat_id = data.get('chat_id')
-            text = data.get('text')
+            # Проверяем прямой recipient (если данные без обертки)
+            if 'recipient' in data:
+                chat_id = data['recipient'].get('chat_id')
+            
+            # Проверяем прямые поля
+            if not chat_id:
+                chat_id = data.get('chat_id')
+                text = data.get('text')
         
         if not chat_id:
-            logger.warning("⚠️ Не удалось найти chat_id")
+            logger.warning("⚠️ Не удалось найти chat_id в данных")
             logger.info(f"📦 Данные: {json.dumps(data, indent=2, ensure_ascii=False)[:500]}")
             return jsonify({"ok": True}), 200
 
