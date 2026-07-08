@@ -24,16 +24,15 @@ def setup_webhook():
     if not TOKEN:
         logger.error("❌ ТОКЕН НЕ НАЙДЕН!")
         logger.error("👉 Установите переменную TOKEN в Environment Variables на Render")
-        logger.error("👉 Или используйте: TOKEN=ваш_токен python setup_render.py")
         return False
     
-    # ✅ Логируем только первые и последние символы для безопасности
     token_preview = f"{TOKEN[:4]}...{TOKEN[-4:]}" if len(TOKEN) > 8 else "***"
     logger.info(f"🔑 Токен: {token_preview}")
     logger.info(f"🌐 Вебхук: {WEBHOOK_URL}")
     
+    # ✅ ИСПРАВЛЕНО: ТОЛЬКО ТОКЕН, БЕЗ "Bearer "
     headers = {
-        "Authorization": f"Bearer {TOKEN}",
+        "Authorization": TOKEN,  # <-- ИСПРАВЛЕНО!
         "Content-Type": "application/json"
     }
     
@@ -43,7 +42,8 @@ def setup_webhook():
         r_del = requests.delete(
             f"{BASE_URL}/subscriptions",
             headers=headers,
-            timeout=10
+            timeout=10,
+            verify=False
         )
         logger.info(f"   Статус: {r_del.status_code}")
         if r_del.status_code == 200:
@@ -59,7 +59,8 @@ def setup_webhook():
             f"{BASE_URL}/subscriptions",
             headers=headers,
             json=payload,
-            timeout=10
+            timeout=10,
+            verify=False
         )
         logger.info(f"   Статус: {r.status_code}")
         
@@ -77,25 +78,23 @@ def setup_webhook():
 
 def main():
     """Главная функция"""
-    # Если токен передан как аргумент - предупреждаем
-    if len(sys.argv) > 1 and sys.argv[1] != "--help":
-        logger.warning("⚠️ Токен передан через аргумент командной строки!")
-        logger.warning("⚠️ Это НЕБЕЗОПАСНО! Используйте переменные окружения!")
-        
-        # Все равно используем токен из окружения, если он есть
-        if not TOKEN:
-            logger.error("❌ Токен не найден в окружении")
-            logger.info("💡 Используйте: export TOKEN=ваш_токен && python setup_render.py")
-            sys.exit(1)
+    if len(sys.argv) > 1 and sys.argv[1] == "--help":
+        print("""
+Использование:
+  python setup_render.py
+
+Переменные окружения:
+  TOKEN         - Токен бота (обязательно)
+  WEBHOOK_URL   - URL вебхука (по умолчанию: https://max-bot-ulzl.onrender.com/webhook)
+        """)
+        return
     
-    # Запускаем настройку
     success = setup_webhook()
     
-    # Проверяем вебхук
     if success:
         logger.info("\n📊 Проверка вебхука...")
         try:
-            r = requests.get(WEBHOOK_URL, timeout=5)
+            r = requests.get(WEBHOOK_URL, timeout=5, verify=False)
             logger.info(f"   🌐 Вебхук доступен: {r.status_code}")
         except:
             logger.warning("   ⚠️ Вебхук не отвечает (может быть нормой)")
