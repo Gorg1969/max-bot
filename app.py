@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 # ========== КОНФИГ ==========
 TOKEN = os.environ.get("TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://maxbot.bothost.tech/webhook")
 
 # ========== ПРОВЕРКА СЕРТИФИКАТА ==========
 CERT_FILE = 'russian_trusted_root_ca_gost_2025.cer'
@@ -272,7 +271,7 @@ def setup_webhook():
             <p><b>📁 Сертификат:</b> {'✅ Найден' if USE_CERT else '❌ Не найден (отключен)'}</p>
             <p><b>📂 Путь:</b> {CERT_PATH if CERT_PATH else 'Не указан'}</p>
             <p><b>🔑 Токен:</b> {token[:4]}...{token[-4:] if len(token) > 8 else '***'}</p>
-            <p><b>🌐 Вебхук:</b> {WEBHOOK_URL}</p>
+            <p><b>🌐 Вебхук:</b> https://maxbot.bothost.tech/webhook</p>
             <p><b>📌 Формат авторизации:</b> Authorization: &lt;token&gt; (без Bearer)</p>
             <hr>
     """
@@ -305,7 +304,7 @@ def setup_webhook():
         r = requests.post(
             "https://platform-api2.max.ru/subscriptions",
             headers=headers,
-            json={"url": WEBHOOK_URL},
+            json={"url": "https://maxbot.bothost.tech/webhook"},
             timeout=10,
             verify=False
         )
