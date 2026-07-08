@@ -59,7 +59,7 @@ def max_request(method, endpoint, data=None, headers=None):
             headers=request_headers,
             json=data,
             timeout=30,
-            proxies=PROXY,  # ← ПРОКСИ
+              # ← ПРОКСИ
             verify=False
         )
         logger.info(f"📤 {method} {endpoint} -> {response.status_code}")
@@ -103,7 +103,7 @@ def send_message(user_id, text, parse_mode="Markdown"):
             headers=headers,
             json=payload,
             timeout=30,
-            proxies=PROXY,  # ← ПРОКСИ
+              # ← ПРОКСИ
             verify=False
         )
         
@@ -123,7 +123,7 @@ def send_message(user_id, text, parse_mode="Markdown"):
                 headers=headers,
                 json=payload2,
                 timeout=30,
-                proxies=PROXY,  # ← ПРОКСИ
+                  # ← ПРОКСИ
                 verify=False
             )
             logger.info(f"📤 Ответ без parse_mode: {response2.status_code} - {response2.text[:200]}")
@@ -170,7 +170,7 @@ def send_keyboard(user_id, text, buttons):
             headers=headers,
             json=payload,
             timeout=30,
-            proxies=PROXY,  # ← ПРОКСИ
+              # ← ПРОКСИ
             verify=False
         )
         
@@ -198,7 +198,7 @@ def send_keyboard(user_id, text, buttons):
                 headers=headers,
                 json=payload2,
                 timeout=30,
-                proxies=PROXY,  # ← ПРОКСИ
+                  # ← ПРОКСИ
                 verify=False
             )
             logger.info(f"📤 Ответ без parse_mode: {response2.status_code} - {response2.text[:200]}")
@@ -271,7 +271,7 @@ def test_proxy():
         response = requests.get(
             "https://platform-api2.max.ru/subscriptions",
             headers=headers,
-            proxies=PROXY,
+            
             timeout=10,
             verify=False
         )
@@ -328,7 +328,7 @@ def setup_webhook():
                 "https://platform-api2.max.ru/subscriptions",
                 headers=headers,
                 timeout=10,
-                proxies=PROXY,
+                
                 verify=False
             )
             html += f"<p>DELETE: <b>{r_del.status_code}</b></p>"
@@ -346,7 +346,7 @@ def setup_webhook():
             headers=headers,
             json={"url": webhook_url},
             timeout=10,
-            proxies=PROXY,
+            
             verify=False
         )
         html += f"<p>POST: <b>{r.status_code}</b></p>"
