@@ -21,61 +21,67 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
 
-# ========== УНИВЕРСАЛЬНЫЙ ПОИСК СЕРТИФИКАТА ==========
-def find_certificate():
-    """Универсальный поиск сертификата Минцифры"""
-    base_dir = os.path.dirname(__file__)
-    
-    cert_names = [
-        'russian_trusted_root_ca_gost_2025',
-        'russian_trusted_root_ca_gost_2025.cer',
-        'russian_trusted_root_ca_gost_2025.pem',
-        'russian_trusted_root_ca_gost_2025.crt',
-    ]
-    
-    for name in cert_names:
-        path = os.path.join(base_dir, name)
-        if os.path.exists(path):
-            logger.info(f"Найден сертификат: {name}")
-            return path
-    
-    try:
-        for file in os.listdir(base_dir):
-            if 'russian' in file.lower() and file.endswith(('.cer', '.pem', '.crt')):
-                path = os.path.join(base_dir, file)
-                logger.info(f"Найден сертификат: {file}")
-                return path
-    except:
-        pass
-    
-    certs_dir = os.path.join(base_dir, 'certs')
-    if os.path.exists(certs_dir):
-        try:
-            for file in os.listdir(certs_dir):
-                if 'russian' in file.lower() and file.endswith(('.cer', '.pem', '.crt')):
-                    path = os.path.join(certs_dir, file)
-                    logger.info(f"Найден сертификат в certs/: {file}")
-                    return path
-        except:
-            pass
-    
-    logger.warning("Сертификат Минцифры НЕ НАЙДЕН!")
-    return None
-
-# Временное решение - принудительно отключаем сертификат
-CERT_PATH = None
-USE_CERT = False
+# ========== ПРОВЕРКА СЕРТИФИКАТА ==========
+CERT_FILE = 'russian_trusted_root_ca_gost_2025.cer'
+CERT_PATH = os.path.join(os.path.dirname(__file__), CERT_FILE)
+USE_CERT = os.path.exists(CERT_PATH)
 
 if USE_CERT:
-    logger.info(f"Сертификат загружен: {CERT_PATH}")
+    logger.info(f"✅ Сертификат найден: {CERT_PATH}")
 else:
-    logger.warning("Сертификат не найден! Используется стандартная проверка")
+    logger.warning(f"⚠️ Сертификат НЕ НАЙДЕН: {CERT_PATH}")
 
-# ========== ФУНКЦИИ ==========
+# ========== ФУНКЦИЯ ЗАПРОСОВ К МАХ ==========
+def max_request(method, endpoint, data=None, headers=None):
+    """Универсальный запрос к API МАХ"""
+    url = f"{BASE_URL}{endpoint}"
+    
+    if headers is None:
+        headers = {}
+    
+    if TOKEN:
+        headers["Authorization"] = f"Bearer {TOKEN}"
+    headers["Content-Type"] = "application/json"
+    
+    try:
+        # Пробуем с сертификатом
+        if USE_CERT:
+            try:
+                response = requests.request(
+                    method=method,
+                    url=url,
+                    headers=headers,
+                    json=data,
+                    timeout=30,
+                    verify=CERT_PATH
+                )
+                logger.info(f"📤 {method} {endpoint} -> {response.status_code} (с сертификатом)")
+                return response
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка с сертификатом: {e}")
+        
+        # Пробуем без сертификата (fallback)
+        response = requests.request(
+            method=method,
+            url=url,
+            headers=headers,
+            json=data,
+            timeout=30,
+            verify=False
+        )
+        logger.info(f"📤 {method} {endpoint} -> {response.status_code} (без сертификата)")
+        return response
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка запроса: {e}")
+        raise
+
+# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С СООБЩЕНИЯМИ ==========
 
 def get_headers():
+    """Получение заголовков с токеном"""
     if not TOKEN:
-        logger.error("ТОКЕН НЕ УСТАНОВЛЕН!")
+        logger.error("❌ ТОКЕН НЕ УСТАНОВЛЕН!")
         return None
     
     return {
@@ -84,44 +90,55 @@ def get_headers():
     }
 
 def send_message(chat_id, text, parse_mode="Markdown"):
+    """Отправка сообщения"""
     try:
         headers = get_headers()
         if not headers:
             return False
             
-        payload = {"chat_id": chat_id, "text": text}
+        payload = {
+            "chat_id": chat_id,
+            "text": text
+        }
         if parse_mode:
             payload["parse_mode"] = parse_mode
             
-        r = requests.post(
-            f"{BASE_URL}/messages",
-            headers=headers,
-            json=payload,
-            timeout=10,
-            verify=CERT_PATH if USE_CERT else False
+        logger.info(f"📤 Отправка в chat_id={chat_id}")
+        
+        # Используем max_request
+        response = max_request(
+            "POST",
+            "/messages",
+            data=payload,
+            headers=headers
         )
         
-        if r.status_code == 200:
+        if response.status_code == 200:
             return True
             
-        if r.status_code == 400:
-            # Пробуем без parse_mode
-            payload2 = {"chat_id": chat_id, "text": text}
-            r2 = requests.post(
-                f"{BASE_URL}/messages",
-                headers=headers,
-                json=payload2,
-                timeout=10,
-                verify=CERT_PATH if USE_CERT else False
+        # Если ошибка 400 - пробуем без parse_mode
+        if response.status_code == 400:
+            logger.info("🔄 Пробую без parse_mode...")
+            payload2 = {
+                "chat_id": chat_id,
+                "text": text
+            }
+            response2 = max_request(
+                "POST",
+                "/messages",
+                data=payload2,
+                headers=headers
             )
-            return r2.status_code == 200
+            return response2.status_code == 200
             
         return False
+            
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
+        logger.error(f"❌ Ошибка отправки: {e}")
         return False
 
 def send_keyboard(chat_id, text, buttons):
+    """Отправка клавиатуры"""
     try:
         headers = get_headers()
         if not headers:
@@ -141,19 +158,20 @@ def send_keyboard(chat_id, text, buttons):
             "parse_mode": "Markdown",
             "attachments": [{
                 "type": "inline_keyboard",
-                "payload": {"buttons": keyboard_rows}
+                "payload": {
+                    "buttons": keyboard_rows
+                }
             }]
         }
 
-        r = requests.post(
-            f"{BASE_URL}/messages",
-            headers=headers,
-            json=payload,
-            timeout=10,
-            verify=CERT_PATH if USE_CERT else False
+        response = max_request(
+            "POST",
+            "/messages",
+            data=payload,
+            headers=headers
         )
         
-        if r.status_code == 200:
+        if response.status_code == 200:
             return True
         
         # Пробуем без parse_mode
@@ -162,21 +180,23 @@ def send_keyboard(chat_id, text, buttons):
             "text": text,
             "attachments": [{
                 "type": "inline_keyboard",
-                "payload": {"buttons": keyboard_rows}
+                "payload": {
+                    "buttons": keyboard_rows
+                }
             }]
         }
         
-        r2 = requests.post(
-            f"{BASE_URL}/messages",
-            headers=headers,
-            json=payload2,
-            timeout=10,
-            verify=CERT_PATH if USE_CERT else False
+        response2 = max_request(
+            "POST",
+            "/messages",
+            data=payload2,
+            headers=headers
         )
         
-        return r2.status_code == 200
+        return response2.status_code == 200
+        
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
+        logger.error(f"❌ Ошибка клавиатуры: {e}")
         return False
 
 def show_main_menu(chat_id):
@@ -192,11 +212,35 @@ def show_main_menu(chat_id):
         ]
     )
 
+def extract_ids_from_data(data):
+    """Извлечение ID из данных"""
+    user_id = None
+    chat_id = None
+    text = ""
+    
+    def search(obj):
+        nonlocal user_id, chat_id, text
+        if isinstance(obj, dict):
+            if 'chat_id' in obj and obj['chat_id']:
+                chat_id = obj['chat_id']
+            if 'user_id' in obj and obj['user_id']:
+                user_id = obj['user_id']
+            if 'text' in obj and obj['text']:
+                text = obj['text']
+            for value in obj.values():
+                search(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                search(item)
+    
+    search(data)
+    return user_id, chat_id, text
+
 # ========== ЭНДПОИНТЫ ==========
 
 @app.route('/')
 def index():
-    return "Bot is running!", 200
+    return "🤖 MAX Bot is running!", 200
 
 @app.route('/health')
 def health():
@@ -205,12 +249,18 @@ def health():
         "time": time.strftime('%Y-%m-%d %H:%M:%S'),
         "certificate": {
             "found": USE_CERT,
-            "path": CERT_PATH
+            "path": CERT_PATH,
+            "exists": os.path.exists(CERT_PATH) if CERT_PATH else False
+        },
+        "token": {
+            "exists": bool(TOKEN),
+            "preview": f"{TOKEN[:4]}...{TOKEN[-4:]}" if TOKEN else None
         }
     }, 200
 
 @app.route('/debug')
 def debug():
+    """Отладка"""
     return {
         "token": "✅" if TOKEN else "❌",
         "token_preview": f"{TOKEN[:4]}...{TOKEN[-4:]}" if TOKEN else None,
@@ -218,73 +268,150 @@ def debug():
             "found": USE_CERT,
             "path": CERT_PATH,
             "exists": os.path.exists(CERT_PATH) if CERT_PATH else False
-        }
+        },
+        "files": os.listdir(os.path.dirname(__file__))[:10]
     }, 200
 
-# ⭐ НОВЫЙ ЭНДПОИНТ ДЛЯ НАСТРОЙКИ ВЕБХУКА
 @app.route('/setup_webhook')
 def setup_webhook():
-    """Настройка вебхука через браузер"""
-    token = request.args.get('token')
+    """Настройка вебхука"""
+    token = request.args.get('token') or TOKEN
     
     if not token:
-        return "❌ Ошибка: не передан токен.<br>Используйте: <b>/setup_webhook?token=ВАШ_ТОКЕН</b>", 400
+        return """
+        <html>
+        <body style="font-family: monospace; padding: 20px;">
+            ❌ <b>Ошибка:</b> токен не передан и не установлен в окружении<br>
+            Используйте: <b>/setup_webhook?token=ВАШ_ТОКЕН</b>
+        </body>
+        </html>
+        """, 400
     
     webhook_url = "https://max-bot-ulzl.onrender.com/webhook"
-    base_url = "https://platform-api2.max.ru"
+    
+    html = f"""
+    <html>
+    <body style="font-family: monospace; padding: 20px; background: #f0f0f0;">
+        <div style="max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px;">
+            <h2>🔐 Настройка вебхука для MAX</h2>
+            <hr>
+            <p><b>📁 Сертификат:</b> {'✅ Найден' if USE_CERT else '❌ Не найден'}</p>
+            <p><b>📂 Путь:</b> {CERT_PATH if CERT_PATH else 'Не указан'}</p>
+            <p><b>🔑 Токен:</b> {token[:4]}...{token[-4:] if len(token) > 8 else '***'}</p>
+            <p><b>🌐 Вебхук:</b> {webhook_url}</p>
+            <hr>
+    """
     
     try:
+        # 1. Проверяем токен
+        html += "<h3>1️⃣ Проверка подключения...</h3>"
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json"
         }
         
-        # Удаляем старую подписку
-        result = "<b>🗑️ Удаление старой подписки...</b><br>"
+        # 2. Удаляем старую подписку
+        html += "<h3>2️⃣ Удаление старой подписки...</h3>"
         try:
-            r_del = requests.delete(
-                f"{base_url}/subscriptions",
-                headers=headers,
-                timeout=10,
-                verify=CERT_PATH if USE_CERT else False
-            )
-            result += f"DELETE: {r_del.status_code}<br>"
+            r_del = max_request("DELETE", "/subscriptions", headers=headers)
+            html += f"<p>DELETE: <b>{r_del.status_code}</b></p>"
             if r_del.status_code == 200:
-                result += "✅ Старая подписка удалена<br>"
+                html += "<p style='color: green;'>✅ Старая подписка удалена</p>"
+            else:
+                html += f"<p style='color: orange;'>⚠️ Ответ: {r_del.text[:100]}</p>"
         except Exception as e:
-            result += f"⚠️ Ошибка DELETE: {e}<br>"
+            html += f"<p style='color: orange;'>⚠️ Ошибка: {e}</p>"
         
-        # Создаем новую подписку
-        result += "<br><b>📝 Создание новой подписки...</b><br>"
-        r = requests.post(
-            f"{base_url}/subscriptions",
-            headers=headers,
-            json={"url": webhook_url},
-            timeout=10,
-            verify=CERT_PATH if USE_CERT else False
+        # 3. Создаем новую подписку
+        html += "<h3>3️⃣ Создание новой подписки...</h3>"
+        r = max_request(
+            "POST",
+            "/subscriptions",
+            data={"url": webhook_url},
+            headers=headers
         )
-        result += f"POST: {r.status_code}<br>"
-        result += f"Ответ: {r.text[:200]}<br>"
+        html += f"<p>POST: <b>{r.status_code}</b></p>"
+        html += f"<p>Ответ: <pre style='background: #f5f5f5; padding: 10px;'>{r.text[:300]}</pre></p>"
         
         if r.status_code == 200:
-            result += "✅ <b>ВЕБХУК УСПЕШНО НАСТРОЕН!</b><br>"
-            result += f"🌐 Вебхук: {webhook_url}"
+            html += """
+            <div style="background: #d4edda; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                ✅ <b>ВЕБХУК УСПЕШНО НАСТРОЕН!</b>
+            </div>
+            """
         else:
-            result += f"❌ Ошибка: {r.text[:200]}"
+            html += f"""
+            <div style="background: #f8d7da; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                ❌ <b>Ошибка настройки вебхука</b><br>
+                Код: {r.status_code}<br>
+                {r.text[:200]}
+            </div>
+            """
         
-        return f"<html><body style='font-family: monospace; padding: 20px;'>{result}</body></html>"
+        html += """
+        <hr>
+        <p><a href="/health">✅ Проверить здоровье</a> | <a href="/debug">🔍 Отладка</a></p>
+        </div>
+        </body>
+        </html>
+        """
+        
+        return html
         
     except Exception as e:
-        return f"❌ Ошибка: {e}", 500
+        return f"""
+        <html>
+        <body style="font-family: monospace; padding: 20px;">
+            <div style="background: #f8d7da; padding: 15px; border-radius: 5px;">
+                ❌ <b>Ошибка:</b> {e}
+            </div>
+        </body>
+        </html>
+        """, 500
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    """Обработка вебхука"""
     try:
         data = request.get_json()
-        logger.info("Получен вебхук")
+        logger.info("=" * 50)
+        logger.info("📩 ПОЛУЧЕН ВЕБХУК!")
+        logger.info(f"📦 Данные: {json.dumps(data, indent=2)[:500]}")
+
+        if not data:
+            return jsonify({"ok": True}), 200
+
+        user_id, chat_id, text = extract_ids_from_data(data)
+        
+        if not chat_id and user_id:
+            chat_id = user_id
+
+        logger.info(f"💬 user_id={user_id}, chat_id={chat_id}, text='{text[:30] if text else ''}'")
+
+        if not chat_id:
+            return jsonify({"ok": True}), 200
+
+        # Обработка команд
+        if text:
+            if text.lower() in ["/start", "start"]:
+                show_main_menu(chat_id)
+                return jsonify({"ok": True}), 200
+
+            if text.lower() == "/choose":
+                send_message(chat_id, "📁 Выберите папку (функция в разработке)")
+                return jsonify({"ok": True}), 200
+
+            if text.lower() == "/help":
+                send_message(
+                    chat_id,
+                    "📖 **Помощь**\n\nКоманды:\n/start - Главное меню\n/choose - Выбрать папку\n/publish - Начать публикацию\n/stop - Остановить\n/help - Справка"
+                )
+                return jsonify({"ok": True}), 200
+
         return jsonify({"ok": True}), 200
+
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
+        logger.error(f"❌ ОШИБКА: {e}")
         return jsonify({"ok": False}), 500
 
 # ========== ЗАПУСК ==========
