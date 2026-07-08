@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+import re
 import urllib3
 from modules import GoogleDriveStorage, Publisher, Scheduler, UserState
 
@@ -50,29 +51,105 @@ class MaxAPIClient:
         except Exception as e:
             logger.error(f"❌ Ошибка отправки: {e}")
             return False
-    
-    def send_photo(self, group_id, image_data, caption=None):
-        """Отправка изображения"""
-        try:
-            # Здесь нужно использовать multipart/form-data
-            # Это пример, требует доработки
-            files = {'file': ('image.jpg', image_data, 'image/jpeg')}
-            data = {'caption': caption} if caption else {}
-            response = requests.post(
-                f"{self.base_url}/messages",
-                headers=self.get_headers(),
-                params={"chat_id": group_id},
-                data=data,
-                files=files,
-                timeout=30,
-                verify=False
-            )
-            return response.status_code == 200
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки фото: {e}")
-            return False
 
 api_client = MaxAPIClient()
+
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+
+def extract_folder_id_from_url(url: str) -> str:
+    """Извлечение folder_id из ссылки Google Drive"""
+    patterns = [
+        r'folders/([a-zA-Z0-9_-]+)',
+        r'id=([a-zA-Z0-9_-]+)',
+        r'drive.google.com/open\?id=([a-zA-Z0-9_-]+)',
+        r'([a-zA-Z0-9_-]{28,})'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+# ========== МЕНЮ ==========
+
+def show_main_menu(user_id):
+    """Главное меню"""
+    keyboard = {
+        "text": "🏠 **Главное меню**\n\nВыберите действие:",
+        "format": "markdown",
+        "attachments": [{
+            "type": "inline_keyboard",
+            "payload": {
+                "buttons": [
+                    [{"text": "📂 Выбрать папку", "type": "callback", "payload": "choose_folder"}],
+                    [{"text": "▶️ Начать публикацию", "type": "callback", "payload": "start_publish"}],
+                    [{"text": "⏹ Остановить", "type": "callback", "payload": "stop"}],
+                    [{"text": "ℹ️ Помощь", "type": "callback", "payload": "help"}]
+                ]
+            }
+        }]
+    }
+    response = requests.post(
+        f"{BASE_URL}/messages",
+        headers=api_client.get_headers(),
+        params={"user_id": user_id},
+        json=keyboard,
+        timeout=30,
+        verify=False
+    )
+
+def show_folder_menu(user_id):
+    """Меню выбора папки — поле для ввода ссылки"""
+    keyboard = {
+        "text": (
+            "📂 **Выбор папки**\n\n"
+            "Вставьте ссылку на **корневую папку** Google Drive.\n\n"
+            "**Важно:**\n"
+            "✅ Папка должна быть доступна для чтения и записи.\n"
+            "✅ Внутри папки должны быть подпапки с объявлениями.\n"
+            "✅ Название подпапки должно содержать ID группы.\n"
+            "   Пример: `Самосвалы 8 -76576474415864`\n\n"
+            "📎 **Пример ссылки:**\n"
+            "`https://drive.google.com/drive/folders/ABC123XYZ`"
+        ),
+        "format": "markdown",
+        "attachments": [{
+            "type": "inline_keyboard",
+            "payload": {
+                "buttons": [
+                    [{"text": "🔙 Назад", "type": "callback", "payload": "back"}],
+                    [{"text": "🏠 В меню", "type": "callback", "payload": "main_menu"}]
+                ]
+            }
+        }]
+    }
+    
+    response = requests.post(
+        f"{BASE_URL}/messages",
+        headers=api_client.get_headers(),
+        params={"user_id": user_id},
+        json=keyboard,
+        timeout=30,
+        verify=False
+    )
+    
+    user_state.set_state(user_id, 'waiting_folder_link')
+
+def show_help(user_id):
+    help_text = (
+        "📖 **Помощь**\n\n"
+        "📂 /choose - Выбрать папку\n"
+        "▶️ /start - Главное меню\n"
+        "⏹ /stop - Остановить публикацию\n"
+        "ℹ️ /help - Справка\n\n"
+        "**Как это работает:**\n"
+        "1. Создайте корневую папку на Google Drive.\n"
+        "2. Внутри создайте подпапки с названием: `Название -123456789`.\n"
+        "3. В каждой подпапке: до 10 изображений и файл `info.txt`.\n"
+        "4. Отправьте боту ссылку на корневую папку.\n"
+        "5. Бот автоматически опубликует всё с задержками."
+    )
+    api_client.send_message(user_id, help_text)
 
 # ========== ЭНДПОИНТЫ ==========
 
@@ -111,7 +188,6 @@ def setup_webhook():
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Обработка вебхука от МАХ"""
     try:
         data = request.get_json()
         logger.info("📩 ПОЛУЧЕН ВЕБХУК!")
@@ -123,14 +199,12 @@ def webhook():
         text = None
         payload = None
         
-        # ========== ОБРАБОТКА CALLBACK ==========
         if 'callback' in data:
             callback = data['callback']
             payload = callback.get('payload')
             if 'user' in callback:
                 user_id = callback['user'].get('user_id')
         
-        # ========== ОБРАБОТКА СООБЩЕНИЯ ==========
         elif 'message' in data:
             message = data['message']
             if 'sender' in message:
@@ -146,14 +220,22 @@ def webhook():
         # ========== ОБРАБОТКА КНОПОК ==========
         if payload:
             if payload == "choose_folder":
-                user_state.set_state(user_id, 'waiting_folder')
-                api_client.send_message(user_id, "📁 **Введите ссылку на корневую папку Google Drive:**\n\nПример: `https://drive.google.com/drive/folders/ABC123`")
+                show_folder_menu(user_id)
             elif payload == "start_publish":
-                api_client.send_message(user_id, "▶️ Начинаю публикацию... (выберите папку через /choose)")
+                api_client.send_message(user_id, "▶️ Начинаю публикацию...")
             elif payload == "stop":
                 api_client.send_message(user_id, "⏹️ Публикация остановлена.")
             elif payload == "help":
                 show_help(user_id)
+            elif payload == "back":
+                show_main_menu(user_id)
+            elif payload == "main_menu":
+                show_main_menu(user_id)
+            else:
+                # ❌ НЕ ОТПРАВЛЯЕМ СООБЩЕНИЕ ДЛЯ НЕИЗВЕСТНЫХ КНОПОК
+                logger.info(f"🔘 Неизвестный payload: {payload}")
+                pass
+            
             return jsonify({"ok": True}), 200
 
         # ========== ОБРАБОТКА КОМАНД ==========
@@ -164,8 +246,7 @@ def webhook():
                 show_main_menu(user_id)
             
             elif text_lower == "/choose":
-                user_state.set_state(user_id, 'waiting_folder')
-                api_client.send_message(user_id, "📁 **Введите ссылку на корневую папку Google Drive:**\n\nПример: `https://drive.google.com/drive/folders/ABC123`")
+                show_folder_menu(user_id)
             
             elif text_lower == "/stop":
                 api_client.send_message(user_id, "⏹️ Публикация остановлена.")
@@ -173,18 +254,42 @@ def webhook():
             elif text_lower == "/help":
                 show_help(user_id)
             
-            elif user_state.get_state(user_id) == 'waiting_folder':
-                # Пользователь ввёл ссылку на папку
-                folder_url = text
+            elif user_state.get_state(user_id) == 'waiting_folder_link':
+                # Пользователь ввёл ссылку
+                folder_url = text.strip()
                 user_state.clear_state(user_id)
                 
-                # Здесь нужны credentials пользователя
-                # Пока используем заглушку
-                api_client.send_message(user_id, "✅ Папка получена. Начинаю публикацию...")
+                if not folder_url.startswith('https://drive.google.com/'):
+                    api_client.send_message(
+                        user_id,
+                        "❌ **Неверная ссылка!**\n\n"
+                        "Ссылка должна начинаться с:\n"
+                        "`https://drive.google.com/`\n\n"
+                        "Попробуйте ещё раз."
+                    )
+                    show_folder_menu(user_id)
+                    return jsonify({"ok": True}), 200
                 
-                # В реальности нужно получать credentials от пользователя
-                # Сейчас используем заглушку
-                storage = GoogleDriveStorage(user_id, credentials=None)  # Нужны реальные credentials
+                folder_id = extract_folder_id_from_url(folder_url)
+                if not folder_id:
+                    api_client.send_message(
+                        user_id,
+                        "❌ **Не удалось извлечь ID папки.**\n\n"
+                        "Убедитесь, что ссылка правильная.\n"
+                        "Пример: `https://drive.google.com/drive/folders/ABC123XYZ`"
+                    )
+                    show_folder_menu(user_id)
+                    return jsonify({"ok": True}), 200
+                
+                api_client.send_message(
+                    user_id,
+                    f"✅ **Папка принята!**\n\n"
+                    f"📁 ID: `{folder_id}`\n"
+                    f"⏳ Начинаю сканирование..."
+                )
+                
+                # Запускаем публикацию
+                storage = GoogleDriveStorage(user_id, credentials=None)
                 publisher = Publisher(user_id, storage, api_client, scheduler)
                 publisher.start_publication(folder_url)
 
@@ -193,42 +298,6 @@ def webhook():
     except Exception as e:
         logger.error(f"❌ ОШИБКА: {e}")
         return jsonify({"ok": False}), 500
-
-def show_main_menu(user_id):
-    """Главное меню"""
-    keyboard = {
-        "text": "🏠 **Главное меню**\n\nВыберите действие:",
-        "format": "markdown",
-        "attachments": [{
-            "type": "inline_keyboard",
-            "payload": {
-                "buttons": [
-                    [{"text": "📂 Выбрать папку", "type": "callback", "payload": "choose_folder"}],
-                    [{"text": "▶️ Начать публикацию", "type": "callback", "payload": "start_publish"}],
-                    [{"text": "⏹ Остановить", "type": "callback", "payload": "stop"}],
-                    [{"text": "ℹ️ Помощь", "type": "callback", "payload": "help"}]
-                ]
-            }
-        }]
-    }
-    # Отправка клавиатуры
-    api_client.send_message(user_id, keyboard['text'], 'markdown')
-
-def show_help(user_id):
-    help_text = (
-        "📖 **Помощь**\n\n"
-        "📂 /choose - Выбрать папку\n"
-        "▶️ /start - Главное меню\n"
-        "⏹ /stop - Остановить публикацию\n"
-        "ℹ️ /help - Справка\n\n"
-        "**Как это работает:**\n"
-        "1. Создайте корневую папку на Google Drive.\n"
-        "2. Внутри создайте подпапки с названием: `Название -123456789`.\n"
-        "3. В каждой подпапке: до 10 изображений и файл `info.txt`.\n"
-        "4. Отправьте боту ссылку на корневую папку.\n"
-        "5. Бот автоматически опубликует всё с задержками."
-    )
-    api_client.send_message(user_id, help_text)
 
 # ========== ЗАПУСК ==========
 
