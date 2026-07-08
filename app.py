@@ -333,75 +333,66 @@ def setup_webhook():
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    """Обработка вебхука от МАХ"""
     try:
         data = request.get_json()
         logger.info("=" * 50)
         logger.info("📩 ПОЛУЧЕН ВЕБХУК!")
-        logger.info(f"📦 ВСЕ ДАННЫЕ: {json.dumps(data, indent=2, ensure_ascii=False)[:1000]}")
-        
-        # Проверяем, что пришло
+
         if not data:
             return jsonify({"ok": True}), 200
 
-        # ========== УНИВЕРСАЛЬНЫЙ ПОИСК ID И ТЕКСТА ==========
+        # ========== ПАРСИНГ ДАННЫХ МАХ ==========
         chat_id = None
         text = None
         
-        # Поиск в любом месте данных
-        def find_in_dict(obj, keys, default=None):
-            if isinstance(obj, dict):
-                for key in keys:
-                    if key in obj:
-                        return obj[key]
-                for value in obj.values():
-                    result = find_in_dict(value, keys, default)
-                    if result is not None:
-                        return result
-            elif isinstance(obj, list):
-                for item in obj:
-                    result = find_in_dict(item, keys, default)
-                    if result is not None:
-                        return result
-            return default
+        # Структура МАХ: recipient.chat_id и body.text
+        if 'recipient' in data:
+            recipient = data['recipient']
+            chat_id = recipient.get('chat_id')
+            
+            if 'body' in data:
+                body = data['body']
+                text = body.get('text')
         
-        chat_id = find_in_dict(data, ['chat_id', 'chat', 'id', 'user_id'])
-        text = find_in_dict(data, ['text', 'message', 'data'])
-        
-        # Если chat_id не нашли — пробуем другие варианты
+        # Fallback: если структура другая
         if not chat_id:
-            # Проверяем стандартную структуру Telegram
-            if 'message' in data:
-                chat_id = data['message'].get('chat', {}).get('id')
-                text = data['message'].get('text')
-            elif 'callback_query' in data:
-                chat_id = data['callback_query'].get('message', {}).get('chat', {}).get('id')
-                text = data['callback_query'].get('data')
+            chat_id = data.get('chat_id')
+            text = data.get('text')
         
         if not chat_id:
-            logger.warning("⚠️ Не удалось найти chat_id в данных")
+            logger.warning("⚠️ Не удалось найти chat_id")
+            logger.info(f"📦 Данные: {json.dumps(data, indent=2, ensure_ascii=False)[:500]}")
             return jsonify({"ok": True}), 200
-        
+
         logger.info(f"💬 chat_id={chat_id}, text='{text}'")
-        
-        # Обработка команд
-        if text:
-            if text.lower() in ["/start", "start"]:
+
+        # ========== ОБРАБОТКА КОМАНД ==========
+        if text and isinstance(text, str):
+            text_lower = text.lower().strip()
+            
+            if text_lower in ["/start", "start"]:
                 show_main_menu(chat_id)
                 return jsonify({"ok": True}), 200
-            
-            if text.lower() == "/help":
+
+            if text_lower == "/help":
                 send_message(
                     chat_id,
                     "📖 **Помощь**\n\nКоманды:\n/start - Главное меню\n/choose - Выбрать папку\n/publish - Начать публикацию\n/stop - Остановить\n/help - Справка"
                 )
                 return jsonify({"ok": True}), 200
-        
+
+            if text_lower == "/choose":
+                send_message(chat_id, "📁 Выберите папку (функция в разработке)")
+                return jsonify({"ok": True}), 200
+
         return jsonify({"ok": True}), 200
-        
+
     except Exception as e:
         logger.error(f"❌ ОШИБКА: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return jsonify({"ok": False}), 500
-
 # ========== ЗАПУСК ==========
 
 if __name__ == "__main__":
