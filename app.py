@@ -29,9 +29,59 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
 
-# ПУТЬ К СЕРТИФИКАТУ
-CERT_PATH = os.path.join(os.path.dirname(__file__), 'russian_trusted_root_ca_gost_2025')
-USE_CERT = os.path.exists(CERT_PATH)
+# ========== УНИВЕРСАЛЬНЫЙ ПОИСК СЕРТИФИКАТА ==========
+def find_certificate():
+    """Универсальный поиск сертификата Минцифры в разных форматах"""
+    base_dir = os.path.dirname(__file__)
+    
+    # 1. Проверяем конкретные имена файлов
+    cert_names = [
+        'russian_trusted_root_ca_gost_2025',
+        'russian_trusted_root_ca_gost_2025.cer',
+        'russian_trusted_root_ca_gost_2025.pem',
+        'russian_trusted_root_ca_gost_2025.crt',
+    ]
+    
+    for name in cert_names:
+        path = os.path.join(base_dir, name)
+        if os.path.exists(path):
+            logger.info(f"✅ Найден сертификат: {name}")
+            return path
+    
+    # 2. Ищем любой файл с 'russian' в имени
+    try:
+        for file in os.listdir(base_dir):
+            if 'russian' in file.lower() and file.endswith(('.cer', '.pem', '.crt')):
+                path = os.path.join(base_dir, file)
+                logger.info(f"✅ Найден сертификат: {file}")
+                return path
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка поиска файлов: {e}")
+    
+    # 3. Проверяем папку certs
+    certs_dir = os.path.join(base_dir, 'certs')
+    if os.path.exists(certs_dir):
+        try:
+            for file in os.listdir(certs_dir):
+                if 'russian' in file.lower() and file.endswith(('.cer', '.pem', '.crt')):
+                    path = os.path.join(certs_dir, file)
+                    logger.info(f"✅ Найден сертификат в certs/: {file}")
+                    return path
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка поиска в certs/: {e}")
+    
+    logger.warning("⚠️ Сертификат Минцифры НЕ НАЙДЕН!")
+    return None
+
+# Находим сертификат
+CERT_PATH = find_certificate()
+USE_CERT = CERT_PATH is not None
+
+# Логируем результат
+if USE_CERT:
+    logger.info(f"🔐 Сертификат загружен: {CERT_PATH}")
+else:
+    logger.warning("⚠️ Сертификат не найден! Используется стандартная проверка SSL")
 
 # ========== ХРАНИЛИЩА ==========
 user_states = {}
