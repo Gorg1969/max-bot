@@ -17,11 +17,6 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ГЛОБАЛЬНЫЕ ХРАНИЛИЩА (ОБЯВЛЕНИЕ ДО ОПРЕДЕЛЕНИЯ ФУНКЦИЙ)
-user_states = {}                  # Текущие состояния пользователя
-user_folders = {}               # Связка user_id -> путь к папке
-user_publication_status = {}    # Флаг публикации (True/False)
-
 # ========== КОНФИГ ==========
 TOKEN = os.environ.get("TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
@@ -35,8 +30,6 @@ if os.path.exists(CERT_PATH):
     logger.info(f"✅ Сертификат найден: {CERT_PATH}, но пока отключен")
 else:
     logger.warning(f"⚠️ Сертификат НЕ НАЙДЕН: {CERT_PATH}")
-
-# Остальные функции (send_message, send_keyboard, get_folders...) начинаются отсюда
 
 # ========== ФУНКЦИЯ ЗАПРОСОВ К МАХ ==========
 def max_request(method, endpoint, data=None, headers=None):
@@ -85,21 +78,23 @@ def get_headers():
         "Content-Type": "application/json"
     }
 
-def send_message(user_id, text, parse_mode="Markdown"):
-    """Отправка сообщения в МАХ (ТОЛЬКО НА USER_ID!)"""
+def send_message(chat_id, text, parse_mode="Markdown"):
+    """Отправка сообщения в МАХ (ТОЛЬКО НА CHAT_ID!)"""
     try:
         headers = get_headers()
         if not headers:
             return False
             
-        # ПРАВИЛЬНЫЙ ФОРМАТ ДЛЯ МАХ
+        # ✅ ПРАВИЛЬНЫЙ ФОРМАТ ДЛЯ МАХ - ТОЛЬКО CHAT_ID
         payload = {
-            "user_id": user_id,           # <-- user_id
+            "recipient": {
+                "chat_id": chat_id  # <-- ТОЛЬКО chat_id!
+            },
             "text": text,
             "parse_mode": parse_mode
         }
         
-        logger.info(f"📤 Отправка в user_id={user_id}")
+        logger.info(f"📤 Отправка в chat_id={chat_id}")
         logger.info(f"📦 Пейлоад: {json.dumps(payload, ensure_ascii=False)[:200]}")
         
         response = requests.post(
@@ -115,11 +110,12 @@ def send_message(user_id, text, parse_mode="Markdown"):
         if response.status_code == 200:
             return True
             
-        # Если ошибка 400, пробуем без markdown
         if response.status_code == 400:
             logger.info("🔄 Пробую без parse_mode...")
             payload2 = {
-                "user_id": user_id,             # <-- user_id
+                "recipient": {
+                    "chat_id": chat_id  # <-- ТОЛЬКО chat_id!
+                },
                 "text": text
             }
             response2 = requests.post(
@@ -138,8 +134,8 @@ def send_message(user_id, text, parse_mode="Markdown"):
         logger.error(f"❌ Ошибка отправки: {e}")
         return False
 
-def send_keyboard(user_id, text, buttons):
-    """Отправка клавиатуры в МАХ (ТОЛЬКО НА USER_ID!)"""
+def send_keyboard(chat_id, text, buttons):
+    """Отправка клавиатуры в МАХ (ТОЛЬКО НА CHAT_ID!)"""
     try:
         headers = get_headers()
         if not headers:
@@ -153,8 +149,11 @@ def send_keyboard(user_id, text, buttons):
                 "payload": button["payload"]
             }])
 
+        # ✅ ПРАВИЛЬНЫЙ ФОРМАТ ДЛЯ МАХ - ТОЛЬКО CHAT_ID
         payload = {
-            "user_id": user_id,              # <-- user_id
+            "recipient": {
+                "chat_id": chat_id  # <-- ТОЛЬКО chat_id!
+            },
             "text": text,
             "parse_mode": "Markdown",
             "attachments": [{
@@ -165,7 +164,7 @@ def send_keyboard(user_id, text, buttons):
             }]
         }
 
-        logger.info(f"📤 Отправка клавиатуры в user_id={user_id}")
+        logger.info(f"📤 Отправка клавиатуры в chat_id={chat_id}")
         logger.info(f"📦 Пейлоад: {json.dumps(payload, ensure_ascii=False)[:300]}")
 
         response = requests.post(
@@ -185,7 +184,9 @@ def send_keyboard(user_id, text, buttons):
         if response.status_code == 400:
             logger.info("🔄 Пробую без parse_mode...")
             payload2 = {
-                "user_id": user_id,               # <-- user_id
+                "recipient": {
+                    "chat_id": chat_id  # <-- ТОЛЬКО chat_id!
+                },
                 "text": text,
                 "attachments": [{
                     "type": "inline_keyboard",
@@ -208,84 +209,17 @@ def send_keyboard(user_id, text, buttons):
                 return True
         
         logger.info("🔄 Отправляю обычное сообщение...")
-        return send_message(user_id, text)  # <-- user_id
+        return send_message(chat_id, text)
         
     except Exception as e:
         logger.error(f"❌ Ошибка клавиатуры: {e}")
         return False
 
-def send_to_group(chat_id, text):
-    """Отправка в группу (используется chat_id)"""
-    try:
-        headers = get_headers()
-        if not headers:
-            return False
-            
-        payload = {
-            "chat_id": chat_id,                 # <-- chat_id (только для групп)
-            "text": text,
-            "parse_mode": "Markdown"
-        }
-        response = requests.post(
-            f"{BASE_URL}/messages",
-            headers=headers,
-            json=payload,
-            timeout=30,
-            verify=False
-        )
-        logger.info(f"📤 Отправка в группу {chat_id}: {response.status_code}")
-        return response.status_code == 200
-    except Exception as e:
-        logger.error(f"❌ Ошибка отправки в группу: {e}")
-        return False
-
-# ========== РАБОТА С ПАПКАМИ ==========
-
-def get_folders(base_path):
-    try:
-        path = Path(base_path)
-        if not path.exists():
-            return []
-        folders = []
-        for item in path.iterdir():
-            if item.is_dir():
-                files = list(item.glob("*"))
-                if files:
-                    match = re.search(r'(-\d+)$', item.name)
-                    group_id = match.group(1) if match else None
-                    folders.append({
-                        "name": item.name,
-                        "path": str(item),
-                        "group_id": group_id
-                    })
-        return folders
-    except Exception as e:
-        logger.error(f"Ошибка чтения папки: {e}")
-        return []
-
-def get_post_text(folder_path):
-    try:
-        path = Path(folder_path)
-        text_files = list(path.glob("*.txt")) + list(path.glob("*.md"))
-        if text_files:
-            with open(text_files[0], 'r', encoding='utf-8') as f:
-                return f.read().strip()
-        return None
-    except Exception as e:
-        logger.error(f"Ошибка чтения файла: {e}")
-        return None
-
-def human_delay():
-    return random.randint(60, 180)
-
-# ========== МЕНЮ ==========
-
-def show_main_menu(user_id):
-    """Главное меню (отправка на user_id)"""
-    folder = user_folders.get(user_id, "Не выбрана")
+def show_main_menu(chat_id):
+    """Главное меню"""
     send_keyboard(
-        user_id,                                   # <-- user_id
-        f"🏠 **Главное меню**\n\n📂 Папка: `{folder}`\n\nВыберите действие:",
+        chat_id,
+        "🏠 **Главное меню**\n\nВыберите действие:",
         [
             {"text": "📂 Выбрать папку", "payload": "choose_folder"},
             {"text": "▶️ Начать публикацию", "payload": "start_publish"},
@@ -294,151 +228,153 @@ def show_main_menu(user_id):
         ]
     )
 
-def show_folder_selection(user_id):
-    """Выбор папки (отправка на user_id)"""
-    current = user_folders.get(user_id)
-    if current:
-        send_keyboard(
-            user_id,                                  # <-- user_id
-            f"📂 **Текущая папка:**\n`{current}`\n\nЧто хотите сделать?",
-            [
-                {"text": "📁 Изменить папку", "payload": "change_folder"},
-                {"text": "▶️ Начать публикацию", "payload": "start_publish"},
-                {"text": "🏠 В главное меню", "payload": "main_menu"}
-            ]
+# ========== ЭНДПОИНТЫ ==========
+
+@app.route('/')
+def index():
+    return "🤖 MAX Bot is running!", 200
+
+@app.route('/health')
+def health():
+    return {
+        "status": "ok",
+        "time": time.strftime('%Y-%m-%d %H:%M:%S'),
+        "certificate": {
+            "found": USE_CERT,
+            "path": CERT_PATH
+        },
+        "token": {
+            "exists": bool(TOKEN),
+            "preview": f"{TOKEN[:4]}...{TOKEN[-4:]}" if TOKEN else None
+        }
+    }, 200
+
+@app.route('/debug')
+def debug():
+    """Отладка"""
+    return {
+        "token": "✅" if TOKEN else "❌",
+        "token_preview": f"{TOKEN[:4]}...{TOKEN[-4:]}" if TOKEN else None,
+        "certificate": {
+            "found": USE_CERT,
+            "path": CERT_PATH,
+            "exists": os.path.exists(CERT_PATH) if CERT_PATH else False
+        }
+    }, 200
+
+@app.route('/setup_webhook')
+def setup_webhook():
+    token = request.args.get('token') or TOKEN
+    
+    if not token:
+        return "❌ Токен не найден", 400
+    
+    webhook_url = "https://max-bot-ulzl.onrender.com/webhook"
+    
+    html = f"""
+    <html>
+    <body style="font-family: monospace; padding: 20px;">
+        <h2>🔐 Настройка вебхука</h2>
+        <p><b>Сертификат:</b> {'✅ Есть' if USE_CERT else '❌ Нет'}</p>
+        <p><b>Токен:</b> {token[:4]}...{token[-4:]}</p>
+        <hr>
+    """
+    
+    try:
+        headers = {
+            "Authorization": token,
+            "Content-Type": "application/json"
+        }
+        
+        html += "<h3>🗑️ Удаление...</h3>"
+        try:
+            r_del = requests.delete(
+                "https://platform-api2.max.ru/subscriptions",
+                headers=headers,
+                timeout=10,
+                verify=False
+            )
+            html += f"<p>DELETE: {r_del.status_code}</p>"
+        except Exception as e:
+            html += f"<p>⚠️ Ошибка: {e}</p>"
+        
+        html += "<h3>📝 Создание...</h3>"
+        r = requests.post(
+            "https://platform-api2.max.ru/subscriptions",
+            headers=headers,
+            json={"url": webhook_url},
+            timeout=10,
+            verify=False
         )
-    else:
-        send_message(
-            user_id,                                 # <-- user_id
-            "📁 **Укажите путь к папке с постами**\n\n"
-            "📂 **Структура:**\n"
-            "```\n"
-            "Папка/\n"
-            "├── Мои тренировки -123456789/\n"
-            "│   └── post.txt\n"
-            "├── Новости -987654321/\n"
-            "│   └── post.txt\n"
-            "└── ...\n"
-            "```\n\n"
-            "💡 ID группы в имени папки (с минусом)\n"
-            "📝 Введите путь:"
-        )
-        user_states[user_id] = "waiting_folder"
-
-def publish_posts(user_id, folder_path):
-    """Публикация постов (отправка на chat_id)"""
-    if user_publication_status.get(user_id, False):
-        send_message(user_id, "⚠️ Публикация уже запущена!")
-        return
-
-    folders = get_folders(folder_path)
-    if not folders:
-        send_message(user_id, "❌ Нет папок с файлами!")
-        return
-
-    user_publication_status[user_id] = True
-    total = len(folders)
-    published = 0
-    skipped = 0
-
-    send_message(user_id, f"📁 Найдено: {total}\n🔄 Начинаю публикацию...")
-
-    for i, folder in enumerate(folders, 1):
-        if not user_publication_status.get(user_id, True):
-            send_message(user_id, f"⏹ Остановлено! Опубликовано: {published}/{total}")
-            break
-
-        group_id = folder.get("group_id")
-        if not group_id:
-            send_message(user_id, f"⚠️ В папке {folder['name']} нет ID группы")
-            skipped += 1
-            continue
-
-        text = get_post_text(folder["path"])
-        if not text:
-            send_message(user_id, f"⚠️ В папке {folder['name']} нет текста")
-            skipped += 1
-            continue
-
-        result = send_to_group(group_id, f"📝 **Пост {i}/{total}**\n📁 {folder['name']}\n\n{text}")
-
-        if result:
-            published += 1
-            send_message(user_id, f"✅ Пост {i}/{total} опубликован в {group_id}")
+        html += f"<p>POST: {r.status_code}</p>"
+        html += f"<p>Ответ: {r.text[:300]}</p>"
+        
+        if r.status_code == 200:
+            html += "<p style='color: green;'>✅ ВЕБХУК НАСТРОЕН!</p>"
         else:
-            skipped += 1
-            send_message(user_id, f"❌ Ошибка публикации в {group_id}")
-
-        if i < total and user_publication_status.get(user_id, True):
-            delay = human_delay()
-            mins = delay // 60
-            secs = delay % 60
-            send_message(user_id, f"⏳ Следующий пост через {mins}м {secs}с")
-            time.sleep(delay)
-
-    if user_publication_status.get(user_id, True):
-        send_message(
-            user_id,
-            f"✅ **ГОТОВО!**\nОпубликовано: {published}/{total}\nПропущено: {skipped}"
-        )
-
-    user_publication_status[user_id] = False
-    show_main_menu(user_id)
-
-# ========== ВЕБХУК ==========
-
-def extract_user_and_chat(data):
-    """Поиск user_id и chat_id в любых вложенных объектах"""
-    user_id = None
-    chat_id = None
-    text = ""
-
-    def search(obj):
-        nonlocal user_id, chat_id, text
-        if isinstance(obj, dict):
-            if "user_id" in obj:
-                user_id = obj["user_id"]
-            if "chat_id" in obj:
-                chat_id = obj["chat_id"]
-            if "text" in obj:
-                text = obj["text"]
-            for value in obj.values():
-                search(value)
-        elif isinstance(obj, list):
-            for item in obj:
-                search(item)
-
-    search(data)
-    return user_id, chat_id, text
+            html += f"<p style='color: red;'>❌ Ошибка: {r.text[:200]}</p>"
+        
+        html += "</body></html>"
+        return html
+        
+    except Exception as e:
+        return f"❌ Ошибка: {e}", 500
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Обработка вебхука от МАХ"""
+    """Обработка вебхука от МАХ (ТОЛЬКО CHAT_ID!)"""
     try:
         data = request.get_json()
         logger.info("=" * 50)
-        logger.info(f"ПОЛУЧЕН ВЕБХУК: {json.dumps(data, ensure_ascii=False)[:500]}")
+        logger.info("📩 ПОЛУЧЕН ВЕБХУК!")
 
-        # Универсальный поиск user_id
-        user_id, _, text = extract_user_and_chat(data)
-
-        if not user_id:
-            logger.error("❌ Не удалось найти user_id!")
+        if not data:
             return jsonify({"ok": True}), 200
 
-        # Работаем только с user_id
+        # ========== ИЩЕМ ТОЛЬКО CHAT_ID ==========
+        chat_id = None
+        text = None
+        
+        # Рекурсивный поиск chat_id и text
+        def search(obj):
+            nonlocal chat_id, text
+            if isinstance(obj, dict):
+                if "chat_id" in obj and chat_id is None:
+                    chat_id = obj["chat_id"]
+                if "text" in obj and text is None:
+                    text = obj["text"]
+                for value in obj.values():
+                    search(value)
+            elif isinstance(obj, list):
+                for item in obj:
+                    search(item)
+        
+        search(data)
+        
+        if not chat_id:
+            logger.warning("⚠️ Не удалось найти chat_id в данных")
+            logger.info(f"📦 Данные: {json.dumps(data, indent=2, ensure_ascii=False)[:500]}")
+            return jsonify({"ok": True}), 200
+
+        logger.info(f"💬 chat_id={chat_id}, text='{text}'")
+
+        # ========== ОБРАБОТКА КОМАНД ==========
         if text and isinstance(text, str):
             text_lower = text.lower().strip()
             
             if text_lower in ["/start", "start"]:
-                show_main_menu(user_id)  # <-- user_id
+                show_main_menu(chat_id)  # <-- ТОЛЬКО chat_id!
                 return jsonify({"ok": True}), 200
 
             if text_lower == "/help":
                 send_message(
-                    user_id,                     # <-- user_id
+                    chat_id,  # <-- ТОЛЬКО chat_id!
                     "📖 **Помощь**\n\nКоманды:\n/start - Главное меню\n/choose - Выбрать папку\n/publish - Начать публикацию\n/stop - Остановить\n/help - Справка"
                 )
+                return jsonify({"ok": True}), 200
+
+            if text_lower == "/choose":
+                send_message(chat_id, "📁 Выберите папку (функция в разработке)")
                 return jsonify({"ok": True}), 200
 
         return jsonify({"ok": True}), 200
