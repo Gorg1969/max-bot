@@ -321,6 +321,7 @@ def setup_webhook():
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    """Обработка вебхука от МАХ"""
     try:
         data = request.get_json()
         logger.info("=" * 50)
@@ -329,7 +330,9 @@ def webhook():
         if not data:
             return jsonify({"ok": True}), 200
 
+        # ========== ПАРСИНГ ДАННЫХ МАХ ==========
         chat_id = None
+        user_id = None
         text = None
         
         if 'message' in data:
@@ -337,40 +340,48 @@ def webhook():
             if 'recipient' in message:
                 recipient = message['recipient']
                 chat_id = recipient.get('chat_id')
+                user_id = recipient.get('user_id')
             if 'body' in message:
                 body = message['body']
                 text = body.get('text')
         
-        if not chat_id:
+        if not chat_id and not user_id:
             if 'recipient' in data:
-                chat_id = data['recipient'].get('chat_id')
-            if not chat_id:
-                chat_id = data.get('chat_id')
-                text = data.get('text')
+                recipient = data['recipient']
+                chat_id = recipient.get('chat_id')
+                user_id = recipient.get('user_id')
         
-        if not chat_id:
-            logger.warning("⚠️ Не удалось найти chat_id")
+        # Пробуем отправить на chat_id
+        recipient_id = chat_id if chat_id else user_id
+        
+        if not recipient_id:
+            logger.warning("⚠️ Не удалось найти recipient_id")
             return jsonify({"ok": True}), 200
 
-        logger.info(f"💬 chat_id={chat_id}, text='{text}'")
+        logger.info(f"💬 chat_id={chat_id}, user_id={user_id}, recipient_id={recipient_id}, text='{text}'")
 
         if text and isinstance(text, str):
             text_lower = text.lower().strip()
             
             if text_lower in ["/start", "start"]:
-                show_main_menu(chat_id)
+                # Отправляем на chat_id
+                show_main_menu(recipient_id)
                 return jsonify({"ok": True}), 200
 
             if text_lower == "/help":
-                send_message(chat_id, "📖 **Помощь**\n\nКоманды:\n/start - Главное меню\n/choose - Выбрать папку\n/publish - Начать публикацию\n/stop - Остановить\n/help - Справка")
+                send_message(
+                    recipient_id,
+                    "📖 **Помощь**\n\nКоманды:\n/start - Главное меню\n/choose - Выбрать папку\n/publish - Начать публикацию\n/stop - Остановить\n/help - Справка"
+                )
                 return jsonify({"ok": True}), 200
 
         return jsonify({"ok": True}), 200
 
     except Exception as e:
         logger.error(f"❌ ОШИБКА: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return jsonify({"ok": False}), 500
-
 # ========== ЗАПУСК ==========
 
 if __name__ == "__main__":
