@@ -3,17 +3,16 @@ import threading
 from typing import Dict, Callable
 
 class Scheduler:
-    """Управление очередью публикаций с задержками"""
+    """Управление очередью публикаций"""
     
     def __init__(self, delay: int = 120, batch_size: int = 10, batch_pause: int = 300):
-        self.delay = delay              # Задержка между постами (сек)
-        self.batch_size = batch_size    # Постов в батче
-        self.batch_pause = batch_pause  # Пауза после батча (сек)
+        self.delay = delay
+        self.batch_size = batch_size
+        self.batch_pause = batch_pause
         self.is_paused = False
         self.running_tasks = {}
     
     def schedule_task(self, task_id: str, callback: Callable, *args, **kwargs):
-        """Запуск задачи с задержкой"""
         if task_id not in self.running_tasks:
             thread = threading.Thread(target=self._run_task, args=(task_id, callback, *args), kwargs=kwargs)
             thread.daemon = True
@@ -21,7 +20,6 @@ class Scheduler:
             thread.start()
     
     def _run_task(self, task_id: str, callback: Callable, *args, **kwargs):
-        """Выполнение задачи с контролем времени"""
         try:
             callback(*args, **kwargs)
         except Exception as e:
@@ -31,15 +29,12 @@ class Scheduler:
                 del self.running_tasks[task_id]
     
     def pause(self):
-        """Приостановка всех задач"""
         self.is_paused = True
     
     def resume(self):
-        """Возобновление всех задач"""
         self.is_paused = False
     
     def get_status(self) -> Dict:
-        """Получение статуса шедулера"""
         return {
             "active_tasks": len(self.running_tasks),
             "is_paused": self.is_paused,
