@@ -363,11 +363,18 @@ def webhook():
         text = None
         payload = None
         
-        # Извлекаем данные из структуры МАХ
-        if 'message' in data:
+        # ========== ОБРАБОТКА CALLBACK (НАЖАТИЕ КНОПКИ) ==========
+        if 'callback' in data:
+            callback = data['callback']
+            payload = callback.get('payload')
+            if 'user' in callback:
+                user_id = callback['user'].get('user_id')
+            logger.info(f"🔘 Нажата кнопка: payload='{payload}', user_id={user_id}")
+        
+        # ========== ОБРАБОТКА ОБЫЧНОГО СООБЩЕНИЯ ==========
+        elif 'message' in data:
             message = data['message']
             
-            # Извлекаем user_id из sender
             if 'sender' in message:
                 sender = message['sender']
                 user_id = sender.get('user_id')
@@ -376,11 +383,9 @@ def webhook():
                 recipient = message['recipient']
                 user_id = recipient.get('user_id')
             
-            # Извлекаем текст или callback
             if 'body' in message:
                 body = message['body']
                 text = body.get('text')
-                # Проверяем, может быть это callback
                 if 'payload' in body:
                     payload = body.get('payload')
         
@@ -408,24 +413,9 @@ def webhook():
 
         logger.info(f"💬 user_id={user_id}, text='{text}', payload='{payload}'")
 
-        # ========== ОБРАБОТКА КОМАНД ==========
-        if text and isinstance(text, str):
-            text_lower = text.lower().strip()
-            
-            if text_lower in ["/start", "start"]:
-                show_main_menu(user_id)
-                return jsonify({"ok": True}), 200
-
-            if text_lower == "/help":
-                send_message(
-                    user_id,
-                    "📖 **Помощь**\n\nКоманды:\n/start - Главное меню\n/choose - Выбрать папку\n/publish - Начать публикацию\n/stop - Остановить\n/help - Справка"
-                )
-                return jsonify({"ok": True}), 200
-
-        # ========== ОБРАБОТКА НАЖАТИЯ КНОПОК (callback) ==========
+        # ========== ОБРАБОТКА НАЖАТИЯ КНОПОК ==========
         if payload:
-            logger.info(f"🔘 Нажата кнопка: {payload}")
+            logger.info(f"🔘 Обработка payload: {payload}")
             
             if payload == "choose_folder":
                 send_message(user_id, "📁 Функция выбора папки в разработке")
@@ -442,6 +432,21 @@ def webhook():
                 send_message(user_id, f"⚠️ Неизвестная команда: {payload}")
             
             return jsonify({"ok": True}), 200
+
+        # ========== ОБРАБОТКА КОМАНД ==========
+        if text and isinstance(text, str):
+            text_lower = text.lower().strip()
+            
+            if text_lower in ["/start", "start"]:
+                show_main_menu(user_id)
+                return jsonify({"ok": True}), 200
+
+            if text_lower == "/help":
+                send_message(
+                    user_id,
+                    "📖 **Помощь**\n\nКоманды:\n/start - Главное меню\n/choose - Выбрать папку\n/publish - Начать публикацию\n/stop - Остановить\n/help - Справка"
+                )
+                return jsonify({"ok": True}), 200
 
         return jsonify({"ok": True}), 200
 
