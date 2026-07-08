@@ -62,8 +62,9 @@ def find_certificate():
     logger.warning("Сертификат Минцифры НЕ НАЙДЕН!")
     return None
 
-CERT_PATH = find_certificate()
-USE_CERT = CERT_PATH is not None
+# Временное решение - принудительно отключаем сертификат
+CERT_PATH = None
+USE_CERT = False
 
 if USE_CERT:
     logger.info(f"Сертификат загружен: {CERT_PATH}")
