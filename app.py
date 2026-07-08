@@ -36,40 +36,46 @@ def max_request(method, endpoint, data=None, headers=None):
     """Универсальный запрос к API МАХ"""
     url = f"{BASE_URL}{endpoint}"
     
-    if headers is None:
-        headers = {}
+    # ✅ ПРАВИЛЬНЫЕ ЗАГОЛОВКИ
+    request_headers = {}
     
     if TOKEN:
-        headers["Authorization"] = f"Bearer {TOKEN}"
-    headers["Content-Type"] = "application/json"
+        # ✅ ТОЛЬКО ТОКЕН, БЕЗ "Bearer "
+        request_headers["Authorization"] = TOKEN
+        logger.info(f"🔑 Токен добавлен: {TOKEN[:4]}...{TOKEN[-4:]}")
+    else:
+        logger.error("❌ ТОКЕН НЕ НАЙДЕН!")
+    
+    request_headers["Content-Type"] = "application/json"
+    
+    if headers:
+        request_headers.update(headers)
     
     try:
-        # Пробуем с сертификатом
         if USE_CERT:
             try:
                 response = requests.request(
                     method=method,
                     url=url,
-                    headers=headers,
+                    headers=request_headers,
                     json=data,
                     timeout=30,
                     verify=CERT_PATH
                 )
-                logger.info(f"📤 {method} {endpoint} -> {response.status_code} (с сертификатом)")
+                logger.info(f"📤 {method} {endpoint} -> {response.status_code}")
                 return response
             except Exception as e:
                 logger.warning(f"⚠️ Ошибка с сертификатом: {e}")
         
-        # Пробуем без сертификата (fallback)
         response = requests.request(
             method=method,
             url=url,
-            headers=headers,
+            headers=request_headers,
             json=data,
             timeout=30,
             verify=False
         )
-        logger.info(f"📤 {method} {endpoint} -> {response.status_code} (без сертификата)")
+        logger.info(f"📤 {method} {endpoint} -> {response.status_code}")
         return response
         
     except Exception as e:
@@ -84,8 +90,9 @@ def get_headers():
         logger.error("❌ ТОКЕН НЕ УСТАНОВЛЕН!")
         return None
     
+    # ✅ ПРАВИЛЬНЫЙ ФОРМАТ
     return {
-        "Authorization": f"Bearer {TOKEN}",
+        "Authorization": TOKEN,  # ← ТОЛЬКО ТОКЕН
         "Content-Type": "application/json"
     }
 
@@ -105,7 +112,6 @@ def send_message(chat_id, text, parse_mode="Markdown"):
             
         logger.info(f"📤 Отправка в chat_id={chat_id}")
         
-        # Используем max_request
         response = max_request(
             "POST",
             "/messages",
@@ -116,7 +122,6 @@ def send_message(chat_id, text, parse_mode="Markdown"):
         if response.status_code == 200:
             return True
             
-        # Если ошибка 400 - пробуем без parse_mode
         if response.status_code == 400:
             logger.info("🔄 Пробую без parse_mode...")
             payload2 = {
@@ -174,7 +179,6 @@ def send_keyboard(chat_id, text, buttons):
         if response.status_code == 200:
             return True
         
-        # Пробуем без parse_mode
         payload2 = {
             "chat_id": chat_id,
             "text": text,
@@ -249,8 +253,7 @@ def health():
         "time": time.strftime('%Y-%m-%d %H:%M:%S'),
         "certificate": {
             "found": USE_CERT,
-            "path": CERT_PATH,
-            "exists": os.path.exists(CERT_PATH) if CERT_PATH else False
+            "path": CERT_PATH
         },
         "token": {
             "exists": bool(TOKEN),
@@ -269,7 +272,7 @@ def debug():
             "path": CERT_PATH,
             "exists": os.path.exists(CERT_PATH) if CERT_PATH else False
         },
-        "files": os.listdir(os.path.dirname(__file__))[:10]
+        "auth_format": "Authorization: <token> (без Bearer)"  # ← Добавляем пояснение
     }, 200
 
 @app.route('/setup_webhook')
@@ -299,21 +302,26 @@ def setup_webhook():
             <p><b>📂 Путь:</b> {CERT_PATH if CERT_PATH else 'Не указан'}</p>
             <p><b>🔑 Токен:</b> {token[:4]}...{token[-4:] if len(token) > 8 else '***'}</p>
             <p><b>🌐 Вебхук:</b> {webhook_url}</p>
+            <p><b>📌 Формат авторизации:</b> Authorization: &lt;token&gt; (без Bearer)</p>
             <hr>
     """
     
     try:
-        # 1. Проверяем токен
-        html += "<h3>1️⃣ Проверка подключения...</h3>"
+        # ✅ ПРАВИЛЬНЫЕ ЗАГОЛОВКИ
         headers = {
-            "Authorization": f"Bearer {token}",
+            "Authorization": token,  # ← ТОЛЬКО ТОКЕН, БЕЗ "Bearer "
             "Content-Type": "application/json"
         }
         
-        # 2. Удаляем старую подписку
-        html += "<h3>2️⃣ Удаление старой подписки...</h3>"
+        # 1. Удаляем старую подписку
+        html += "<h3>🗑️ Удаление старой подписки...</h3>"
         try:
-            r_del = max_request("DELETE", "/subscriptions", headers=headers)
+            r_del = requests.delete(
+                "https://platform-api2.max.ru/subscriptions",
+                headers=headers,
+                timeout=10,
+                verify=CERT_PATH if USE_CERT else False
+            )
             html += f"<p>DELETE: <b>{r_del.status_code}</b></p>"
             if r_del.status_code == 200:
                 html += "<p style='color: green;'>✅ Старая подписка удалена</p>"
@@ -322,13 +330,14 @@ def setup_webhook():
         except Exception as e:
             html += f"<p style='color: orange;'>⚠️ Ошибка: {e}</p>"
         
-        # 3. Создаем новую подписку
-        html += "<h3>3️⃣ Создание новой подписки...</h3>"
-        r = max_request(
-            "POST",
-            "/subscriptions",
-            data={"url": webhook_url},
-            headers=headers
+        # 2. Создаем новую подписку
+        html += "<h3>📝 Создание новой подписки...</h3>"
+        r = requests.post(
+            "https://platform-api2.max.ru/subscriptions",
+            headers=headers,
+            json={"url": webhook_url},
+            timeout=10,
+            verify=CERT_PATH if USE_CERT else False
         )
         html += f"<p>POST: <b>{r.status_code}</b></p>"
         html += f"<p>Ответ: <pre style='background: #f5f5f5; padding: 10px;'>{r.text[:300]}</pre></p>"
@@ -376,7 +385,6 @@ def webhook():
         data = request.get_json()
         logger.info("=" * 50)
         logger.info("📩 ПОЛУЧЕН ВЕБХУК!")
-        logger.info(f"📦 Данные: {json.dumps(data, indent=2)[:500]}")
 
         if not data:
             return jsonify({"ok": True}), 200
@@ -391,14 +399,9 @@ def webhook():
         if not chat_id:
             return jsonify({"ok": True}), 200
 
-        # Обработка команд
         if text:
             if text.lower() in ["/start", "start"]:
                 show_main_menu(chat_id)
-                return jsonify({"ok": True}), 200
-
-            if text.lower() == "/choose":
-                send_message(chat_id, "📁 Выберите папку (функция в разработке)")
                 return jsonify({"ok": True}), 200
 
             if text.lower() == "/help":
