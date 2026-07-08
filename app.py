@@ -50,7 +50,6 @@ def max_request(method, endpoint, data=None, headers=None):
         request_headers.update(headers)
     
     try:
-        # Пока всегда используем verify=False
         response = requests.request(
             method=method,
             url=url,
@@ -86,9 +85,11 @@ def send_message(chat_id, text, parse_mode="Markdown"):
         if not headers:
             return False
             
-        # Правильный формат для МАХ
+        # ПРАВИЛЬНЫЙ ФОРМАТ ДЛЯ МАХ
         payload = {
-            "chat_id": chat_id,
+            "recipient": {
+                "chat_id": chat_id
+            },
             "text": text,
             "parse_mode": parse_mode
         }
@@ -109,11 +110,12 @@ def send_message(chat_id, text, parse_mode="Markdown"):
         if response.status_code == 200:
             return True
             
-        # Если ошибка 400 - пробуем без parse_mode
         if response.status_code == 400:
             logger.info("🔄 Пробую без parse_mode...")
             payload2 = {
-                "chat_id": chat_id,
+                "recipient": {
+                    "chat_id": chat_id
+                },
                 "text": text
             }
             response2 = requests.post(
@@ -139,7 +141,6 @@ def send_keyboard(chat_id, text, buttons):
         if not headers:
             return False
             
-        # Формируем кнопки
         keyboard_rows = []
         for button in buttons:
             keyboard_rows.append([{
@@ -149,7 +150,9 @@ def send_keyboard(chat_id, text, buttons):
             }])
 
         payload = {
-            "chat_id": chat_id,
+            "recipient": {
+                "chat_id": chat_id
+            },
             "text": text,
             "parse_mode": "Markdown",
             "attachments": [{
@@ -177,11 +180,12 @@ def send_keyboard(chat_id, text, buttons):
             logger.info("✅ Клавиатура отправлена!")
             return True
         
-        # Пробуем без parse_mode
         if response.status_code == 400:
             logger.info("🔄 Пробую без parse_mode...")
             payload2 = {
-                "chat_id": chat_id,
+                "recipient": {
+                    "chat_id": chat_id
+                },
                 "text": text,
                 "attachments": [{
                     "type": "inline_keyboard",
@@ -203,7 +207,6 @@ def send_keyboard(chat_id, text, buttons):
             if response2.status_code == 200:
                 return True
         
-        # Если не работает - отправляем обычное сообщение
         logger.info("🔄 Отправляю обычное сообщение...")
         return send_message(chat_id, text)
         
@@ -255,39 +258,25 @@ def debug():
             "found": USE_CERT,
             "path": CERT_PATH,
             "exists": os.path.exists(CERT_PATH) if CERT_PATH else False
-        },
-        "auth_format": "Authorization: <token> (без Bearer)"
+        }
     }, 200
 
 @app.route('/setup_webhook')
 def setup_webhook():
-    """Настройка вебхука"""
     token = request.args.get('token') or TOKEN
     
     if not token:
-        return """
-        <html>
-        <body style="font-family: monospace; padding: 20px;">
-            ❌ <b>Ошибка:</b> токен не передан и не установлен в окружении<br>
-            Используйте: <b>/setup_webhook?token=ВАШ_ТОКЕН</b>
-        </body>
-        </html>
-        """, 400
+        return "❌ Токен не найден", 400
     
     webhook_url = "https://max-bot-ulzl.onrender.com/webhook"
     
     html = f"""
     <html>
-    <body style="font-family: monospace; padding: 20px; background: #f0f0f0;">
-        <div style="max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px;">
-            <h2>🔐 Настройка вебхука для MAX</h2>
-            <hr>
-            <p><b>📁 Сертификат:</b> {'✅ Найден' if USE_CERT else '❌ Не найден (отключен)'}</p>
-            <p><b>📂 Путь:</b> {CERT_PATH if CERT_PATH else 'Не указан'}</p>
-            <p><b>🔑 Токен:</b> {token[:4]}...{token[-4:] if len(token) > 8 else '***'}</p>
-            <p><b>🌐 Вебхук:</b> {webhook_url}</p>
-            <p><b>📌 Формат авторизации:</b> Authorization: &lt;token&gt; (без Bearer)</p>
-            <hr>
+    <body style="font-family: monospace; padding: 20px;">
+        <h2>🔐 Настройка вебхука</h2>
+        <p><b>Сертификат:</b> {'✅ Есть' if USE_CERT else '❌ Нет'}</p>
+        <p><b>Токен:</b> {token[:4]}...{token[-4:]}</p>
+        <hr>
     """
     
     try:
@@ -296,8 +285,7 @@ def setup_webhook():
             "Content-Type": "application/json"
         }
         
-        # 1. Удаляем старую подписку
-        html += "<h3>🗑️ Удаление старой подписки...</h3>"
+        html += "<h3>🗑️ Удаление...</h3>"
         try:
             r_del = requests.delete(
                 "https://platform-api2.max.ru/subscriptions",
@@ -305,16 +293,11 @@ def setup_webhook():
                 timeout=10,
                 verify=False
             )
-            html += f"<p>DELETE: <b>{r_del.status_code}</b></p>"
-            if r_del.status_code == 200:
-                html += "<p style='color: green;'>✅ Старая подписка удалена</p>"
-            else:
-                html += f"<p style='color: orange;'>⚠️ Ответ: {r_del.text[:100]}</p>"
+            html += f"<p>DELETE: {r_del.status_code}</p>"
         except Exception as e:
-            html += f"<p style='color: orange;'>⚠️ Ошибка: {e}</p>"
+            html += f"<p>⚠️ Ошибка: {e}</p>"
         
-        # 2. Создаем новую подписку
-        html += "<h3>📝 Создание новой подписки...</h3>"
+        html += "<h3>📝 Создание...</h3>"
         r = requests.post(
             "https://platform-api2.max.ru/subscriptions",
             headers=headers,
@@ -322,48 +305,22 @@ def setup_webhook():
             timeout=10,
             verify=False
         )
-        html += f"<p>POST: <b>{r.status_code}</b></p>"
-        html += f"<p>Ответ: <pre style='background: #f5f5f5; padding: 10px;'>{r.text[:300]}</pre></p>"
+        html += f"<p>POST: {r.status_code}</p>"
+        html += f"<p>Ответ: {r.text[:300]}</p>"
         
         if r.status_code == 200:
-            html += """
-            <div style="background: #d4edda; padding: 15px; border-radius: 5px; margin: 10px 0;">
-                ✅ <b>ВЕБХУК УСПЕШНО НАСТРОЕН!</b>
-            </div>
-            """
+            html += "<p style='color: green;'>✅ ВЕБХУК НАСТРОЕН!</p>"
         else:
-            html += f"""
-            <div style="background: #f8d7da; padding: 15px; border-radius: 5px; margin: 10px 0;">
-                ❌ <b>Ошибка настройки вебхука</b><br>
-                Код: {r.status_code}<br>
-                {r.text[:200]}
-            </div>
-            """
+            html += f"<p style='color: red;'>❌ Ошибка: {r.text[:200]}</p>"
         
-        html += """
-        <hr>
-        <p><a href="/health">✅ Проверить здоровье</a> | <a href="/debug">🔍 Отладка</a></p>
-        </div>
-        </body>
-        </html>
-        """
-        
+        html += "</body></html>"
         return html
         
     except Exception as e:
-        return f"""
-        <html>
-        <body style="font-family: monospace; padding: 20px;">
-            <div style="background: #f8d7da; padding: 15px; border-radius: 5px;">
-                ❌ <b>Ошибка:</b> {e}
-            </div>
-        </body>
-        </html>
-        """, 500
+        return f"❌ Ошибка: {e}", 500
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Обработка вебхука от МАХ"""
     try:
         data = request.get_json()
         logger.info("=" * 50)
@@ -372,43 +329,31 @@ def webhook():
         if not data:
             return jsonify({"ok": True}), 200
 
-        # ========== ПАРСИНГ ДАННЫХ МАХ ==========
         chat_id = None
         text = None
         
-        # Структура МАХ: message.recipient.chat_id и message.body.text
         if 'message' in data:
             message = data['message']
-            
-            # Извлекаем chat_id из recipient
             if 'recipient' in message:
                 recipient = message['recipient']
                 chat_id = recipient.get('chat_id')
-            
-            # Извлекаем текст из body
             if 'body' in message:
                 body = message['body']
                 text = body.get('text')
         
-        # Если не нашли через message - пробуем другие варианты
         if not chat_id:
-            # Проверяем прямой recipient (если данные без обертки)
             if 'recipient' in data:
                 chat_id = data['recipient'].get('chat_id')
-            
-            # Проверяем прямые поля
             if not chat_id:
                 chat_id = data.get('chat_id')
                 text = data.get('text')
         
         if not chat_id:
-            logger.warning("⚠️ Не удалось найти chat_id в данных")
-            logger.info(f"📦 Данные: {json.dumps(data, indent=2, ensure_ascii=False)[:500]}")
+            logger.warning("⚠️ Не удалось найти chat_id")
             return jsonify({"ok": True}), 200
 
         logger.info(f"💬 chat_id={chat_id}, text='{text}'")
 
-        # ========== ОБРАБОТКА КОМАНД ==========
         if text and isinstance(text, str):
             text_lower = text.lower().strip()
             
@@ -417,22 +362,13 @@ def webhook():
                 return jsonify({"ok": True}), 200
 
             if text_lower == "/help":
-                send_message(
-                    chat_id,
-                    "📖 **Помощь**\n\nКоманды:\n/start - Главное меню\n/choose - Выбрать папку\n/publish - Начать публикацию\n/stop - Остановить\n/help - Справка"
-                )
-                return jsonify({"ok": True}), 200
-
-            if text_lower == "/choose":
-                send_message(chat_id, "📁 Выберите папку (функция в разработке)")
+                send_message(chat_id, "📖 **Помощь**\n\nКоманды:\n/start - Главное меню\n/choose - Выбрать папку\n/publish - Начать публикацию\n/stop - Остановить\n/help - Справка")
                 return jsonify({"ok": True}), 200
 
         return jsonify({"ok": True}), 200
 
     except Exception as e:
         logger.error(f"❌ ОШИБКА: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
         return jsonify({"ok": False}), 500
 
 # ========== ЗАПУСК ==========
