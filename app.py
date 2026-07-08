@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 # ========== КОНФИГ ==========
 TOKEN = os.environ.get("TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://maxbot.bothost.tech/webhook")
 
 # ========== ПРОВЕРКА СЕРТИФИКАТА ==========
 CERT_FILE = 'russian_trusted_root_ca_gost_2025.cer'
@@ -28,15 +29,9 @@ if os.path.exists(CERT_PATH):
 else:
     logger.warning(f"⚠️ Сертификат НЕ НАЙДЕН: {CERT_PATH}")
 
-# ========== ПРОКСИ ДЛЯ РОССИЙСКОГО IP ==========
-PROXY = {
-    "http": "http://92.242.8.114:8080",
-    "https": "http://92.242.8.114:8080"
-}
-
 # ========== ФУНКЦИЯ ЗАПРОСОВ К МАХ ==========
 def max_request(method, endpoint, data=None, headers=None):
-    """Универсальный запрос к API МАХ через прокси"""
+    """Универсальный запрос к API МАХ"""
     url = f"{BASE_URL}{endpoint}"
     
     request_headers = {}
@@ -59,7 +54,6 @@ def max_request(method, endpoint, data=None, headers=None):
             headers=request_headers,
             json=data,
             timeout=30,
-              # ← ПРОКСИ
             verify=False
         )
         logger.info(f"📤 {method} {endpoint} -> {response.status_code}")
@@ -103,7 +97,6 @@ def send_message(user_id, text, parse_mode="Markdown"):
             headers=headers,
             json=payload,
             timeout=30,
-              # ← ПРОКСИ
             verify=False
         )
         
@@ -123,7 +116,6 @@ def send_message(user_id, text, parse_mode="Markdown"):
                 headers=headers,
                 json=payload2,
                 timeout=30,
-                  # ← ПРОКСИ
                 verify=False
             )
             logger.info(f"📤 Ответ без parse_mode: {response2.status_code} - {response2.text[:200]}")
@@ -170,7 +162,6 @@ def send_keyboard(user_id, text, buttons):
             headers=headers,
             json=payload,
             timeout=30,
-              # ← ПРОКСИ
             verify=False
         )
         
@@ -198,7 +189,6 @@ def send_keyboard(user_id, text, buttons):
                 headers=headers,
                 json=payload2,
                 timeout=30,
-                  # ← ПРОКСИ
                 verify=False
             )
             logger.info(f"📤 Ответ без parse_mode: {response2.status_code} - {response2.text[:200]}")
@@ -259,32 +249,6 @@ def debug():
         }
     }, 200
 
-@app.route('/test_proxy')
-def test_proxy():
-    """Тест прокси с API MAX"""
-    try:
-        headers = {
-            "Authorization": TOKEN,
-            "Content-Type": "application/json"
-        }
-        
-        response = requests.get(
-            "https://platform-api2.max.ru/subscriptions",
-            headers=headers,
-            
-            timeout=10,
-            verify=False
-        )
-        
-        return {
-            "proxy_ip": "92.242.8.114:8080",
-            "status": response.status_code,
-            "response": response.text[:200],
-            "note": "Если статус 200 — прокси работает с API MAX"
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
 @app.route('/setup_webhook')
 def setup_webhook():
     token = request.args.get('token') or TOKEN
@@ -299,8 +263,6 @@ def setup_webhook():
         </html>
         """, 400
     
-    webhook_url = "https://max-bot-ulzl.onrender.com/webhook"
-    
     html = f"""
     <html>
     <body style="font-family: monospace; padding: 20px; background: #f0f0f0;">
@@ -310,7 +272,7 @@ def setup_webhook():
             <p><b>📁 Сертификат:</b> {'✅ Найден' if USE_CERT else '❌ Не найден (отключен)'}</p>
             <p><b>📂 Путь:</b> {CERT_PATH if CERT_PATH else 'Не указан'}</p>
             <p><b>🔑 Токен:</b> {token[:4]}...{token[-4:] if len(token) > 8 else '***'}</p>
-            <p><b>🌐 Вебхук:</b> {webhook_url}</p>
+            <p><b>🌐 Вебхук:</b> {WEBHOOK_URL}</p>
             <p><b>📌 Формат авторизации:</b> Authorization: &lt;token&gt; (без Bearer)</p>
             <hr>
     """
@@ -328,7 +290,6 @@ def setup_webhook():
                 "https://platform-api2.max.ru/subscriptions",
                 headers=headers,
                 timeout=10,
-                
                 verify=False
             )
             html += f"<p>DELETE: <b>{r_del.status_code}</b></p>"
@@ -344,9 +305,8 @@ def setup_webhook():
         r = requests.post(
             "https://platform-api2.max.ru/subscriptions",
             headers=headers,
-            json={"url": webhook_url},
+            json={"url": WEBHOOK_URL},
             timeout=10,
-            
             verify=False
         )
         html += f"<p>POST: <b>{r.status_code}</b></p>"
@@ -369,7 +329,7 @@ def setup_webhook():
         
         html += """
         <hr>
-        <p><a href="/health">✅ Проверить здоровье</a> | <a href="/debug">🔍 Отладка</a> | <a href="/test_proxy">🧪 Тест прокси</a></p>
+        <p><a href="/health">✅ Проверить здоровье</a> | <a href="/debug">🔍 Отладка</a></p>
         </div>
         </body>
         </html>
