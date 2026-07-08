@@ -28,9 +28,15 @@ if os.path.exists(CERT_PATH):
 else:
     logger.warning(f"⚠️ Сертификат НЕ НАЙДЕН: {CERT_PATH}")
 
+# ========== ПРОКСИ ДЛЯ РОССИЙСКОГО IP ==========
+PROXY = {
+    "http": "http://92.242.8.114:8080",
+    "https": "http://92.242.8.114:8080"
+}
+
 # ========== ФУНКЦИЯ ЗАПРОСОВ К МАХ ==========
 def max_request(method, endpoint, data=None, headers=None):
-    """Универсальный запрос к API МАХ"""
+    """Универсальный запрос к API МАХ через прокси"""
     url = f"{BASE_URL}{endpoint}"
     
     request_headers = {}
@@ -53,6 +59,7 @@ def max_request(method, endpoint, data=None, headers=None):
             headers=request_headers,
             json=data,
             timeout=30,
+            proxies=PROXY,  # ← ПРОКСИ
             verify=False
         )
         logger.info(f"📤 {method} {endpoint} -> {response.status_code}")
@@ -96,6 +103,7 @@ def send_message(user_id, text, parse_mode="Markdown"):
             headers=headers,
             json=payload,
             timeout=30,
+            proxies=PROXY,  # ← ПРОКСИ
             verify=False
         )
         
@@ -115,6 +123,7 @@ def send_message(user_id, text, parse_mode="Markdown"):
                 headers=headers,
                 json=payload2,
                 timeout=30,
+                proxies=PROXY,  # ← ПРОКСИ
                 verify=False
             )
             logger.info(f"📤 Ответ без parse_mode: {response2.status_code} - {response2.text[:200]}")
@@ -161,6 +170,7 @@ def send_keyboard(user_id, text, buttons):
             headers=headers,
             json=payload,
             timeout=30,
+            proxies=PROXY,  # ← ПРОКСИ
             verify=False
         )
         
@@ -188,6 +198,7 @@ def send_keyboard(user_id, text, buttons):
                 headers=headers,
                 json=payload2,
                 timeout=30,
+                proxies=PROXY,  # ← ПРОКСИ
                 verify=False
             )
             logger.info(f"📤 Ответ без parse_mode: {response2.status_code} - {response2.text[:200]}")
@@ -248,22 +259,60 @@ def debug():
         }
     }, 200
 
+@app.route('/test_proxy')
+def test_proxy():
+    """Тест прокси с API MAX"""
+    try:
+        headers = {
+            "Authorization": TOKEN,
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.get(
+            "https://platform-api2.max.ru/subscriptions",
+            headers=headers,
+            proxies=PROXY,
+            timeout=10,
+            verify=False
+        )
+        
+        return {
+            "proxy_ip": "92.242.8.114:8080",
+            "status": response.status_code,
+            "response": response.text[:200],
+            "note": "Если статус 200 — прокси работает с API MAX"
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.route('/setup_webhook')
 def setup_webhook():
     token = request.args.get('token') or TOKEN
     
     if not token:
-        return "❌ Токен не найден", 400
+        return """
+        <html>
+        <body style="font-family: monospace; padding: 20px;">
+            ❌ <b>Ошибка:</b> токен не передан и не установлен в окружении<br>
+            Используйте: <b>/setup_webhook?token=ВАШ_ТОКЕН</b>
+        </body>
+        </html>
+        """, 400
     
     webhook_url = "https://max-bot-ulzl.onrender.com/webhook"
     
     html = f"""
     <html>
-    <body style="font-family: monospace; padding: 20px;">
-        <h2>🔐 Настройка вебхука</h2>
-        <p><b>Сертификат:</b> {'✅ Есть' if USE_CERT else '❌ Нет'}</p>
-        <p><b>Токен:</b> {token[:4]}...{token[-4:]}</p>
-        <hr>
+    <body style="font-family: monospace; padding: 20px; background: #f0f0f0;">
+        <div style="max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px;">
+            <h2>🔐 Настройка вебхука для MAX</h2>
+            <hr>
+            <p><b>📁 Сертификат:</b> {'✅ Найден' if USE_CERT else '❌ Не найден (отключен)'}</p>
+            <p><b>📂 Путь:</b> {CERT_PATH if CERT_PATH else 'Не указан'}</p>
+            <p><b>🔑 Токен:</b> {token[:4]}...{token[-4:] if len(token) > 8 else '***'}</p>
+            <p><b>🌐 Вебхук:</b> {webhook_url}</p>
+            <p><b>📌 Формат авторизации:</b> Authorization: &lt;token&gt; (без Bearer)</p>
+            <hr>
     """
     
     try:
@@ -272,39 +321,72 @@ def setup_webhook():
             "Content-Type": "application/json"
         }
         
-        html += "<h3>🗑️ Удаление...</h3>"
+        # 1. Удаляем старую подписку
+        html += "<h3>🗑️ Удаление старой подписки...</h3>"
         try:
             r_del = requests.delete(
                 "https://platform-api2.max.ru/subscriptions",
                 headers=headers,
                 timeout=10,
+                proxies=PROXY,
                 verify=False
             )
-            html += f"<p>DELETE: {r_del.status_code}</p>"
+            html += f"<p>DELETE: <b>{r_del.status_code}</b></p>"
+            if r_del.status_code == 200:
+                html += "<p style='color: green;'>✅ Старая подписка удалена</p>"
+            else:
+                html += f"<p style='color: orange;'>⚠️ Ответ: {r_del.text[:100]}</p>"
         except Exception as e:
-            html += f"<p>⚠️ Ошибка: {e}</p>"
+            html += f"<p style='color: orange;'>⚠️ Ошибка: {e}</p>"
         
-        html += "<h3>📝 Создание...</h3>"
+        # 2. Создаем новую подписку
+        html += "<h3>📝 Создание новой подписки...</h3>"
         r = requests.post(
             "https://platform-api2.max.ru/subscriptions",
             headers=headers,
             json={"url": webhook_url},
             timeout=10,
+            proxies=PROXY,
             verify=False
         )
-        html += f"<p>POST: {r.status_code}</p>"
-        html += f"<p>Ответ: {r.text[:300]}</p>"
+        html += f"<p>POST: <b>{r.status_code}</b></p>"
+        html += f"<p>Ответ: <pre style='background: #f5f5f5; padding: 10px;'>{r.text[:300]}</pre></p>"
         
         if r.status_code == 200:
-            html += "<p style='color: green;'>✅ ВЕБХУК НАСТРОЕН!</p>"
+            html += """
+            <div style="background: #d4edda; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                ✅ <b>ВЕБХУК УСПЕШНО НАСТРОЕН!</b>
+            </div>
+            """
         else:
-            html += f"<p style='color: red;'>❌ Ошибка: {r.text[:200]}</p>"
+            html += f"""
+            <div style="background: #f8d7da; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                ❌ <b>Ошибка настройки вебхука</b><br>
+                Код: {r.status_code}<br>
+                {r.text[:200]}
+            </div>
+            """
         
-        html += "</body></html>"
+        html += """
+        <hr>
+        <p><a href="/health">✅ Проверить здоровье</a> | <a href="/debug">🔍 Отладка</a> | <a href="/test_proxy">🧪 Тест прокси</a></p>
+        </div>
+        </body>
+        </html>
+        """
+        
         return html
         
     except Exception as e:
-        return f"❌ Ошибка: {e}", 500
+        return f"""
+        <html>
+        <body style="font-family: monospace; padding: 20px;">
+            <div style="background: #f8d7da; padding: 15px; border-radius: 5px;">
+                ❌ <b>Ошибка:</b> {e}
+            </div>
+        </body>
+        </html>
+        """, 500
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -385,38 +467,6 @@ def webhook():
         logger.error(traceback.format_exc())
         return jsonify({"ok": False}), 500
 
-@app.route('/my_ip')
-def my_ip():
-    """Проверка IP-адреса сервера"""
-    import requests
-    try:
-        # Получаем публичный IP сервера
-        ip_response = requests.get('https://api.ipify.org?format=json', timeout=5)
-        ip_data = ip_response.json()
-        
-        # Проверяем заголовки от Render
-        headers = {
-            "client_ip": request.headers.get('X-Forwarded-For', 'Не определено'),
-            "remote_addr": request.remote_addr,
-            "public_ip": ip_data.get('ip', 'Не определено')
-        }
-        
-        # Проверяем геолокацию IP (опционально)
-        geo_response = requests.get(f"http://ip-api.com/json/{ip_data.get('ip')}", timeout=5)
-        geo_data = geo_response.json()
-        
-        return {
-            "server_ip": headers,
-            "geo_info": {
-                "country": geo_data.get('country', 'Неизвестно'),
-                "region": geo_data.get('regionName', 'Неизвестно'),
-                "city": geo_data.get('city', 'Неизвестно'),
-                "isp": geo_data.get('isp', 'Неизвестно')
-            },
-            "note": "Если IP находится за пределами России, это может влиять на работу с API MAX"
-        }
-    except Exception as e:
-        return {"error": str(e)}
 # ========== ЗАПУСК ==========
 
 if __name__ == "__main__":
