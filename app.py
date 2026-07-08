@@ -385,6 +385,38 @@ def webhook():
         logger.error(traceback.format_exc())
         return jsonify({"ok": False}), 500
 
+@app.route('/my_ip')
+def my_ip():
+    """Проверка IP-адреса сервера"""
+    import requests
+    try:
+        # Получаем публичный IP сервера
+        ip_response = requests.get('https://api.ipify.org?format=json', timeout=5)
+        ip_data = ip_response.json()
+        
+        # Проверяем заголовки от Render
+        headers = {
+            "client_ip": request.headers.get('X-Forwarded-For', 'Не определено'),
+            "remote_addr": request.remote_addr,
+            "public_ip": ip_data.get('ip', 'Не определено')
+        }
+        
+        # Проверяем геолокацию IP (опционально)
+        geo_response = requests.get(f"http://ip-api.com/json/{ip_data.get('ip')}", timeout=5)
+        geo_data = geo_response.json()
+        
+        return {
+            "server_ip": headers,
+            "geo_info": {
+                "country": geo_data.get('country', 'Неизвестно'),
+                "region": geo_data.get('regionName', 'Неизвестно'),
+                "city": geo_data.get('city', 'Неизвестно'),
+                "isp": geo_data.get('isp', 'Неизвестно')
+            },
+            "note": "Если IP находится за пределами России, это может влиять на работу с API MAX"
+        }
+    except Exception as e:
+        return {"error": str(e)}
 # ========== ЗАПУСК ==========
 
 if __name__ == "__main__":
