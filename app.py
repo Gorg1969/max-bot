@@ -13,6 +13,13 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
+# ========== ПРОВЕРКА ТОКЕНА ==========
+TOKEN = os.environ.get("TOKEN")
+if TOKEN:
+    logger.info(f"✅ ТОКЕН ЗАГРУЖЕН: {TOKEN[:8]}...{TOKEN[-4:] if len(TOKEN) > 12 else ''}")
+else:
+    logger.error("❌ ТОКЕН НЕ НАЙДЕН В ПЕРЕМЕННЫХ ОКРУЖЕНИЯ!")
+    logger.error("👉 Установите переменную TOKEN на панели Render.com")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -499,6 +506,19 @@ def setup_webhook():
         return f"✅ DELETE: {r_del.status_code}\n✅ POST: {r.status_code} - {r.text}"
     except Exception as e:
         return f"❌ Ошибка: {e}", 500
+        @app.route('/debug')
+def debug():
+    """Отладка - проверка переменных окружения"""
+    token_status = "✅ Установлен" if TOKEN else "❌ НЕ УСТАНОВЛЕН"
+    token_preview = TOKEN[:8] + "..." + TOKEN[-4:] if TOKEN else "Нет"
+    
+    return {
+        "status": "ok",
+        "token": token_status,
+        "token_preview": token_preview,
+        "cert": CERT_PATH,
+        "cert_exists": USE_CERT
+    }
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
