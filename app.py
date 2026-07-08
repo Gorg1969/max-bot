@@ -15,13 +15,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ========== КОНФИГ ==========
-TOKEN = os.environ.get("TOKEN")
+TOKEN = os.environ.get("TOKEN") or os.environ.get("MAX_BOT_TOKEN") or os.environ.get("BOT_TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
 
 # ========== ПРОВЕРКА СЕРТИФИКАТА ==========
 CERT_FILE = 'russian_trusted_root_ca_gost_2025.cer'
 CERT_PATH = os.path.join(os.path.dirname(__file__), CERT_FILE)
-USE_CERT = False  # ПОКА ОТКЛЮЧЕН
+USE_CERT = False
 
 if os.path.exists(CERT_PATH):
     logger.info(f"✅ Сертификат найден: {CERT_PATH}, но пока отключен")
@@ -29,7 +29,7 @@ else:
     logger.warning(f"⚠️ Сертификат НЕ НАЙДЕН: {CERT_PATH}")
 
 # ========== ФУНКЦИЯ ЗАПРОСОВ К МАХ ==========
-def max_request(method, endpoint, data=None, headers=None):
+def max_request(method, endpoint, data=None, headers=None, params=None):
     """Универсальный запрос к API МАХ"""
     url = f"{BASE_URL}{endpoint}"
     
@@ -52,6 +52,7 @@ def max_request(method, endpoint, data=None, headers=None):
             url=url,
             headers=request_headers,
             json=data,
+            params=params,
             timeout=30,
             verify=False
         )
@@ -75,17 +76,17 @@ def get_headers():
         "Content-Type": "application/json"
     }
 
-def send_message(user_id, text, parse_mode="Markdown"):
-    """Отправка сообщения в МАХ (использует user_id)"""
+def send_message(user_id, text, format="markdown"):
+    """Отправка сообщения в МАХ (user_id в URL, text в теле)"""
     try:
         headers = get_headers()
         if not headers:
             return False
             
+        # ✅ ПРАВИЛЬНЫЙ ФОРМАТ: user_id в URL, text в теле
         payload = {
-            "user_id": user_id,
             "text": text,
-            "parse_mode": parse_mode
+            "format": format  # markdown или html
         }
         
         logger.info(f"📤 Отправка user_id={user_id}")
@@ -94,6 +95,7 @@ def send_message(user_id, text, parse_mode="Markdown"):
         response = requests.post(
             f"{BASE_URL}/messages",
             headers=headers,
+            params={"user_id": user_id},  # ← user_id в URL
             json=payload,
             timeout=30,
             verify=False
@@ -104,20 +106,19 @@ def send_message(user_id, text, parse_mode="Markdown"):
         if response.status_code == 200:
             return True
             
+        # Если ошибка - пробуем без format
         if response.status_code == 400:
-            logger.info("🔄 Пробую без parse_mode...")
-            payload2 = {
-                "user_id": user_id,
-                "text": text
-            }
+            logger.info("🔄 Пробую без format...")
+            payload2 = {"text": text}
             response2 = requests.post(
                 f"{BASE_URL}/messages",
                 headers=headers,
+                params={"user_id": user_id},
                 json=payload2,
                 timeout=30,
                 verify=False
             )
-            logger.info(f"📤 Ответ без parse_mode: {response2.status_code} - {response2.text[:200]}")
+            logger.info(f"📤 Ответ без format: {response2.status_code} - {response2.text[:200]}")
             return response2.status_code == 200
             
         return False
@@ -126,8 +127,8 @@ def send_message(user_id, text, parse_mode="Markdown"):
         logger.error(f"❌ Ошибка отправки: {e}")
         return False
 
-def send_keyboard(user_id, text, buttons):
-    """Отправка клавиатуры в МАХ (использует user_id)"""
+def send_keyboard(user_id, text, buttons, format="markdown"):
+    """Отправка клавиатуры в МАХ (user_id в URL, text в теле)"""
     try:
         headers = get_headers()
         if not headers:
@@ -141,10 +142,10 @@ def send_keyboard(user_id, text, buttons):
                 "payload": button["payload"]
             }])
 
+        # ✅ ПРАВИЛЬНЫЙ ФОРМАТ: user_id в URL
         payload = {
-            "user_id": user_id,
             "text": text,
-            "parse_mode": "Markdown",
+            "format": format,
             "attachments": [{
                 "type": "inline_keyboard",
                 "payload": {
@@ -159,6 +160,7 @@ def send_keyboard(user_id, text, buttons):
         response = requests.post(
             f"{BASE_URL}/messages",
             headers=headers,
+            params={"user_id": user_id},  # ← user_id в URL
             json=payload,
             timeout=30,
             verify=False
@@ -171,9 +173,8 @@ def send_keyboard(user_id, text, buttons):
             return True
         
         if response.status_code == 400:
-            logger.info("🔄 Пробую без parse_mode...")
+            logger.info("🔄 Пробую без format...")
             payload2 = {
-                "user_id": user_id,
                 "text": text,
                 "attachments": [{
                     "type": "inline_keyboard",
@@ -186,11 +187,12 @@ def send_keyboard(user_id, text, buttons):
             response2 = requests.post(
                 f"{BASE_URL}/messages",
                 headers=headers,
+                params={"user_id": user_id},
                 json=payload2,
                 timeout=30,
                 verify=False
             )
-            logger.info(f"📤 Ответ без parse_mode: {response2.status_code} - {response2.text[:200]}")
+            logger.info(f"📤 Ответ без format: {response2.status_code} - {response2.text[:200]}")
             
             if response2.status_code == 200:
                 return True
@@ -262,6 +264,8 @@ def setup_webhook():
         </html>
         """, 400
     
+    webhook_url = "https://maxbot.bothost.tech/webhook"
+    
     html = f"""
     <html>
     <body style="font-family: monospace; padding: 20px; background: #f0f0f0;">
@@ -271,7 +275,7 @@ def setup_webhook():
             <p><b>📁 Сертификат:</b> {'✅ Найден' if USE_CERT else '❌ Не найден (отключен)'}</p>
             <p><b>📂 Путь:</b> {CERT_PATH if CERT_PATH else 'Не указан'}</p>
             <p><b>🔑 Токен:</b> {token[:4]}...{token[-4:] if len(token) > 8 else '***'}</p>
-            <p><b>🌐 Вебхук:</b> https://maxbot.bothost.tech/webhook</p>
+            <p><b>🌐 Вебхук:</b> {webhook_url}</p>
             <p><b>📌 Формат авторизации:</b> Authorization: &lt;token&gt; (без Bearer)</p>
             <hr>
     """
@@ -304,7 +308,7 @@ def setup_webhook():
         r = requests.post(
             "https://platform-api2.max.ru/subscriptions",
             headers=headers,
-            json={"url": "https://maxbot.bothost.tech/webhook"},
+            json={"url": webhook_url},
             timeout=10,
             verify=False
         )
@@ -365,22 +369,18 @@ def webhook():
         if 'message' in data:
             message = data['message']
             
-            # Извлекаем user_id из sender
             if 'sender' in message:
                 sender = message['sender']
                 user_id = sender.get('user_id')
             
-            # Если не нашли - ищем в recipient
             if not user_id and 'recipient' in message:
                 recipient = message['recipient']
                 user_id = recipient.get('user_id')
             
-            # Извлекаем текст
             if 'body' in message:
                 body = message['body']
                 text = body.get('text')
         
-        # Если не нашли - рекурсивный поиск
         if not user_id:
             def search(obj):
                 nonlocal user_id, text
@@ -403,7 +403,6 @@ def webhook():
 
         logger.info(f"💬 user_id={user_id}, text='{text}'")
 
-        # Обработка команд
         if text and isinstance(text, str):
             text_lower = text.lower().strip()
             
@@ -429,5 +428,5 @@ def webhook():
 # ========== ЗАПУСК ==========
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 3000))
     app.run(host='0.0.0.0', port=port)
