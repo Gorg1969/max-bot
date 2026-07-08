@@ -364,6 +364,29 @@ def webhook():
 
         if not data:
             return jsonify({"ok": True}), 200
+         
+@app.route('/my_ip')
+def my_ip():
+    """Проверка IP-адреса сервера"""
+    import requests
+    try:
+        # Проверяем IP через внешний сервис
+        ip_response = requests.get('https://api.ipify.org?format=json', timeout=5)
+        ip_data = ip_response.json()
+        
+        # Проверяем заголовки от Render
+        headers = {
+            "client_ip": request.headers.get('X-Forwarded-For', 'Не определено'),
+            "remote_addr": request.remote_addr,
+            "public_ip": ip_data.get('ip', 'Не определено')
+        }
+        
+        return {
+            "server_ip": headers,
+            "geo_info": "Проверьте, совпадает ли IP с регионом вашего VPN"
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
         # ========== ИЩЕМ USER_ID ИЗ ВХОДЯЩЕГО СООБЩЕНИЯ ==========
         user_id = None
