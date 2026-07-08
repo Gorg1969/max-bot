@@ -132,7 +132,6 @@ def send_keyboard(user_id, text, buttons):
         if not headers:
             return False
             
-        # Формируем кнопки в правильном формате
         keyboard_rows = []
         for button in buttons:
             keyboard_rows.append([{
@@ -210,6 +209,19 @@ def show_main_menu(user_id):
             {"text": "▶️ Начать публикацию", "payload": "start_publish"},
             {"text": "⏹ Остановить", "payload": "stop_publication"},
             {"text": "ℹ️ Помощь", "payload": "help"}
+        ]
+    )
+
+def show_folder_menu(user_id):
+    """Меню выбора папки"""
+    send_keyboard(
+        user_id,
+        "📂 **Выбор папки**\n\nЗдесь будет список папок.\n\nПока функция в разработке.",
+        [
+            {"text": "📁 Папка 1 (тест)", "payload": "folder_1"},
+            {"text": "📁 Папка 2 (тест)", "payload": "folder_2"},
+            {"text": "🔙 Назад", "payload": "back"},
+            {"text": "🏠 В меню", "payload": "main_menu"}
         ]
     )
 
@@ -354,7 +366,6 @@ def webhook():
         data = request.get_json()
         logger.info("=" * 50)
         logger.info("📩 ПОЛУЧЕН ВЕБХУК!")
-        logger.info(f"📦 ВСЕ ДАННЫЕ: {json.dumps(data, indent=2, ensure_ascii=False)[:1000]}")
 
         if not data:
             return jsonify({"ok": True}), 200
@@ -386,8 +397,6 @@ def webhook():
             if 'body' in message:
                 body = message['body']
                 text = body.get('text')
-                if 'payload' in body:
-                    payload = body.get('payload')
         
         # Если не нашли - рекурсивный поиск
         if not user_id:
@@ -418,16 +427,20 @@ def webhook():
             logger.info(f"🔘 Обработка payload: {payload}")
             
             if payload == "choose_folder":
-                send_message(user_id, "📁 Функция выбора папки в разработке")
+                show_folder_menu(user_id)
             elif payload == "start_publish":
-                send_message(user_id, "▶️ Функция публикации в разработке")
+                send_message(user_id, "▶️ Начинаю публикацию... (функция в разработке)")
             elif payload == "stop_publication":
-                send_message(user_id, "⏹ Функция остановки в разработке")
+                send_message(user_id, "⏹ Останавливаю публикацию... (функция в разработке)")
             elif payload == "help":
                 send_message(
                     user_id,
                     "📖 **Помощь**\n\nКоманды:\n/start - Главное меню\n/choose - Выбрать папку\n/publish - Начать публикацию\n/stop - Остановить\n/help - Справка"
                 )
+            elif payload == "back":
+                show_main_menu(user_id)
+            elif payload == "main_menu":
+                show_main_menu(user_id)
             else:
                 send_message(user_id, f"⚠️ Неизвестная команда: {payload}")
             
@@ -441,7 +454,19 @@ def webhook():
                 show_main_menu(user_id)
                 return jsonify({"ok": True}), 200
 
-            if text_lower == "/help":
+            if text_lower in ["/choose", "choose"]:
+                show_folder_menu(user_id)
+                return jsonify({"ok": True}), 200
+
+            if text_lower in ["/publish", "publish"]:
+                send_message(user_id, "▶️ Начинаю публикацию... (функция в разработке)")
+                return jsonify({"ok": True}), 200
+
+            if text_lower in ["/stop", "stop"]:
+                send_message(user_id, "⏹ Останавливаю публикацию... (функция в разработке)")
+                return jsonify({"ok": True}), 200
+
+            if text_lower in ["/help", "help"]:
                 send_message(
                     user_id,
                     "📖 **Помощь**\n\nКоманды:\n/start - Главное меню\n/choose - Выбрать папку\n/publish - Начать публикацию\n/stop - Остановить\n/help - Справка"
