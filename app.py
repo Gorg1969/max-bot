@@ -17,6 +17,11 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ГЛОБАЛЬНЫЕ ХРАНИЛИЩА (ОБЯВЛЕНИЕ ДО ОПРЕДЕЛЕНИЯ ФУНКЦИЙ)
+user_states = {}                  # Текущие состояния пользователя
+user_folders = {}               # Связка user_id -> путь к папке
+user_publication_status = {}    # Флаг публикации (True/False)
+
 # ========== КОНФИГ ==========
 TOKEN = os.environ.get("TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
@@ -30,6 +35,8 @@ if os.path.exists(CERT_PATH):
     logger.info(f"✅ Сертификат найден: {CERT_PATH}, но пока отключен")
 else:
     logger.warning(f"⚠️ Сертификат НЕ НАЙДЕН: {CERT_PATH}")
+
+# Остальные функции (send_message, send_keyboard, get_folders...) начинаются отсюда
 
 # ========== ФУНКЦИЯ ЗАПРОСОВ К МАХ ==========
 def max_request(method, endpoint, data=None, headers=None):
