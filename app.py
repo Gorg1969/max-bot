@@ -21,14 +21,50 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
 
-# ========== ПРОВЕРКА СЕРТИФИКАТА ==========
+# ========== ПРОВЕРКА И КОНВЕРТАЦИЯ СЕРТИФИКАТА ==========
 CERT_FILE = 'russian_trusted_root_ca_gost_2025.cer'
 CERT_PATH = os.path.join(os.path.dirname(__file__), CERT_FILE)
-USE_CERT = os.path.exists(CERT_PATH)
 
-if USE_CERT:
-    logger.info(f"✅ Сертификат найден: {CERT_PATH}")
+def convert_cer_to_pem(cer_path):
+    """Конвертирует DER (бинарный) сертификат в PEM"""
+    try:
+        with open(cer_path, 'rb') as f:
+            der_data = f.read()
+        
+        import base64
+        pem_data = base64.b64encode(der_data).decode('ascii')
+        pem_str = f"-----BEGIN CERTIFICATE-----\n{pem_data}\n-----END CERTIFICATE-----"
+        
+        pem_path = cer_path.replace('.cer', '.pem')
+        with open(pem_path, 'w') as f:
+            f.write(pem_str)
+        
+        return pem_path
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка конвертации: {e}")
+        return None
+
+# Проверяем наличие файла
+if os.path.exists(CERT_PATH):
+    # Пробуем прочитать как текст
+    with open(CERT_PATH, 'r') as f:
+        content = f.read()
+    
+    # Если это DER (бинарный) — конвертируем
+    if '-----BEGIN CERTIFICATE-----' not in content:
+        logger.info("🔄 Конвертация сертификата из DER в PEM...")
+        pem_path = convert_cer_to_pem(CERT_PATH)
+        if pem_path:
+            CERT_PATH = pem_path
+            USE_CERT = True
+            logger.info(f"✅ Сертификат сконвертирован: {CERT_PATH}")
+        else:
+            USE_CERT = False
+    else:
+        USE_CERT = True
+        logger.info(f"✅ Сертификат найден (PEM): {CERT_PATH}")
 else:
+    USE_CERT = False
     logger.warning(f"⚠️ Сертификат НЕ НАЙДЕН: {CERT_PATH}")
 
 # ========== ФУНКЦИЯ ЗАПРОСОВ К МАХ ==========
