@@ -5,225 +5,74 @@ import logging
 import os
 import time
 import urllib3
+from modules import GoogleDriveStorage, Publisher, Scheduler, UserState
 
 # ОТКЛЮЧАЕМ ПРЕДУПРЕЖДЕНИЯ SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ========== КОНФИГ ==========
-TOKEN = os.environ.get("TOKEN") or os.environ.get("MAX_BOT_TOKEN") or os.environ.get("BOT_TOKEN")
+TOKEN = os.environ.get("TOKEN") or os.environ.get("MAX_BOT_TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
 
-# ========== ПРОВЕРКА СЕРТИФИКАТА ==========
-CERT_FILE = 'russian_trusted_root_ca_gost_2025.cer'
-CERT_PATH = os.path.join(os.path.dirname(__file__), CERT_FILE)
-USE_CERT = False
+# ========== ИНИЦИАЛИЗАЦИЯ МОДУЛЕЙ ==========
+scheduler = Scheduler(delay=120, batch_size=10, batch_pause=300)
+user_state = UserState()
 
-if os.path.exists(CERT_PATH):
-    logger.info(f"✅ Сертификат найден: {CERT_PATH}, но пока отключен")
-else:
-    logger.warning(f"⚠️ Сертификат НЕ НАЙДЕН: {CERT_PATH}")
-
-# ========== ФУНКЦИЯ ЗАПРОСОВ К МАХ ==========
-def max_request(method, endpoint, data=None, headers=None, params=None):
-    """Универсальный запрос к API МАХ"""
-    url = f"{BASE_URL}{endpoint}"
+# ========== API КЛИЕНТ ДЛЯ MAX ==========
+class MaxAPIClient:
+    def __init__(self):
+        self.base_url = BASE_URL
+        self.token = TOKEN
     
-    request_headers = {}
-    
-    if TOKEN:
-        request_headers["Authorization"] = TOKEN
-        logger.info(f"🔑 Токен добавлен: {TOKEN[:4]}...{TOKEN[-4:]}")
-    else:
-        logger.error("❌ ТОКЕН НЕ НАЙДЕН!")
-    
-    request_headers["Content-Type"] = "application/json"
-    
-    if headers:
-        request_headers.update(headers)
-    
-    try:
-        response = requests.request(
-            method=method,
-            url=url,
-            headers=request_headers,
-            json=data,
-            params=params,
-            timeout=30,
-            verify=False
-        )
-        logger.info(f"📤 {method} {endpoint} -> {response.status_code}")
-        return response
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка запроса: {e}")
-        raise
-
-# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С СООБЩЕНИЯМИ ==========
-
-def get_headers():
-    """Получение заголовков с токеном"""
-    if not TOKEN:
-        logger.error("❌ ТОКЕН НЕ УСТАНОВЛЕН!")
-        return None
-    
-    return {
-        "Authorization": TOKEN,
-        "Content-Type": "application/json"
-    }
-
-def send_message(user_id, text, format="markdown"):
-    """Отправка сообщения в МАХ (user_id в URL, text в теле)"""
-    try:
-        headers = get_headers()
-        if not headers:
-            return False
-            
-        payload = {
-            "text": text,
-            "format": format
+    def get_headers(self):
+        return {
+            "Authorization": self.token,
+            "Content-Type": "application/json"
         }
-        
-        logger.info(f"📤 Отправка user_id={user_id}")
-        logger.info(f"📦 Пейлоад: {json.dumps(payload, ensure_ascii=False)[:200]}")
-        
-        response = requests.post(
-            f"{BASE_URL}/messages",
-            headers=headers,
-            params={"user_id": user_id},
-            json=payload,
-            timeout=30,
-            verify=False
-        )
-        
-        logger.info(f"📤 Ответ: {response.status_code} - {response.text[:200]}")
-        
-        if response.status_code == 200:
-            return True
-            
-        if response.status_code == 400:
-            logger.info("🔄 Пробую без format...")
-            payload2 = {"text": text}
-            response2 = requests.post(
-                f"{BASE_URL}/messages",
-                headers=headers,
+    
+    def send_message(self, user_id, text, format="markdown"):
+        """Отправка сообщения"""
+        try:
+            payload = {"text": text, "format": format}
+            response = requests.post(
+                f"{self.base_url}/messages",
+                headers=self.get_headers(),
                 params={"user_id": user_id},
-                json=payload2,
+                json=payload,
                 timeout=30,
                 verify=False
             )
-            logger.info(f"📤 Ответ без format: {response2.status_code} - {response2.text[:200]}")
-            return response2.status_code == 200
-            
-        return False
-            
-    except Exception as e:
-        logger.error(f"❌ Ошибка отправки: {e}")
-        return False
-
-def send_keyboard(user_id, text, buttons):
-    """Отправка клавиатуры в МАХ (user_id в URL)"""
-    try:
-        headers = get_headers()
-        if not headers:
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки: {e}")
             return False
-            
-        keyboard_rows = []
-        for button in buttons:
-            keyboard_rows.append([{
-                "text": button["text"],
-                "type": "callback",
-                "payload": button["payload"]
-            }])
-
-        payload = {
-            "text": text,
-            "format": "markdown",
-            "attachments": [{
-                "type": "inline_keyboard",
-                "payload": {
-                    "buttons": keyboard_rows
-                }
-            }]
-        }
-
-        logger.info(f"📤 Отправка клавиатуры user_id={user_id}")
-        logger.info(f"📦 Пейлоад: {json.dumps(payload, ensure_ascii=False)[:300]}")
-
-        response = requests.post(
-            f"{BASE_URL}/messages",
-            headers=headers,
-            params={"user_id": user_id},
-            json=payload,
-            timeout=30,
-            verify=False
-        )
-        
-        logger.info(f"📤 Ответ: {response.status_code} - {response.text[:200]}")
-        
-        if response.status_code == 200:
-            logger.info("✅ Клавиатура отправлена!")
-            return True
-        
-        if response.status_code == 400:
-            logger.info("🔄 Пробую без format...")
-            payload2 = {
-                "text": text,
-                "attachments": [{
-                    "type": "inline_keyboard",
-                    "payload": {
-                        "buttons": keyboard_rows
-                    }
-                }]
-            }
-            response2 = requests.post(
-                f"{BASE_URL}/messages",
-                headers=headers,
-                params={"user_id": user_id},
-                json=payload2,
+    
+    def send_photo(self, group_id, image_data, caption=None):
+        """Отправка изображения"""
+        try:
+            # Здесь нужно использовать multipart/form-data
+            # Это пример, требует доработки
+            files = {'file': ('image.jpg', image_data, 'image/jpeg')}
+            data = {'caption': caption} if caption else {}
+            response = requests.post(
+                f"{self.base_url}/messages",
+                headers=self.get_headers(),
+                params={"chat_id": group_id},
+                data=data,
+                files=files,
                 timeout=30,
                 verify=False
             )
-            logger.info(f"📤 Ответ без format: {response2.status_code} - {response2.text[:200]}")
-            if response2.status_code == 200:
-                return True
-        
-        logger.info("🔄 Отправляю обычное сообщение...")
-        return send_message(user_id, text)
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка клавиатуры: {e}")
-        return False
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки фото: {e}")
+            return False
 
-def show_main_menu(user_id):
-    """Главное меню"""
-    send_keyboard(
-        user_id,
-        "🏠 **Главное меню**\n\nВыберите действие:",
-        [
-            {"text": "📂 Выбрать папку", "payload": "choose_folder"},
-            {"text": "▶️ Начать публикацию", "payload": "start_publish"},
-            {"text": "⏹ Остановить", "payload": "stop_publication"},
-            {"text": "ℹ️ Помощь", "payload": "help"}
-        ]
-    )
-
-def show_folder_menu(user_id):
-    """Меню выбора папки"""
-    send_keyboard(
-        user_id,
-        "📂 **Выбор папки**\n\nЗдесь будет список папок.\n\nПока функция в разработке.",
-        [
-            {"text": "📁 Папка 1 (тест)", "payload": "folder_1"},
-            {"text": "📁 Папка 2 (тест)", "payload": "folder_2"},
-            {"text": "🔙 Назад", "payload": "back"},
-            {"text": "🏠 В меню", "payload": "main_menu"}
-        ]
-    )
+api_client = MaxAPIClient()
 
 # ========== ЭНДПОИНТЫ ==========
 
@@ -236,83 +85,19 @@ def health():
     return {
         "status": "ok",
         "time": time.strftime('%Y-%m-%d %H:%M:%S'),
-        "certificate": {
-            "found": USE_CERT,
-            "path": CERT_PATH
-        },
-        "token": {
-            "exists": bool(TOKEN),
-            "preview": f"{TOKEN[:4]}...{TOKEN[-4:]}" if TOKEN else None
-        }
-    }, 200
-
-@app.route('/debug')
-def debug():
-    return {
-        "token": "✅" if TOKEN else "❌",
-        "token_preview": f"{TOKEN[:4]}...{TOKEN[-4:]}" if TOKEN else None,
-        "certificate": {
-            "found": USE_CERT,
-            "path": CERT_PATH,
-            "exists": os.path.exists(CERT_PATH) if CERT_PATH else False
-        }
+        "scheduler": scheduler.get_status()
     }, 200
 
 @app.route('/setup_webhook')
 def setup_webhook():
     token = request.args.get('token') or TOKEN
-    
     if not token:
-        return """
-        <html>
-        <body style="font-family: monospace; padding: 20px;">
-            ❌ <b>Ошибка:</b> токен не передан и не установлен в окружении<br>
-            Используйте: <b>/setup_webhook?token=ВАШ_ТОКЕН</b>
-        </body>
-        </html>
-        """, 400
+        return "❌ Токен не найден", 400
     
     webhook_url = "https://maxbot.bothost.tech/webhook"
-    
-    html = f"""
-    <html>
-    <body style="font-family: monospace; padding: 20px; background: #f0f0f0;">
-        <div style="max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px;">
-            <h2>🔐 Настройка вебхука для MAX</h2>
-            <hr>
-            <p><b>📁 Сертификат:</b> {'✅ Найден' if USE_CERT else '❌ Не найден (отключен)'}</p>
-            <p><b>📂 Путь:</b> {CERT_PATH if CERT_PATH else 'Не указан'}</p>
-            <p><b>🔑 Токен:</b> {token[:4]}...{token[-4:] if len(token) > 8 else '***'}</p>
-            <p><b>🌐 Вебхук:</b> {webhook_url}</p>
-            <p><b>📌 Формат авторизации:</b> Authorization: &lt;token&gt; (без Bearer)</p>
-            <hr>
-    """
+    headers = {"Authorization": token, "Content-Type": "application/json"}
     
     try:
-        headers = {
-            "Authorization": token,
-            "Content-Type": "application/json"
-        }
-        
-        # 1. Удаляем старую подписку
-        html += "<h3>🗑️ Удаление старой подписки...</h3>"
-        try:
-            r_del = requests.delete(
-                "https://platform-api2.max.ru/subscriptions",
-                headers=headers,
-                timeout=10,
-                verify=False
-            )
-            html += f"<p>DELETE: <b>{r_del.status_code}</b></p>"
-            if r_del.status_code == 200:
-                html += "<p style='color: green;'>✅ Старая подписка удалена</p>"
-            else:
-                html += f"<p style='color: orange;'>⚠️ Ответ: {r_del.text[:100]}</p>"
-        except Exception as e:
-            html += f"<p style='color: orange;'>⚠️ Ошибка: {e}</p>"
-        
-        # 2. Создаем новую подписку
-        html += "<h3>📝 Создание новой подписки...</h3>"
         r = requests.post(
             "https://platform-api2.max.ru/subscriptions",
             headers=headers,
@@ -320,51 +105,15 @@ def setup_webhook():
             timeout=10,
             verify=False
         )
-        html += f"<p>POST: <b>{r.status_code}</b></p>"
-        html += f"<p>Ответ: <pre style='background: #f5f5f5; padding: 10px;'>{r.text[:300]}</pre></p>"
-        
-        if r.status_code == 200:
-            html += """
-            <div style="background: #d4edda; padding: 15px; border-radius: 5px; margin: 10px 0;">
-                ✅ <b>ВЕБХУК УСПЕШНО НАСТРОЕН!</b>
-            </div>
-            """
-        else:
-            html += f"""
-            <div style="background: #f8d7da; padding: 15px; border-radius: 5px; margin: 10px 0;">
-                ❌ <b>Ошибка настройки вебхука</b><br>
-                Код: {r.status_code}<br>
-                {r.text[:200]}
-            </div>
-            """
-        
-        html += """
-        <hr>
-        <p><a href="/health">✅ Проверить здоровье</a> | <a href="/debug">🔍 Отладка</a></p>
-        </div>
-        </body>
-        </html>
-        """
-        
-        return html
-        
+        return f"✅ Вебхук настроен: {r.status_code}"
     except Exception as e:
-        return f"""
-        <html>
-        <body style="font-family: monospace; padding: 20px;">
-            <div style="background: #f8d7da; padding: 15px; border-radius: 5px;">
-                ❌ <b>Ошибка:</b> {e}
-            </div>
-        </body>
-        </html>
-        """, 500
+        return f"❌ Ошибка: {e}"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Обработка вебхука от МАХ (поддерживает и команды, и кнопки)"""
+    """Обработка вебхука от МАХ"""
     try:
         data = request.get_json()
-        logger.info("=" * 50)
         logger.info("📩 ПОЛУЧЕН ВЕБХУК!")
 
         if not data:
@@ -374,112 +123,112 @@ def webhook():
         text = None
         payload = None
         
-        # ========== ОБРАБОТКА CALLBACK (НАЖАТИЕ КНОПКИ) ==========
+        # ========== ОБРАБОТКА CALLBACK ==========
         if 'callback' in data:
             callback = data['callback']
             payload = callback.get('payload')
             if 'user' in callback:
                 user_id = callback['user'].get('user_id')
-            logger.info(f"🔘 Нажата кнопка: payload='{payload}', user_id={user_id}")
         
-        # ========== ОБРАБОТКА ОБЫЧНОГО СООБЩЕНИЯ ==========
+        # ========== ОБРАБОТКА СООБЩЕНИЯ ==========
         elif 'message' in data:
             message = data['message']
-            
             if 'sender' in message:
-                sender = message['sender']
-                user_id = sender.get('user_id')
-            
-            if not user_id and 'recipient' in message:
-                recipient = message['recipient']
-                user_id = recipient.get('user_id')
-            
+                user_id = message['sender'].get('user_id')
             if 'body' in message:
-                body = message['body']
-                text = body.get('text')
-        
-        # Если не нашли - рекурсивный поиск
-        if not user_id:
-            def search(obj):
-                nonlocal user_id, text, payload
-                if isinstance(obj, dict):
-                    if "user_id" in obj and user_id is None:
-                        user_id = obj["user_id"]
-                    if "text" in obj and text is None:
-                        text = obj["text"]
-                    if "payload" in obj and payload is None:
-                        payload = obj["payload"]
-                    for value in obj.values():
-                        search(value)
-                elif isinstance(obj, list):
-                    for item in obj:
-                        search(item)
-            search(data)
+                text = message['body'].get('text')
         
         if not user_id:
-            logger.warning("⚠️ Не удалось найти user_id")
             return jsonify({"ok": True}), 200
 
         logger.info(f"💬 user_id={user_id}, text='{text}', payload='{payload}'")
 
-        # ========== ОБРАБОТКА НАЖАТИЯ КНОПОК ==========
+        # ========== ОБРАБОТКА КНОПОК ==========
         if payload:
-            logger.info(f"🔘 Обработка payload: {payload}")
-            
             if payload == "choose_folder":
-                show_folder_menu(user_id)
+                user_state.set_state(user_id, 'waiting_folder')
+                api_client.send_message(user_id, "📁 **Введите ссылку на корневую папку Google Drive:**\n\nПример: `https://drive.google.com/drive/folders/ABC123`")
             elif payload == "start_publish":
-                send_message(user_id, "▶️ Начинаю публикацию... (функция в разработке)")
-            elif payload == "stop_publication":
-                send_message(user_id, "⏹ Останавливаю публикацию... (функция в разработке)")
+                api_client.send_message(user_id, "▶️ Начинаю публикацию... (выберите папку через /choose)")
+            elif payload == "stop":
+                api_client.send_message(user_id, "⏹️ Публикация остановлена.")
             elif payload == "help":
-                send_message(
-                    user_id,
-                    "📖 **Помощь**\n\nКоманды:\n/start - Главное меню\n/choose - Выбрать папку\n/publish - Начать публикацию\n/stop - Остановить\n/help - Справка"
-                )
-            elif payload == "back":
-                show_main_menu(user_id)
-            elif payload == "main_menu":
-                show_main_menu(user_id)
-            else:
-                send_message(user_id, f"⚠️ Неизвестная команда: {payload}")
-            
+                show_help(user_id)
             return jsonify({"ok": True}), 200
 
         # ========== ОБРАБОТКА КОМАНД ==========
-        if text and isinstance(text, str):
+        if text:
             text_lower = text.lower().strip()
             
-            if text_lower in ["/start", "start"]:
+            if text_lower == "/start":
                 show_main_menu(user_id)
-                return jsonify({"ok": True}), 200
-
-            if text_lower in ["/choose", "choose"]:
-                show_folder_menu(user_id)
-                return jsonify({"ok": True}), 200
-
-            if text_lower in ["/publish", "publish"]:
-                send_message(user_id, "▶️ Начинаю публикацию... (функция в разработке)")
-                return jsonify({"ok": True}), 200
-
-            if text_lower in ["/stop", "stop"]:
-                send_message(user_id, "⏹ Останавливаю публикацию... (функция в разработке)")
-                return jsonify({"ok": True}), 200
-
-            if text_lower in ["/help", "help"]:
-                send_message(
-                    user_id,
-                    "📖 **Помощь**\n\nКоманды:\n/start - Главное меню\n/choose - Выбрать папку\n/publish - Начать публикацию\n/stop - Остановить\n/help - Справка"
-                )
-                return jsonify({"ok": True}), 200
+            
+            elif text_lower == "/choose":
+                user_state.set_state(user_id, 'waiting_folder')
+                api_client.send_message(user_id, "📁 **Введите ссылку на корневую папку Google Drive:**\n\nПример: `https://drive.google.com/drive/folders/ABC123`")
+            
+            elif text_lower == "/stop":
+                api_client.send_message(user_id, "⏹️ Публикация остановлена.")
+            
+            elif text_lower == "/help":
+                show_help(user_id)
+            
+            elif user_state.get_state(user_id) == 'waiting_folder':
+                # Пользователь ввёл ссылку на папку
+                folder_url = text
+                user_state.clear_state(user_id)
+                
+                # Здесь нужны credentials пользователя
+                # Пока используем заглушку
+                api_client.send_message(user_id, "✅ Папка получена. Начинаю публикацию...")
+                
+                # В реальности нужно получать credentials от пользователя
+                # Сейчас используем заглушку
+                storage = GoogleDriveStorage(user_id, credentials=None)  # Нужны реальные credentials
+                publisher = Publisher(user_id, storage, api_client, scheduler)
+                publisher.start_publication(folder_url)
 
         return jsonify({"ok": True}), 200
 
     except Exception as e:
         logger.error(f"❌ ОШИБКА: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
         return jsonify({"ok": False}), 500
+
+def show_main_menu(user_id):
+    """Главное меню"""
+    keyboard = {
+        "text": "🏠 **Главное меню**\n\nВыберите действие:",
+        "format": "markdown",
+        "attachments": [{
+            "type": "inline_keyboard",
+            "payload": {
+                "buttons": [
+                    [{"text": "📂 Выбрать папку", "type": "callback", "payload": "choose_folder"}],
+                    [{"text": "▶️ Начать публикацию", "type": "callback", "payload": "start_publish"}],
+                    [{"text": "⏹ Остановить", "type": "callback", "payload": "stop"}],
+                    [{"text": "ℹ️ Помощь", "type": "callback", "payload": "help"}]
+                ]
+            }
+        }]
+    }
+    # Отправка клавиатуры
+    api_client.send_message(user_id, keyboard['text'], 'markdown')
+
+def show_help(user_id):
+    help_text = (
+        "📖 **Помощь**\n\n"
+        "📂 /choose - Выбрать папку\n"
+        "▶️ /start - Главное меню\n"
+        "⏹ /stop - Остановить публикацию\n"
+        "ℹ️ /help - Справка\n\n"
+        "**Как это работает:**\n"
+        "1. Создайте корневую папку на Google Drive.\n"
+        "2. Внутри создайте подпапки с названием: `Название -123456789`.\n"
+        "3. В каждой подпапке: до 10 изображений и файл `info.txt`.\n"
+        "4. Отправьте боту ссылку на корневую папку.\n"
+        "5. Бот автоматически опубликует всё с задержками."
+    )
+    api_client.send_message(user_id, help_text)
 
 # ========== ЗАПУСК ==========
 
