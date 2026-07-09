@@ -318,67 +318,46 @@ def webhook():
         payload = None
         file_id = None
         
-        # ========== УНИВЕРСАЛЬНЫЙ ПОИСК ==========
-        def search_in_dict(obj):
-            nonlocal user_id, text, payload, file_id
+        # ========== ПАРСИНГ СТРУКТУРЫ MAX ==========
+        if 'message' in data:
+            message = data['message']
             
-            if isinstance(obj, dict):
-                # Ищем user_id
-                if 'user_id' in obj and user_id is None:
-                    user_id = obj['user_id']
-                if 'chat_id' in obj and user_id is None:
-                    user_id = obj['chat_id']
+            # Извлекаем user_id из sender
+            if 'sender' in message:
+                user_id = message['sender'].get('user_id')
+            
+            # Если не нашли - ищем в recipient
+            if not user_id and 'recipient' in message:
+                user_id = message['recipient'].get('user_id')
+            
+            # Извлекаем текст
+            if 'body' in message:
+                body = message['body']
+                text = body.get('text')
                 
-                # Ищем текст
-                if 'text' in obj and text is None:
-                    text = obj['text']
+                # Извлекаем файл из body
+                if 'file' in body:
+                    file_id = body['file']
                 
-                # Ищем payload (кнопки)
-                if 'payload' in obj and payload is None:
-                    payload = obj['payload']
-                
-                # Ищем файл (самое важное!)
-                if 'file' in obj:
-                    if isinstance(obj['file'], dict):
-                        file_id = obj['file'].get('id')
-                    elif isinstance(obj['file'], str):
-                        file_id = obj['file']
-                
-                # Проверяем attachments (MAX)
-                if 'attachments' in obj:
-                    for att in obj['attachments']:
+                # Извлекаем attachments
+                if 'attachments' in body:
+                    for att in body['attachments']:
                         if att.get('type') == 'file':
                             file_id = att.get('payload', {}).get('id')
-                            if not file_id:
-                                file_id = att.get('id')
-                
-                # Проверяем body (MAX)
-                if 'body' in obj:
-                    body = obj['body']
-                    if 'file' in body:
-                        file_id = body['file']
-                    if 'attachments' in body:
-                        for att in body['attachments']:
-                            if att.get('type') == 'file':
-                                file_id = att.get('payload', {}).get('id')
-                                if not file_id:
-                                    file_id = att.get('id')
-                
-                # Рекурсивный обход
-                for value in obj.values():
-                    search_in_dict(value)
-            
-            elif isinstance(obj, list):
-                for item in obj:
-                    search_in_dict(item)
         
-        search_in_dict(data)
+        # Если не нашли - пробуем другие варианты
+        if not user_id:
+            if 'recipient' in data:
+                user_id = data['recipient'].get('user_id')
+            if not user_id and 'sender' in data:
+                user_id = data['sender'].get('user_id')
         
-        # Если user_id найден как chat_id
-        if not user_id and 'recipient' in data:
-            user_id = data['recipient'].get('user_id')
-        if not user_id and 'sender' in data:
-            user_id = data['sender'].get('user_id')
+        # Проверяем callback
+        if 'callback' in data:
+            callback = data['callback']
+            payload = callback.get('payload')
+            if not user_id and 'user' in callback:
+                user_id = callback['user'].get('user_id')
         
         if not user_id:
             logger.warning("⚠️ Не удалось найти user_id")
@@ -445,11 +424,12 @@ def webhook():
             user_states[user_id] = None
             return jsonify({"ok": True}), 200
 
-        # ========== ОБРАБОТКА КОМАНД (для совместимости) ==========
+        # ========== ОБРАБОТКА КОМАНД ==========
         if text:
             text_lower = text.lower().strip()
             if text_lower == "/start":
                 show_main_menu(user_id)
+                return jsonify({"ok": True}), 200
 
         return jsonify({"ok": True}), 200
 
