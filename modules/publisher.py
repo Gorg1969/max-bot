@@ -4,7 +4,7 @@ import os
 import shutil
 import logging
 import sys
-import re
+import requests
 
 if sys.platform == 'linux':
     sys.stdout.reconfigure(encoding='utf-8')
@@ -18,7 +18,29 @@ class Publisher:
         self.db = database
         self.is_running = {}
     
-    def publish_folder(self, folder_path, group_id, post_number=None, total_posts=None):
+    def upload_image(self, image_path, token):
+        """Загрузка изображения на сервер MAX через /uploads"""
+        try:
+            url = f"https://platform-api2.max.ru/uploads"
+            headers = {"Authorization": token}
+            
+            with open(image_path, 'rb') as f:
+                files = {'file': f}
+                response = requests.post(url, headers=headers, files=files, timeout=30, verify=False)
+            
+            if response.status_code == 200:
+                data = response.json()
+                upload_token = data.get('token')
+                logger.info(f"✅ Изображение загружено, токен: {upload_token[:20]}...")
+                return upload_token
+            else:
+                logger.error(f"❌ Ошибка загрузки изображения: {response.status_code} - {response.text}")
+                return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка при загрузке изображения: {e}")
+            return None
+    
+    def publish_folder(self, folder_path, group_id, bot_token, post_number=None, total_posts=None):
         try:
             logger.info(f"📤 Публикация папки: {folder_path} в группу {group_id}")
             
@@ -49,55 +71,68 @@ class Publisher:
                 with open(info_file, 'r', encoding='cp1251') as f:
                     info_text = f.read()
             
-            # Получаем прямые ссылки на изображения
-            image_urls = []
-            for image_path in images[:10]:  # Максимум 10 изображений
-                # Загружаем изображение на Google Drive или используем прямой путь
-                # Здесь мы используем прямой путь к файлу (он уже на сервере)
-                image_urls.append(image_path)
-            
-            # ========== ОТПРАВЛЯЕМ ВСЁ В ОДНОМ СООБЩЕНИИ ==========
-            
             # Формируем текст
             if post_number and total_posts:
                 full_text = f"📌 **Пост {post_number}/{total_posts}**\n\n{info_text}"
             else:
                 full_text = info_text
             
-            # Формируем вложения (изображения)
-            attachments = []
-            for image_path in image_urls:
-                # Используем прямую ссылку на файл
-                attachments.append({
-                    "type": "image",
-                    "payload": {
-                        "url": f"https://maxbot.bothost.tech/file/{os.path.basename(image_path)}"
-                        # ИЛИ можно использовать токен, если загружать через /uploads
-                    }
-                })
+            # ========== ЗАГРУЗКА ИЗОБРАЖЕНИЙ ==========
+            # Ограничиваем до 10 изображений (максимум 12)
+            images = images[:10]
+            image_tokens = []
             
-            # Отправляем одно сообщение с текстом и изображениями
-            logger.info(f"📤 Отправка сообщения в группу {group_id} с {len(attachments)} изображениями")
+            for image_path in images:
+                logger.info(f"📤 Загрузка изображения: {os.path.basename(image_path)}")
+                upload_token = self.upload_image(image_path, bot_token)
+                if upload_token:
+                    image_tokens.append(upload_token)
+                else:
+                    logger.warning(f"⚠️ Не удалось загрузить изображение: {image_path}")
+            
+            if not image_tokens:
+                # Если ни одно изображение не загрузилось — отправляем только текст
+                logger.warning("⚠️ Нет загруженных изображений, отправляю только текст")
+                result = self.api.send_message_to_chat(group_id, full_text)
+                if result:
+                    return True, "Успешно (только текст)"
+                else:
+                    return False, "Ошибка отправки текста"
+            
+            # ========== ОТПРАВКА СООБЩЕНИЯ С ВЛОЖЕНИЯМИ ==========
+            logger.info(f"📤 Отправка сообщения в группу {group_id} с {len(image_tokens)} изображениями")
             
             result = self.api.send_message_to_chat_with_attachments(
                 chat_id=group_id,
                 text=full_text,
-                attachments=attachments
+                attachments=[{"type": "image", "payload": {"token": t}} for t in image_tokens]
             )
             
-            if not result:
-                logger.error(f"❌ Не удалось отправить сообщение в группу {group_id}")
-                return False, "Ошибка отправки сообщения"
+            if result:
+                logger.info(f"✅ Сообщение с галереей отправлено в группу {group_id}")
+                return True, "Успешно"
             else:
-                logger.info(f"✅ Сообщение отправлено в группу {group_id}")
+                # Если не получилось с attachments — пробуем отправить только текст
+                logger.warning("⚠️ Не удалось отправить с attachments, пробую только текст")
+                result = self.api.send_message_to_chat(group_id, full_text)
+                if result:
+                    return True, "Успешно (только текст)"
+                else:
+                    return False, "Ошибка отправки"
             
-            return True, "Успешно"
         except Exception as e:
             logger.error(f"❌ Ошибка публикации: {e}")
             return False, str(e)
     
     def start(self, user_id):
         logger.info(f"🚀 Запуск публикации для пользователя {user_id}")
+        
+        # Получаем токен бота
+        bot_token = self.api.token
+        if not bot_token:
+            logger.error("❌ Токен бота не найден")
+            self.api.send_message(user_id, "❌ Ошибка: токен бота не найден")
+            return
         
         self.is_running[user_id] = True
         user_folder = self.fm.get_user_folder(user_id)
@@ -140,6 +175,7 @@ class Publisher:
             success, msg = self.publish_folder(
                 folder['path'], 
                 folder['group_id'], 
+                bot_token,
                 post_number, 
                 total
             )
