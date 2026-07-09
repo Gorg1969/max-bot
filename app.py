@@ -222,7 +222,7 @@ def publish_folder(user_id, folder_id, group_id):
         return False, str(e)
 
 def start_publication(user_id, folder_url):
-    """Запуск публикации"""
+    """Запуск публикации с подробным логированием"""
     logger.info(f"🚀 Запуск публикации для пользователя {user_id}")
     
     # 1. Извлекаем ID папки
@@ -231,17 +231,23 @@ def start_publication(user_id, folder_url):
         api_client.send_message(user_id, "❌ Не удалось извлечь ID папки из ссылки.")
         return
     
+    logger.info(f"📁 ID папки: {folder_id}")
     api_client.send_message(user_id, f"✅ **Папка принята!**\n\n📁 ID: `{folder_id}`\n⏳ Получаю список подпапок...")
     
     # 2. Получаем список подпапок (рекурсивно, без циклов)
     subfolders = get_subfolders_recursive(folder_id)
+    
+    # Логируем результат
+    logger.info(f"📊 Найдено подпапок с ID групп: {len(subfolders)}")
+    
     if not subfolders:
-        api_client.send_message(user_id, "❌ Не найдено папок с ID групп.")
+        logger.warning("⚠️ Не найдено папок с ID групп")
+        api_client.send_message(user_id, "❌ Не найдено папок с ID групп.\n\nПроверьте, что в папках есть ID группы в формате `-123456789`")
         return
     
     # Логируем все найденные папки
     for sf in subfolders:
-        logger.info(f"📁 Найдена папка: {sf['name']}")
+        logger.info(f"📁 Найдена папка: {sf['name']} (ID: {sf['id']})")
         group_id = extract_group_id(sf['name'])
         if group_id:
             logger.info(f"  ✅ ID группы: {group_id}")
@@ -268,6 +274,8 @@ def start_publication(user_id, folder_url):
             api_client.send_message(user_id, f"❌ {error_msg}")
             continue
         
+        logger.info(f"📤 Публикация {i+1}/{len(subfolders)}: {subfolder['name']} -> группа {group_id}")
+        
         # Сообщение пользователю о ходе
         api_client.send_message(
             user_id,
@@ -279,9 +287,11 @@ def start_publication(user_id, folder_url):
         if success:
             published_count += 1
             api_client.send_message(user_id, f"✅ {subfolder['name']} - опубликовано")
+            logger.info(f"✅ {subfolder['name']} - опубликовано")
         else:
             errors.append(f"{subfolder['name']} - {msg}")
             api_client.send_message(user_id, f"❌ {subfolder['name']} - ошибка: {msg}")
+            logger.error(f"❌ {subfolder['name']} - ошибка: {msg}")
         
         # Задержка между постами (2 минуты)
         if i < len(subfolders) - 1:
@@ -307,7 +317,7 @@ def start_publication(user_id, folder_url):
             result_msg += f"\n... и ещё {len(errors) - 5} ошибок"
     
     api_client.send_message(user_id, result_msg)
-
+    logger.info(f"🏁 Публикация завершена для пользователя {user_id}")
 # ========== ЭНДПОИНТЫ ==========
 
 @app.route('/')
