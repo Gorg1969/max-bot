@@ -1,4 +1,4 @@
-from flask import render_template_string, request, redirect, url_for, jsonify
+from flask import render_template_string, request, jsonify
 import os
 import logging
 
@@ -25,7 +25,10 @@ UPLOAD_HTML = """
             border-radius: 10px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }
-        h1 { color: #333; text-align: center; }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
         .info {
             background: #e8f4f8;
             padding: 15px;
@@ -38,7 +41,9 @@ UPLOAD_HTML = """
             padding: 2px 6px;
             border-radius: 3px;
         }
-        .file-input-wrapper { margin: 20px 0; }
+        .file-input-wrapper {
+            margin: 20px 0;
+        }
         .file-input-wrapper input[type="file"] {
             display: block;
             width: 100%;
@@ -47,7 +52,9 @@ UPLOAD_HTML = """
             border-radius: 5px;
             cursor: pointer;
         }
-        .file-input-wrapper input[type="file"]:hover { border-color: #4CAF50; }
+        .file-input-wrapper input[type="file"]:hover {
+            border-color: #4CAF50;
+        }
         .btn {
             display: block;
             width: 100%;
@@ -59,13 +66,43 @@ UPLOAD_HTML = """
             font-size: 16px;
             cursor: pointer;
         }
-        .btn:hover { background: #45a049; }
-        .btn:disabled { background: #ccc; cursor: not-allowed; }
-        .status { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
-        .status.success { display: block; background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-        .status.error { display: block; background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
-        .status.info { display: block; background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
-        .footer { text-align: center; margin-top: 20px; font-size: 12px; color: #999; }
+        .btn:hover {
+            background: #45a049;
+        }
+        .btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 5px;
+            display: none;
+        }
+        .status.success {
+            display: block;
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.error {
+            display: block;
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .status.info {
+            display: block;
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 20px;
+            font-size: 12px;
+            color: #999;
+        }
     </style>
 </head>
 <body>
@@ -76,7 +113,7 @@ UPLOAD_HTML = """
             • Формат: <code>.zip</code><br>
             • Внутри папки с названиями: <code>Название -123456789</code><br>
             • В каждой папке: <code>info.txt</code> и изображения<br>
-            • Максимальный размер: <strong>200 МБ</strong>
+            • <strong>Ограничений на размер нет</strong>
         </div>
         
         <form id="uploadForm" enctype="multipart/form-data">
@@ -87,7 +124,9 @@ UPLOAD_HTML = """
         </form>
         
         <div id="status" class="status"></div>
-        <div class="footer">Бот автоматически начнёт публикацию после загрузки</div>
+        <div class="footer">
+            Бот автоматически начнёт публикацию после загрузки
+        </div>
     </div>
 
     <script>
@@ -105,19 +144,18 @@ UPLOAD_HTML = """
             
             const file = fileInput.files[0];
             
-            if (file.size > 200 * 1024 * 1024) {
-                showStatus('❌ Файл слишком большой. Максимальный размер: 200 МБ', 'error');
-                return;
-            }
-            
+            // Проверка расширения ZIP
             if (!file.name.endsWith('.zip')) {
                 showStatus('❌ Файл должен быть в формате .zip', 'error');
                 return;
             }
             
+            // ⚠️ ОГРАНИЧЕНИЕ ПО РАЗМЕРУ СНЯТО ⚠️
+            // Файл может быть любого размера
+            
             submitBtn.disabled = true;
             submitBtn.textContent = '⏳ Загрузка...';
-            showStatus('⏳ Загрузка файла...', 'info');
+            showStatus('⏳ Загрузка файла (это может занять время)...', 'info');
             
             const formData = new FormData();
             formData.append('file', file);
@@ -159,9 +197,11 @@ class WebInterface:
         self.publisher = publisher
     
     def upload_page(self):
+        """Страница загрузки архива"""
         return render_template_string(UPLOAD_HTML)
     
     def upload_file(self, request, user_id):
+        """Обработка загруженного архива"""
         if 'file' not in request.files:
             return {'success': False, 'message': 'Файл не выбран'}
         
