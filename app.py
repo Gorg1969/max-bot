@@ -61,13 +61,63 @@ def extract_folder_id_from_url(url):
             return match.group(1)
     return None
 
+def get_subfolders_from_public_folder(folder_id):
+    """Получение списка подпапок в публичной папке"""
+    try:
+        url = f"https://drive.google.com/drive/folders/{folder_id}"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        # Ищем ссылки на подпапки
+        folder_pattern = r'https://drive.google.com/drive/folders/([a-zA-Z0-9_-]+)[^"]*'
+        folder_ids = re.findall(folder_pattern, response.text)
+        folder_ids = list(set(folder_ids))
+        
+        # Пытаемся найти названия
+        name_pattern = r'<span class="[^"]*">([^<]+)</span>'
+        names = re.findall(name_pattern, response.text)
+        
+        subfolders = []
+        for i, fid in enumerate(folder_ids):
+            # Пытаемся получить имя из разных источников
+            if i < len(names):
+                name = names[i]
+            else:
+                name = f"Папка {i+1}"
+            
+            subfolders.append({
+                'id': fid,
+                'name': name
+            })
+        
+        logger.info(f"📁 Найдено подпапок: {len(subfolders)}")
+        for sf in subfolders:
+            logger.info(f"  - {sf['name']} (ID: {sf['id']})")
+        
+        return subfolders
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения подпапок: {e}")
+        return []
+
+def extract_group_id(folder_name):
+    """Извлечение ID группы из названия папки"""
+    # Ищем минус и цифры после него
+    match = re.search(r'-(\d+)', folder_name)
+    if match:
+        group_id = match.group(1)
+        logger.info(f"✅ Извлечён ID группы: {group_id} из '{folder_name}'")
+        return group_id
+    else:
+        logger.warning(f"⚠️ Не найден ID группы в: '{folder_name}'")
+        return None
+
 def get_public_files(folder_id):
     """Получение списка файлов в публичной папке Google Drive"""
     try:
         url = f"https://drive.google.com/drive/folders/{folder_id}"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
@@ -83,49 +133,11 @@ def get_public_files(folder_id):
         files = []
         for i, file_id in enumerate(file_ids):
             name = names[i][0] if i < len(names) else f"file_{file_id}"
-            files.append({
-                'id': file_id,
-                'name': name
-            })
+            files.append({'id': file_id, 'name': name})
         
         return files
     except Exception as e:
         logger.error(f"❌ Ошибка получения файлов: {e}")
-        return []
-
-def get_subfolders_from_public_folder(folder_id):
-    """Получение списка подпапок в публичной папке"""
-    try:
-        url = f"https://drive.google.com/drive/folders/{folder_id}"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        # Ищем ссылки на подпапки
-        folder_pattern = r'https://drive.google.com/drive/folders/([a-zA-Z0-9_-]+)[^"]*'
-        folder_ids = re.findall(folder_pattern, response.text)
-        
-        # Убираем дубликаты
-        folder_ids = list(set(folder_ids))
-        
-        # Пытаемся найти названия
-        name_pattern = r'<span class="[^"]*">([^<]+)</span>'
-        names = re.findall(name_pattern, response.text)
-        
-        subfolders = []
-        for i, fid in enumerate(folder_ids):
-            name = names[i] if i < len(names) else f"Папка {i+1}"
-            subfolders.append({
-                'id': fid,
-                'name': name
-            })
-        
-        return subfolders
-    except Exception as e:
-        logger.error(f"❌ Ошибка получения подпапок: {e}")
         return []
 
 def download_public_file(file_id):
@@ -148,14 +160,14 @@ def download_public_image(file_id):
         logger.error(f"❌ Ошибка скачивания изображения: {e}")
         return None
 
-# ========== ПУБЛИКАЦИЯ ==========
-
 def publish_folder(user_id, folder_id, group_id):
     """Публикация одной папки"""
     try:
-        # Получаем список файлов в папке
+        logger.info(f"📤 Публикация папки {folder_id} в группу {group_id}")
+        
         files = get_public_files(folder_id)
         if not files:
+            logger.warning(f"⚠️ Нет файлов в папке {folder_id}")
             return False, "Нет файлов в папке"
         
         # Находим info.txt
@@ -166,6 +178,7 @@ def publish_folder(user_id, folder_id, group_id):
                 break
         
         if not info_file:
+            logger.warning(f"⚠️ Нет info.txt в папке {folder_id}")
             return False, "Нет info.txt"
         
         # Скачиваем info.txt
@@ -176,18 +189,17 @@ def publish_folder(user_id, folder_id, group_id):
         # Отправляем текст в группу
         if info_text:
             api_client.send_message(group_id, info_text)
+            logger.info(f"✅ Отправлен info.txt в группу {group_id}")
         
         # Находим изображения (до 10 штук)
         images = [f for f in files if f['name'].lower().endswith(('.jpg', '.jpeg', '.png', '.gif'))][:10]
+        logger.info(f"🖼️ Найдено изображений: {len(images)}")
         
         # Отправляем изображения
         for image in images:
-            img_data = download_public_image(image['id'])
-            if img_data:
-                # В MAX нужно использовать multipart/form-data
-                # Пока отправляем только текст
-                api_client.send_message(group_id, f"📷 {image['name']}")
-                api_client.send_message(group_id, f"🔗 https://drive.google.com/file/d/{image['id']}/view")
+            api_client.send_message(group_id, f"📷 {image['name']}")
+            api_client.send_message(group_id, f"🔗 https://drive.google.com/file/d/{image['id']}/view")
+            logger.info(f"✅ Отправлено изображение: {image['name']}")
         
         return True, "Успешно"
         
@@ -197,6 +209,8 @@ def publish_folder(user_id, folder_id, group_id):
 
 def start_publication(user_id, folder_url):
     """Запуск публикации"""
+    logger.info(f"🚀 Запуск публикации для пользователя {user_id}")
+    
     # 1. Извлекаем ID папки
     folder_id = extract_folder_id_from_url(folder_url)
     if not folder_id:
@@ -211,6 +225,15 @@ def start_publication(user_id, folder_url):
         api_client.send_message(user_id, "❌ В корневой папке нет подпапок.")
         return
     
+    # Логируем все найденные папки
+    for sf in subfolders:
+        logger.info(f"📁 Найдена папка: {sf['name']}")
+        group_id = extract_group_id(sf['name'])
+        if group_id:
+            logger.info(f"  ✅ ID группы: {group_id}")
+        else:
+            logger.warning(f"  ❌ Нет ID группы в названии")
+    
     api_client.send_message(
         user_id,
         f"✅ **Найдено папок: {len(subfolders)}**\n\n"
@@ -224,12 +247,12 @@ def start_publication(user_id, folder_url):
     
     for i, subfolder in enumerate(subfolders):
         # Извлекаем ID группы из названия
-        group_match = re.search(r'-(\d+)', subfolder['name'])
-        if not group_match:
-            errors.append(f"{subfolder['name']} - нет ID группы")
+        group_id = extract_group_id(subfolder['name'])
+        if not group_id:
+            error_msg = f"{subfolder['name']} - нет ID группы"
+            errors.append(error_msg)
+            api_client.send_message(user_id, f"❌ {error_msg}")
             continue
-        
-        group_id = group_match.group(1)
         
         # Сообщение пользователю о ходе
         api_client.send_message(
@@ -389,7 +412,6 @@ def webhook():
             elif text_lower == "/stop":
                 api_client.send_message(user_id, "⏹️ Публикация остановлена.")
             
-            # Обработка ссылки
             elif text_lower.startswith("https://drive.google.com/"):
                 folder_url = text
                 api_client.send_message(user_id, "✅ Папка принята! Начинаю публикацию...")
