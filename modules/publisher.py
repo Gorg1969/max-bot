@@ -5,7 +5,6 @@ import shutil
 import logging
 import sys
 
-# Принудительно устанавливаем UTF-8
 if sys.platform == 'linux':
     sys.stdout.reconfigure(encoding='utf-8')
 
@@ -25,11 +24,9 @@ class Publisher:
             info_file = None
             images = []
             
-            # Сканируем папку с правильной кодировкой
             for f in os.listdir(folder_path):
                 file_path = os.path.join(folder_path, f)
                 if os.path.isfile(file_path):
-                    # Приводим к нижнему регистру для сравнения
                     f_lower = f.lower()
                     if f_lower in ['info.txt', 'info.md']:
                         info_file = file_path
@@ -42,16 +39,13 @@ class Publisher:
                 logger.warning(f"⚠️ Нет info.txt в папке {folder_path}")
                 return False, "Нет info.txt"
             
-            # Читаем info.txt с UTF-8
             try:
                 with open(info_file, 'r', encoding='utf-8') as f:
                     info_text = f.read()
             except UnicodeDecodeError:
-                # Если UTF-8 не работает — пробуем cp1251 (Windows-1251)
                 with open(info_file, 'r', encoding='cp1251') as f:
                     info_text = f.read()
             
-            # Отправляем текст в группу
             if info_text:
                 if post_number and total_posts:
                     header = f"📝 **Пост {post_number}/{total_posts}**\n\n"
@@ -60,19 +54,20 @@ class Publisher:
                     full_text = info_text
                 
                 logger.info(f"📤 Отправка текста в группу {group_id}")
-                result = self.api.send_message(group_id, full_text)
+                # ✅ ИСПРАВЛЕНО: используем chat_id, а не user_id
+                result = self.api.send_message_to_chat(group_id, full_text)
                 if not result:
                     logger.error(f"❌ Не удалось отправить текст в группу {group_id}")
                     return False, "Ошибка отправки текста"
                 else:
                     logger.info(f"✅ Текст отправлен в группу {group_id}")
             
-            # Отправляем изображения (до 10 штук)
             images = images[:10]
             for image_path in images:
                 filename = os.path.basename(image_path)
                 logger.info(f"📤 Отправка изображения: {filename}")
-                result = self.api.send_message(group_id, f"📷 {filename}")
+                # ✅ ИСПРАВЛЕНО: используем chat_id
+                result = self.api.send_message_to_chat(group_id, f"📷 {filename}")
                 if not result:
                     logger.error(f"❌ Не удалось отправить изображение {filename}")
                 else:
@@ -135,7 +130,6 @@ class Publisher:
                 published += 1
                 self.db.update_status(folder['name'], 'done')
                 logger.info(f"✅ Опубликовано: {folder['name']}")
-                # Удаляем папку после публикации
                 try:
                     shutil.rmtree(folder['path'])
                     logger.info(f"🗑️ Папка удалена: {folder['path']}")
