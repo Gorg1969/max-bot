@@ -3,6 +3,11 @@ import random
 import os
 import shutil
 import logging
+import sys
+
+# Принудительно устанавливаем UTF-8
+if sys.platform == 'linux':
+    sys.stdout.reconfigure(encoding='utf-8')
 
 logger = logging.getLogger(__name__)
 
@@ -15,40 +20,72 @@ class Publisher:
     
     def publish_folder(self, folder_path, group_id, post_number=None, total_posts=None):
         try:
+            logger.info(f"📤 Публикация папки: {folder_path} в группу {group_id}")
+            
             info_file = None
             images = []
             
+            # Сканируем папку с правильной кодировкой
             for f in os.listdir(folder_path):
                 file_path = os.path.join(folder_path, f)
                 if os.path.isfile(file_path):
-                    if f.lower() in ['info.txt', 'info.md']:
+                    # Приводим к нижнему регистру для сравнения
+                    f_lower = f.lower()
+                    if f_lower in ['info.txt', 'info.md']:
                         info_file = file_path
-                    elif f.lower().endswith(('.jpg', '.jpeg', '.png', '.gif')):
+                        logger.info(f"📄 Найден info.txt: {info_file}")
+                    elif f_lower.endswith(('.jpg', '.jpeg', '.png', '.gif')):
                         images.append(file_path)
+                        logger.info(f"🖼️ Найдено изображение: {f}")
             
             if not info_file:
+                logger.warning(f"⚠️ Нет info.txt в папке {folder_path}")
                 return False, "Нет info.txt"
             
-            with open(info_file, 'r', encoding='utf-8') as f:
-                info_text = f.read()
+            # Читаем info.txt с UTF-8
+            try:
+                with open(info_file, 'r', encoding='utf-8') as f:
+                    info_text = f.read()
+            except UnicodeDecodeError:
+                # Если UTF-8 не работает — пробуем cp1251 (Windows-1251)
+                with open(info_file, 'r', encoding='cp1251') as f:
+                    info_text = f.read()
             
+            # Отправляем текст в группу
             if info_text:
                 if post_number and total_posts:
                     header = f"📝 **Пост {post_number}/{total_posts}**\n\n"
-                    self.api.send_message(group_id, header + info_text)
+                    full_text = header + info_text
                 else:
-                    self.api.send_message(group_id, info_text)
+                    full_text = info_text
+                
+                logger.info(f"📤 Отправка текста в группу {group_id}")
+                result = self.api.send_message(group_id, full_text)
+                if not result:
+                    logger.error(f"❌ Не удалось отправить текст в группу {group_id}")
+                    return False, "Ошибка отправки текста"
+                else:
+                    logger.info(f"✅ Текст отправлен в группу {group_id}")
             
+            # Отправляем изображения (до 10 штук)
             images = images[:10]
             for image_path in images:
                 filename = os.path.basename(image_path)
-                self.api.send_message(group_id, f"📷 {filename}")
+                logger.info(f"📤 Отправка изображения: {filename}")
+                result = self.api.send_message(group_id, f"📷 {filename}")
+                if not result:
+                    logger.error(f"❌ Не удалось отправить изображение {filename}")
+                else:
+                    logger.info(f"✅ Изображение отправлено: {filename}")
             
             return True, "Успешно"
         except Exception as e:
+            logger.error(f"❌ Ошибка публикации: {e}")
             return False, str(e)
     
     def start(self, user_id):
+        logger.info(f"🚀 Запуск публикации для пользователя {user_id}")
+        
         self.is_running[user_id] = True
         user_folder = self.fm.get_user_folder(user_id)
         
@@ -85,6 +122,8 @@ class Publisher:
                 logger.info("⏳ Пауза 5 минут")
                 time.sleep(300)
             
+            logger.info(f"📤 Публикация папки {post_number}/{total}: {folder['name']}")
+            
             success, msg = self.publish_folder(
                 folder['path'], 
                 folder['group_id'], 
@@ -96,7 +135,12 @@ class Publisher:
                 published += 1
                 self.db.update_status(folder['name'], 'done')
                 logger.info(f"✅ Опубликовано: {folder['name']}")
-                shutil.rmtree(folder['path'])
+                # Удаляем папку после публикации
+                try:
+                    shutil.rmtree(folder['path'])
+                    logger.info(f"🗑️ Папка удалена: {folder['path']}")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка удаления папки: {e}")
             else:
                 errors.append(f"{folder['name']}: {msg}")
                 self.db.update_status(folder['name'], 'error', msg)
@@ -113,3 +157,4 @@ class Publisher:
     
     def stop(self, user_id):
         self.is_running[user_id] = False
+        logger.info(f"⏹️ Публикация остановлена для пользователя {user_id}")
