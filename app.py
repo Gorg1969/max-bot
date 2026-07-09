@@ -6,6 +6,9 @@ import os
 import time
 import re
 import random
+import shutil
+import zipfile
+import sqlite3
 import urllib3
 
 # ОТКЛЮЧАЕМ ПРЕДУПРЕЖДЕНИЯ SSL
@@ -18,17 +21,76 @@ logger = logging.getLogger(__name__)
 # ========== КОНФИГ ==========
 TOKEN = os.environ.get("TOKEN") or os.environ.get("MAX_BOT_TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
+DATA_DIR = "/app/data"
+DB_PATH = "/app/data/publications.db"
 
-# ========== ХРАНИЛИЩЕ ==========
-user_publications = {}
+# ========== ИНИЦИАЛИЗАЦИЯ БД ==========
+def init_db():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS publications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            folder_name TEXT NOT NULL,
+            group_id TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP,
+            error TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-# ========== НАСТРОЙКИ ТАЙМИНГОВ ==========
-TIMING = {
-    "min_delay": 60,
-    "max_delay": 180,
-    "batch_size": 10,
-    "batch_pause": 300,
-}
+def add_publication(user_id, folder_name, group_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        'INSERT INTO publications (user_id, folder_name, group_id, status) VALUES (?, ?, ?, ?)',
+        (user_id, folder_name, group_id, 'pending')
+    )
+    conn.commit()
+    conn.close()
+
+def update_publication_status(folder_name, status, error=None):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    if error:
+        c.execute(
+            'UPDATE publications SET status = ?, updated_at = CURRENT_TIMESTAMP, error = ? WHERE folder_name = ?',
+            (status, error, folder_name)
+        )
+    else:
+        c.execute(
+            'UPDATE publications SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE folder_name = ?',
+            (status, folder_name)
+        )
+    conn.commit()
+    conn.close()
+
+def get_pending_publications(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        'SELECT folder_name, group_id FROM publications WHERE user_id = ? AND status = ?',
+        (user_id, 'pending')
+    )
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def clear_user_data(user_id):
+    """Удаление всех данных пользователя"""
+    user_folder = os.path.join(DATA_DIR, str(user_id))
+    shutil.rmtree(user_folder, ignore_errors=True)
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('DELETE FROM publications WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
 
 # ========== ОТПРАВКА СООБЩЕНИЙ ==========
 def send_message(user_id, text):
@@ -47,88 +109,65 @@ def send_message(user_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
         return False
 
-# ========== ИЗВЛЕЧЕНИЕ ID ИЗ ССЫЛКИ ==========
-def extract_folder_id_from_url(url):
-    """Извлечение ID папки из ссылки"""
-    patterns = [
-        r'folders/([a-zA-Z0-9_-]+)',
-        r'id=([a-zA-Z0-9_-]+)',
-        r'([a-zA-Z0-9_-]{28,})'
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
-
-def extract_group_id_from_url(url):
-    """Извлечение ID группы из ссылки (ищем -ЧИСЛО)"""
-    match = re.search(r'-(\d+)', url)
+# ========== ИЗВЛЕЧЕНИЕ ID ==========
+def extract_group_id(folder_name):
+    match = re.search(r'-(\d+)', folder_name)
     if match:
         return match.group(1)
     return None
 
-# ========== ПАРСИНГ СТРОКИ СО ССЫЛКАМИ ==========
-def parse_links_from_string(text):
-    pattern = r'https://drive\.google\.com/drive/folders/[a-zA-Z0-9_-]+'
-    return re.findall(pattern, text)
-
-# ========== ПОЛУЧЕНИЕ ФАЙЛОВ ИЗ ПАПКИ ==========
-def get_public_files(folder_id):
-    """Получение списка файлов из публичной папки"""
+# ========== РАБОТА С ФАЙЛАМИ ==========
+def extract_zip(user_id, zip_path):
+    """Распаковка ZIP-архива"""
+    user_folder = os.path.join(DATA_DIR, str(user_id))
+    os.makedirs(user_folder, exist_ok=True)
     try:
-        url = f"https://drive.google.com/drive/folders/{folder_id}"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        file_pattern = r'https://drive.google.com/file/d/([a-zA-Z0-9_-]+)/view[^"]*'
-        file_ids = re.findall(file_pattern, response.text)
-        
-        name_pattern = r'<span class="[^"]*">([^<]+\.(jpg|jpeg|png|gif|txt|md))</span>'
-        names = re.findall(name_pattern, response.text)
-        
-        files = []
-        for i, file_id in enumerate(file_ids):
-            name = names[i][0] if i < len(names) else f"file_{file_id}"
-            files.append({'id': file_id, 'name': name})
-        return files
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(user_folder)
+        return True
     except Exception as e:
-        logger.error(f"❌ Ошибка получения файлов: {e}")
+        logger.error(f"❌ Ошибка распаковки: {e}")
+        return False
+
+def get_subfolders(user_id):
+    """Получение списка подпапок с ID групп"""
+    user_folder = os.path.join(DATA_DIR, str(user_id))
+    if not os.path.exists(user_folder):
         return []
+    
+    items = os.listdir(user_folder)
+    subfolders = []
+    for item in items:
+        item_path = os.path.join(user_folder, item)
+        if os.path.isdir(item_path):
+            group_id = extract_group_id(item)
+            if group_id:
+                subfolders.append({'name': item, 'group_id': group_id, 'path': item_path})
+    return subfolders
 
-def download_public_file(file_id):
-    """Скачивание публичного файла"""
+def publish_local_folder(folder_path, group_id, post_number=None, total_posts=None):
+    """Публикация одной папки"""
     try:
-        url = f"https://drive.google.com/uc?export=download&id={file_id}"
-        response = requests.get(url, timeout=10)
-        return response.text
-    except Exception as e:
-        logger.error(f"❌ Ошибка скачивания: {e}")
-        return None
-
-# ========== ПУБЛИКАЦИЯ ПАПКИ ==========
-def publish_folder(folder_id, group_id, post_number=None, total_posts=None):
-    try:
-        logger.info(f"📤 Публикация папки {folder_id} в группу {group_id}")
-        
-        files = get_public_files(folder_id)
-        if not files:
-            return False, "Нет файлов в папке"
-        
+        # Находим info.txt
         info_file = None
-        for f in files:
-            if f['name'].lower() in ['info.txt', 'info.md']:
-                info_file = f
-                break
+        images = []
+        
+        for f in os.listdir(folder_path):
+            file_path = os.path.join(folder_path, f)
+            if os.path.isfile(file_path):
+                if f.lower() in ['info.txt', 'info.md']:
+                    info_file = file_path
+                elif f.lower().endswith(('.jpg', '.jpeg', '.png', '.gif')):
+                    images.append(file_path)
         
         if not info_file:
             return False, "Нет info.txt"
         
-        info_text = download_public_file(info_file['id'])
-        if not info_text:
-            return False, "Не удалось скачать info.txt"
+        # Читаем info.txt
+        with open(info_file, 'r', encoding='utf-8') as f:
+            info_text = f.read()
         
+        # Отправляем текст
         if info_text:
             if post_number and total_posts:
                 header = f"📝 **Пост {post_number}/{total_posts}**\n\n"
@@ -136,84 +175,84 @@ def publish_folder(folder_id, group_id, post_number=None, total_posts=None):
             else:
                 send_message(group_id, info_text)
         
-        images = [f for f in files if f['name'].lower().endswith(('.jpg', '.jpeg', '.png', '.gif'))][:10]
-        for image in images:
-            send_message(group_id, f"📷 {image['name']}\n🔗 https://drive.google.com/file/d/{image['id']}/view")
+        # Отправляем изображения (до 10 штук)
+        images = images[:10]
+        for image_path in images:
+            filename = os.path.basename(image_path)
+            send_message(group_id, f"📷 {filename}")
         
         return True, "Успешно"
     except Exception as e:
         return False, str(e)
 
-# ========== ЗАПУСК ПУБЛИКАЦИИ ==========
-def start_publication(user_id, links):
-    logger.info(f"🚀 Запуск публикации для {user_id}, ссылок: {len(links)}")
-    
-    folders_to_publish = []
-    errors = []
-    
-    for i, folder_url in enumerate(links):
-        # Извлекаем ID папки
-        folder_id = extract_folder_id_from_url(folder_url)
-        if not folder_id:
-            errors.append(f"Ссылка {i+1}: не удалось извлечь ID папки")
-            continue
-        
-        # Извлекаем ID группы из ссылки (он есть в названии папки)
-        group_id = extract_group_id_from_url(folder_url)
-        if not group_id:
-            errors.append(f"Ссылка {i+1}: не найден ID группы (ищите -ЧИСЛО)")
-            continue
-        
-        folders_to_publish.append({
-            'id': folder_id,
-            'group_id': group_id,
-            'url': folder_url
-        })
-    
-    if not folders_to_publish:
-        send_message(user_id, "❌ Не найдено папок с ID групп для публикации.")
+# ========== ПУБЛИКАЦИЯ ==========
+def start_publication(user_id):
+    """Запуск публикации из локальной папки"""
+    user_folder = os.path.join(DATA_DIR, str(user_id))
+    if not os.path.exists(user_folder):
+        send_message(user_id, "❌ Нет данных для публикации.")
         return
     
-    total = len(folders_to_publish)
-    logger.info(f"📊 Всего папок для публикации: {total}")
+    # Получаем список папок
+    subfolders = get_subfolders(user_id)
+    if not subfolders:
+        send_message(user_id, "❌ Нет папок с ID групп.")
+        clear_user_data(user_id)
+        return
+    
+    # Добавляем в БД
+    for folder in subfolders:
+        add_publication(user_id, folder['name'], folder['group_id'])
+    
+    total = len(subfolders)
     send_message(user_id, f"✅ Найдено {total} папок. Начинаю публикацию...")
     
     published = 0
-    publication_errors = []
+    errors = []
     post_number = 0
     
-    for folder in folders_to_publish:
+    for folder in subfolders:
         post_number += 1
+        update_publication_status(folder['name'], 'processing')
         
-        if not user_publications.get(user_id, True):
-            send_message(user_id, "⏹️ Публикация остановлена.")
-            break
-        
+        # Задержка (кроме первого)
         if post_number > 1:
-            delay = random.randint(TIMING["min_delay"], TIMING["max_delay"])
+            delay = random.randint(60, 180)
             logger.info(f"⏳ Задержка {delay} сек. перед постом {post_number}")
             time.sleep(delay)
         
-        if (post_number - 1) % TIMING["batch_size"] == 0 and post_number > 1:
-            logger.info(f"⏳ Пауза {TIMING['batch_pause']} сек.")
-            time.sleep(TIMING["batch_pause"])
+        # Пауза после 10 постов
+        if (post_number - 1) % 10 == 0 and post_number > 1:
+            logger.info("⏳ Пауза 5 минут")
+            time.sleep(300)
         
-        success, msg = publish_folder(folder['id'], folder['group_id'], post_number, total)
+        success, msg = publish_local_folder(
+            folder['path'], 
+            folder['group_id'], 
+            post_number, 
+            total
+        )
+        
         if success:
             published += 1
-            logger.info(f"✅ Опубликовано: {folder['id']}")
+            update_publication_status(folder['name'], 'done')
+            logger.info(f"✅ Опубликовано: {folder['name']}")
+            # Удаляем папку сразу после публикации
+            shutil.rmtree(folder['path'])
         else:
-            publication_errors.append(f"Папка {folder['id']}: {msg}")
-            logger.error(f"❌ Ошибка: {folder['id']} - {msg}")
+            errors.append(f"{folder['name']}: {msg}")
+            update_publication_status(folder['name'], 'error', msg)
+            logger.error(f"❌ Ошибка: {folder['name']} - {msg}")
     
-    result_msg = f"✅ **ПУБЛИКАЦИЯ ЗАВЕРШЕНА!**\n\n📊 Всего папок: {total}\n✅ Опубликовано: {published}\n❌ Ошибок: {len(publication_errors)}"
-    if publication_errors:
-        result_msg += "\n\n⚠️ Ошибки:\n" + "\n".join(publication_errors[:5])
-        if len(publication_errors) > 5:
-            result_msg += f"\n... и ещё {len(publication_errors) - 5} ошибок"
+    # Итог
+    result_msg = f"✅ **ПУБЛИКАЦИЯ ЗАВЕРШЕНА!**\n\n📊 Всего папок: {total}\n✅ Опубликовано: {published}\n❌ Ошибок: {len(errors)}"
+    if errors:
+        result_msg += "\n\n⚠️ Ошибки:\n" + "\n".join(errors[:5])
+        if len(errors) > 5:
+            result_msg += f"\n... и ещё {len(errors) - 5} ошибок"
     
     send_message(user_id, result_msg)
-    logger.info(f"🏁 Публикация завершена для {user_id}")
+    clear_user_data(user_id)
 
 # ========== ЭНДПОИНТЫ ==========
 
@@ -257,44 +296,84 @@ def webhook():
 
         user_id = None
         text = None
+        file_id = None
         
         if 'message' in data:
             msg = data['message']
             if 'sender' in msg:
                 user_id = msg['sender'].get('user_id')
             if 'body' in msg:
-                text = msg['body'].get('text')
+                body = msg['body']
+                text = body.get('text')
+                if 'attachments' in body:
+                    for att in body['attachments']:
+                        if att.get('type') == 'file':
+                            file_id = att.get('payload', {}).get('id')
         
         if not user_id:
             return jsonify({"ok": True}), 200
 
-        logger.info(f"💬 user_id={user_id}, text={text}")
+        logger.info(f"💬 user_id={user_id}, text={text}, file_id={file_id}")
 
+        # ========== КОМАНДА /start ==========
         if text and text.strip() == '/start':
             send_message(
                 user_id,
                 "🏠 **Главное меню**\n\n"
-                "📄 **Отправьте ссылки на папки** (через запятую или с новой строки).\n"
-                "В ссылке должен быть ID группы: `...-76576474415864`\n\n"
-                "📌 **Пример:**\n"
-                "`https://drive.google.com/drive/folders/ABC123, https://drive.google.com/drive/folders/DEF456`\n\n"
-                "▶️ После отправки публикация начнётся автоматически.\n"
+                "📤 **Загрузите ZIP-архив** с папками для публикации.\n\n"
+                "📌 **Структура архива:**\n"
+                "```\n"
+                "архив.zip\n"
+                "├── Самосвалы 8 -76576474415864/\n"
+                "│   ├── info.txt\n"
+                "│   ├── image1.jpg\n"
+                "│   └── image2.jpg\n"
+                "└── Экскаваторы -987654321/\n"
+                "    ├── info.txt\n"
+                "    └── image.jpg\n"
+                "```\n\n"
+                "▶️ После загрузки публикация начнётся автоматически.\n"
                 "⏹ Для остановки отправьте /stop"
             )
             return jsonify({"ok": True}), 200
 
+        # ========== ОСТАНОВКА ==========
         if text and text.strip() == '/stop':
-            user_publications[user_id] = False
             send_message(user_id, "⏹️ Публикация остановлена.")
+            clear_user_data(user_id)
             return jsonify({"ok": True}), 200
 
-        if text and 'drive.google.com' in text:
-            links = parse_links_from_string(text)
-            if links:
-                user_publications[user_id] = True
-                start_publication(user_id, links)
+        # ========== ОБРАБОТКА ЗАГРУЖЕННОГО ФАЙЛА ==========
+        if file_id:
+            send_message(user_id, "📥 Получаю архив...")
+            
+            # Скачиваем файл с Google Drive
+            try:
+                url = f"https://drive.google.com/uc?export=download&id={file_id}"
+                response = requests.get(url, timeout=30)
+                if response.status_code != 200:
+                    send_message(user_id, "❌ Не удалось скачать файл.")
+                    return jsonify({"ok": True}), 200
+            except Exception as e:
+                send_message(user_id, f"❌ Ошибка скачивания: {e}")
+                return jsonify({"ok": True}), 200
+            
+            # Сохраняем временный архив
+            user_folder = os.path.join(DATA_DIR, str(user_id))
+            os.makedirs(user_folder, exist_ok=True)
+            zip_path = os.path.join(user_folder, "temp.zip")
+            with open(zip_path, 'wb') as f:
+                f.write(response.content)
+            
+            # Распаковываем
+            if extract_zip(user_id, zip_path):
+                os.remove(zip_path)
+                send_message(user_id, "✅ Архив распакован. Начинаю публикацию...")
+                start_publication(user_id)
             else:
-                send_message(user_id, "❌ Ссылок не найдено")
+                send_message(user_id, "❌ Ошибка распаковки архива.")
+                shutil.rmtree(user_folder, ignore_errors=True)
+            
             return jsonify({"ok": True}), 200
 
         return jsonify({"ok": True}), 200
@@ -306,5 +385,6 @@ def webhook():
 # ========== ЗАПУСК ==========
 
 if __name__ == "__main__":
+    init_db()
     port = int(os.environ.get("PORT", 3000))
     app.run(host='0.0.0.0', port=port)
