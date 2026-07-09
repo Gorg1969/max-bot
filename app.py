@@ -9,19 +9,15 @@ from modules import Database, FileManager, Publisher, WebInterface
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
-# ========== СНИМАЕМ ОГРАНИЧЕНИЯ НА РАЗМЕР ФАЙЛА ==========
-app.config['MAX_CONTENT_LENGTH'] = None
-app.config['MAX_FORM_MEMORY_SIZE'] = None
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024 * 2  # 2 ГБ
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ========== КОНФИГ ==========
 TOKEN = os.environ.get("TOKEN") or os.environ.get("MAX_BOT_TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
 DATA_DIR = "/app/data"
 
-# ========== ИНИЦИАЛИЗАЦИЯ МОДУЛЕЙ ==========
 db = Database()
 fm = FileManager(DATA_DIR)
 
@@ -97,24 +93,9 @@ api = APIClient()
 publisher = Publisher(api, fm, db)
 web = WebInterface(fm, publisher)
 
-# ========== ОБРАБОТКА ОШИБОК ==========
-@app.errorhandler(413)
-def request_entity_too_large(error):
-    return jsonify({'success': False, 'message': 'Файл слишком большой для сервера'}), 413
-
-@app.errorhandler(400)
-def bad_request(error):
-    return jsonify({'success': False, 'message': 'Ошибка запроса: возможно, файл слишком большой'}), 400
-
-# ========== МАРШРУТЫ ==========
-
 @app.route('/')
 def index():
     return "🤖 MAX Bot is running!"
-
-@app.route('/help')
-def help_page():
-    return web.help_page()
 
 @app.route('/upload', methods=['GET', 'POST'])
 def upload_file():
@@ -122,34 +103,12 @@ def upload_file():
         return web.upload_page()
     
     try:
-        if not request.files:
-            return jsonify({'success': False, 'message': 'Файл не найден'}), 400
-        
         user_id = 151296248
-        
-        if 'file' not in request.files:
-            return jsonify({'success': False, 'message': 'Файл не выбран'}), 400
-        
-        file = request.files['file']
-        if file.filename == '':
-            return jsonify({'success': False, 'message': 'Файл не выбран'}), 400
-        
-        if not file.filename.lower().endswith('.zip'):
-            return jsonify({'success': False, 'message': 'Файл должен быть в формате .zip'}), 400
-        
-        user_folder = fm.get_user_folder(user_id)
-        zip_path = os.path.join(user_folder, 'temp.zip')
-        file.save(zip_path)
-        logger.info(f"📥 Файл сохранён: {zip_path} ({os.path.getsize(zip_path)} байт)")
-        
-        if fm.extract_zip(user_id, zip_path):
-            os.remove(zip_path)
-            publisher.start(user_id)
-            return jsonify({'success': True, 'message': 'Архив распакован. Публикация началась!'})
+        result = web.upload_file(request, user_id)
+        if result['success']:
+            return jsonify(result)
         else:
-            fm.clear_user_data(user_id)
-            return jsonify({'success': False, 'message': 'Ошибка распаковки архива'}), 500
-            
+            return jsonify(result), 500
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки: {e}")
         return jsonify({'success': False, 'message': f'Ошибка: {str(e)}'}), 500
@@ -213,7 +172,6 @@ def webhook():
                 "• Формат: `.zip`\n"
                 "• Внутри папки с ID групп: `Название -123456789`\n"
                 "• В каждой папке: `info.txt` и изображения\n\n"
-                "📖 [Инструкция](https://maxbot.bothost.tech/help)\n\n"
                 "⏹ Для остановки публикации отправьте `/stop`"
             )
             return jsonify({"ok": True}), 200
