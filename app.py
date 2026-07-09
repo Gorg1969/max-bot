@@ -381,7 +381,14 @@ def webhook():
     except Exception as e:
         logger.error(f"❌ ОШИБКА: {e}")
         return jsonify({"ok": False}), 500
-
+@app.route('/debug_webhook', methods=['POST'])
+def debug_webhook():
+    """Диагностика: показывает, что приходит от MAX"""
+    data = request.get_json()
+    logger.info("=" * 50)
+    logger.info("🔍 ДИАГНОСТИКА ВЕБХУКА")
+    logger.info(json.dumps(data, indent=2, ensure_ascii=False))
+    return jsonify({"ok": True}), 200
 # ========== ЗАПУСК ==========
 
 if __name__ == "__main__":
