@@ -22,12 +22,15 @@ db = Database()
 fm = FileManager(DATA_DIR)
 
 class APIClient:
+    def __init__(self):
+        self.token = TOKEN
+    
     def send_message(self, user_id, text):
         try:
             payload = {"text": text, "format": "markdown"}
             response = requests.post(
                 f"{BASE_URL}/messages",
-                headers={"Authorization": TOKEN, "Content-Type": "application/json"},
+                headers={"Authorization": self.token, "Content-Type": "application/json"},
                 params={"user_id": user_id},
                 json=payload,
                 timeout=30,
@@ -47,7 +50,7 @@ class APIClient:
             payload = {"text": text, "format": "markdown"}
             response = requests.post(
                 f"{BASE_URL}/messages",
-                headers={"Authorization": TOKEN, "Content-Type": "application/json"},
+                headers={"Authorization": self.token, "Content-Type": "application/json"},
                 params={"chat_id": chat_id},
                 json=payload,
                 timeout=30,
@@ -72,7 +75,7 @@ class APIClient:
             }
             response = requests.post(
                 f"{BASE_URL}/messages",
-                headers={"Authorization": TOKEN, "Content-Type": "application/json"},
+                headers={"Authorization": self.token, "Content-Type": "application/json"},
                 params={"chat_id": chat_id},
                 json=payload,
                 timeout=30,
