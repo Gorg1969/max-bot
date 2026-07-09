@@ -70,22 +70,9 @@ def update_publication_status(folder_name, status, error=None):
     conn.commit()
     conn.close()
 
-def get_pending_publications(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        'SELECT folder_name, group_id FROM publications WHERE user_id = ? AND status = ?',
-        (user_id, 'pending')
-    )
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
 def clear_user_data(user_id):
-    """Удаление всех данных пользователя"""
     user_folder = os.path.join(DATA_DIR, str(user_id))
     shutil.rmtree(user_folder, ignore_errors=True)
-    
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('DELETE FROM publications WHERE user_id = ?', (user_id,))
@@ -116,9 +103,42 @@ def extract_group_id(folder_name):
         return match.group(1)
     return None
 
+def extract_folder_id_from_url(url):
+    patterns = [
+        r'folders/([a-zA-Z0-9_-]+)',
+        r'id=([a-zA-Z0-9_-]+)',
+        r'([a-zA-Z0-9_-]{28,})'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+def parse_links_from_string(text):
+    pattern = r'https://drive\.google\.com/drive/folders/[a-zA-Z0-9_-]+'
+    return re.findall(pattern, text)
+
 # ========== РАБОТА С ФАЙЛАМИ ==========
+def download_file_from_url(url):
+    """Скачивание файла по ссылке"""
+    try:
+        # Извлекаем ID файла
+        file_id = extract_folder_id_from_url(url)
+        if not file_id:
+            # Если это не стандартная ссылка, пробуем как есть
+            response = requests.get(url, timeout=30)
+            return response.content
+        
+        # Скачиваем через Google Drive
+        download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        response = requests.get(download_url, timeout=30)
+        return response.content
+    except Exception as e:
+        logger.error(f"❌ Ошибка скачивания: {e}")
+        return None
+
 def extract_zip(user_id, zip_path):
-    """Распаковка ZIP-архива"""
     user_folder = os.path.join(DATA_DIR, str(user_id))
     os.makedirs(user_folder, exist_ok=True)
     try:
@@ -130,7 +150,6 @@ def extract_zip(user_id, zip_path):
         return False
 
 def get_subfolders(user_id):
-    """Получение списка подпапок с ID групп"""
     user_folder = os.path.join(DATA_DIR, str(user_id))
     if not os.path.exists(user_folder):
         return []
@@ -146,9 +165,7 @@ def get_subfolders(user_id):
     return subfolders
 
 def publish_local_folder(folder_path, group_id, post_number=None, total_posts=None):
-    """Публикация одной папки"""
     try:
-        # Находим info.txt
         info_file = None
         images = []
         
@@ -163,11 +180,9 @@ def publish_local_folder(folder_path, group_id, post_number=None, total_posts=No
         if not info_file:
             return False, "Нет info.txt"
         
-        # Читаем info.txt
         with open(info_file, 'r', encoding='utf-8') as f:
             info_text = f.read()
         
-        # Отправляем текст
         if info_text:
             if post_number and total_posts:
                 header = f"📝 **Пост {post_number}/{total_posts}**\n\n"
@@ -175,7 +190,6 @@ def publish_local_folder(folder_path, group_id, post_number=None, total_posts=No
             else:
                 send_message(group_id, info_text)
         
-        # Отправляем изображения (до 10 штук)
         images = images[:10]
         for image_path in images:
             filename = os.path.basename(image_path)
@@ -187,20 +201,17 @@ def publish_local_folder(folder_path, group_id, post_number=None, total_posts=No
 
 # ========== ПУБЛИКАЦИЯ ==========
 def start_publication(user_id):
-    """Запуск публикации из локальной папки"""
     user_folder = os.path.join(DATA_DIR, str(user_id))
     if not os.path.exists(user_folder):
         send_message(user_id, "❌ Нет данных для публикации.")
         return
     
-    # Получаем список папок
     subfolders = get_subfolders(user_id)
     if not subfolders:
         send_message(user_id, "❌ Нет папок с ID групп.")
         clear_user_data(user_id)
         return
     
-    # Добавляем в БД
     for folder in subfolders:
         add_publication(user_id, folder['name'], folder['group_id'])
     
@@ -215,13 +226,11 @@ def start_publication(user_id):
         post_number += 1
         update_publication_status(folder['name'], 'processing')
         
-        # Задержка (кроме первого)
         if post_number > 1:
             delay = random.randint(60, 180)
             logger.info(f"⏳ Задержка {delay} сек. перед постом {post_number}")
             time.sleep(delay)
         
-        # Пауза после 10 постов
         if (post_number - 1) % 10 == 0 and post_number > 1:
             logger.info("⏳ Пауза 5 минут")
             time.sleep(300)
@@ -237,14 +246,12 @@ def start_publication(user_id):
             published += 1
             update_publication_status(folder['name'], 'done')
             logger.info(f"✅ Опубликовано: {folder['name']}")
-            # Удаляем папку сразу после публикации
             shutil.rmtree(folder['path'])
         else:
             errors.append(f"{folder['name']}: {msg}")
             update_publication_status(folder['name'], 'error', msg)
             logger.error(f"❌ Ошибка: {folder['name']} - {msg}")
     
-    # Итог
     result_msg = f"✅ **ПУБЛИКАЦИЯ ЗАВЕРШЕНА!**\n\n📊 Всего папок: {total}\n✅ Опубликовано: {published}\n❌ Ошибок: {len(errors)}"
     if errors:
         result_msg += "\n\n⚠️ Ошибки:\n" + "\n".join(errors[:5])
@@ -296,31 +303,29 @@ def webhook():
 
         user_id = None
         text = None
-        file_id = None
         
         if 'message' in data:
             msg = data['message']
             if 'sender' in msg:
                 user_id = msg['sender'].get('user_id')
             if 'body' in msg:
-                body = msg['body']
-                text = body.get('text')
-                if 'attachments' in body:
-                    for att in body['attachments']:
-                        if att.get('type') == 'file':
-                            file_id = att.get('payload', {}).get('id')
+                text = msg['body'].get('text')
         
         if not user_id:
             return jsonify({"ok": True}), 200
 
-        logger.info(f"💬 user_id={user_id}, text={text}, file_id={file_id}")
+        logger.info(f"💬 user_id={user_id}, text={text}")
 
         # ========== КОМАНДА /start ==========
         if text and text.strip() == '/start':
             send_message(
                 user_id,
                 "🏠 **Главное меню**\n\n"
-                "📤 **Загрузите ZIP-архив** с папками для публикации.\n\n"
+                "📤 **Отправьте ссылку на ZIP-архив** (загруженный на Google Drive).\n\n"
+                "📌 **Инструкция:**\n"
+                "1. Загрузите ZIP-архив на Google Drive.\n"
+                "2. Откройте доступ 'Всем, у кого есть ссылка'.\n"
+                "3. Скопируйте ссылку и отправьте боту.\n\n"
                 "📌 **Структура архива:**\n"
                 "```\n"
                 "архив.zip\n"
@@ -332,7 +337,7 @@ def webhook():
                 "    ├── info.txt\n"
                 "    └── image.jpg\n"
                 "```\n\n"
-                "▶️ После загрузки публикация начнётся автоматически.\n"
+                "▶️ После отправки ссылки публикация начнётся автоматически.\n"
                 "⏹ Для остановки отправьте /stop"
             )
             return jsonify({"ok": True}), 200
@@ -343,29 +348,37 @@ def webhook():
             clear_user_data(user_id)
             return jsonify({"ok": True}), 200
 
-        # ========== ОБРАБОТКА ЗАГРУЖЕННОГО ФАЙЛА ==========
-        if file_id:
-            send_message(user_id, "📥 Получаю архив...")
+        # ========== ОБРАБОТКА ССЫЛКИ НА АРХИВ ==========
+        if text and ('drive.google.com' in text or 'https://' in text):
+            send_message(user_id, "📥 Скачиваю файл по ссылке...")
             
-            # Скачиваем файл с Google Drive
-            try:
-                url = f"https://drive.google.com/uc?export=download&id={file_id}"
-                response = requests.get(url, timeout=30)
-                if response.status_code != 200:
-                    send_message(user_id, "❌ Не удалось скачать файл.")
-                    return jsonify({"ok": True}), 200
-            except Exception as e:
-                send_message(user_id, f"❌ Ошибка скачивания: {e}")
+            content = download_file_from_url(text)
+            if not content:
+                send_message(user_id, "❌ Не удалось скачать файл.")
                 return jsonify({"ok": True}), 200
             
-            # Сохраняем временный архив
+            # Проверяем, что это ZIP
+            if content[:2] != b'PK':
+                # Может быть ссылка на папку со ссылками
+                try:
+                    text_content = content.decode('utf-8')
+                    links = parse_links_from_string(text_content)
+                    if links:
+                        send_message(user_id, f"✅ Получено {len(links)} ссылок на папки. Начинаю публикацию...")
+                        # Здесь можно обработать ссылки на папки
+                        return jsonify({"ok": True}), 200
+                except:
+                    pass
+                send_message(user_id, "❌ Файл не является ZIP-архивом.")
+                return jsonify({"ok": True}), 200
+            
+            # Сохраняем и распаковываем
             user_folder = os.path.join(DATA_DIR, str(user_id))
             os.makedirs(user_folder, exist_ok=True)
             zip_path = os.path.join(user_folder, "temp.zip")
             with open(zip_path, 'wb') as f:
-                f.write(response.content)
+                f.write(content)
             
-            # Распаковываем
             if extract_zip(user_id, zip_path):
                 os.remove(zip_path)
                 send_message(user_id, "✅ Архив распакован. Начинаю публикацию...")
@@ -381,15 +394,6 @@ def webhook():
     except Exception as e:
         logger.error(f"❌ ОШИБКА: {e}")
         return jsonify({"ok": False}), 500
-@app.route('/debug_webhook', methods=['POST'])
-def debug_webhook():
-    """Диагностика: показывает, что приходит от MAX"""
-    data = request.get_json()
-    logger.info("=" * 50)
-    logger.info("🔍 ДИАГНОСТИКА ВЕБХУКА")
-    logger.info(json.dumps(data, indent=2, ensure_ascii=False))
-    return jsonify({"ok": True}), 200
-# ========== ЗАПУСК ==========
 
 if __name__ == "__main__":
     init_db()
