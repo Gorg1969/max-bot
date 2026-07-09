@@ -5,6 +5,7 @@ import logging
 import os
 import time
 import re
+import random
 import urllib3
 
 # ОТКЛЮЧАЕМ ПРЕДУПРЕЖДЕНИЯ SSL
@@ -18,10 +19,20 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("TOKEN") or os.environ.get("MAX_BOT_TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
 
+# ========== НАСТРОЙКИ ТАЙМИНГОВ ==========
+TIMING = {
+    "first_post_delay": 0,      # Первый пост сразу
+    "min_delay": 60,            # Минимальная задержка между постами (1 минута)
+    "max_delay": 180,           # Максимальная задержка между постами (3 минуты)
+    "batch_size": 10,           # Постов в батче
+    "batch_pause": 300,         # Пауза после батча (5 минут)
+}
+
 # ========== ХРАНИЛИЩЕ СОСТОЯНИЙ ==========
 user_states = {}
+user_publications = {}
 
-# ========== ОТПРАВКА СООБЩЕНИЙ ==========
+# ========== ОТПРАВКА СООБЩЕНИЙ (ИСПРАВЛЕНА) ==========
 def send_message(user_id, text):
     try:
         payload = {"text": text, "format": "markdown"}
@@ -39,7 +50,44 @@ def send_message(user_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
         return False
 
-# ========== ИЗВЛЕЧЕНИЕ ID ИЗ ССЫЛКИ ==========
+# ========== ОТПРАВКА КЛАВИАТУРЫ (ИСПРАВЛЕНА) ==========
+def send_keyboard(user_id, text, buttons):
+    """Отправка клавиатуры с кнопками"""
+    try:
+        keyboard_rows = []
+        for button in buttons:
+            keyboard_rows.append([{
+                "text": button["text"],
+                "type": "callback",
+                "payload": button["payload"]
+            }])
+
+        payload = {
+            "text": text,
+            "format": "markdown",
+            "attachments": [{
+                "type": "inline_keyboard",
+                "payload": {
+                    "buttons": keyboard_rows
+                }
+            }]
+        }
+
+        response = requests.post(
+            f"{BASE_URL}/messages",
+            headers={"Authorization": TOKEN, "Content-Type": "application/json"},
+            params={"user_id": user_id},
+            json=payload,
+            timeout=30,
+            verify=False
+        )
+        logger.info(f"📤 Клавиатура: {response.status_code}")
+        return response.status_code == 200
+    except Exception as e:
+        logger.error(f"❌ Ошибка клавиатуры: {e}")
+        return False
+
+# ========== ИЗВЛЕЧЕНИЕ ID ==========
 def extract_folder_id_from_url(url):
     patterns = [
         r'folders/([a-zA-Z0-9_-]+)',
@@ -78,7 +126,7 @@ def get_public_files(folder_id):
             files.append({'id': file_id, 'name': name})
         return files
     except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
+        logger.error(f"❌ Ошибка получения файлов: {e}")
         return []
 
 def download_public_file(file_id):
@@ -90,7 +138,7 @@ def download_public_file(file_id):
         logger.error(f"❌ Ошибка скачивания: {e}")
         return None
 
-# ========== ПАРСИНГ ФАЙЛА СО ССЫЛКАМИ ==========
+# ========== ПАРСИНГ ФАЙЛА ==========
 def parse_links_file(content):
     lines = content.strip().split('\n')
     links = []
@@ -101,9 +149,10 @@ def parse_links_file(content):
     return links
 
 # ========== ПУБЛИКАЦИЯ ПАПКИ ==========
-def publish_folder(folder_id, group_id):
+def publish_folder(folder_id, group_id, post_number=None, total_posts=None):
     try:
         logger.info(f"📤 Публикация {folder_id} -> {group_id}")
+        
         files = get_public_files(folder_id)
         if not files:
             return False, "Нет файлов"
@@ -122,7 +171,11 @@ def publish_folder(folder_id, group_id):
             return False, "Не удалось скачать info.txt"
         
         if info_text:
-            send_message(group_id, info_text)
+            if post_number and total_posts:
+                header = f"📝 **Пост {post_number}/{total_posts}**\n\n"
+                send_message(group_id, header + info_text)
+            else:
+                send_message(group_id, info_text)
         
         images = [f for f in files if f['name'].lower().endswith(('.jpg', '.jpeg', '.png', '.gif'))][:10]
         for image in images:
@@ -132,7 +185,7 @@ def publish_folder(folder_id, group_id):
     except Exception as e:
         return False, str(e)
 
-# ========== ПОИСК ПОДПАПОК С ID ==========
+# ========== ПОИСК ПОДПАПОК ==========
 def find_subfolders_with_id(folder_url):
     folder_id = extract_folder_id_from_url(folder_url)
     if not folder_id:
@@ -156,19 +209,20 @@ def find_subfolders_with_id(folder_url):
             name = names[i] if i < len(names) else f"Папка {i+1}"
             if extract_group_id(name):
                 result.append({'id': fid, 'name': name})
+        
         return result, None
     except Exception as e:
         return [], str(e)
 
 # ========== ЗАПУСК ПУБЛИКАЦИИ ==========
 def start_publication(user_id, links):
-    logger.info(f"🚀 Публикация для {user_id}, ссылок: {len(links)}")
+    logger.info(f"🚀 Запуск публикации для {user_id}, ссылок: {len(links)}")
     
-    total_published = 0
+    all_subfolders = []
     errors = []
     
     for i, folder_url in enumerate(links):
-        logger.info(f"📌 Ссылка {i+1}/{len(links)}")
+        logger.info(f"📌 Обработка ссылки {i+1}/{len(links)}")
         subfolders, error = find_subfolders_with_id(folder_url)
         
         if error:
@@ -179,47 +233,72 @@ def start_publication(user_id, links):
             errors.append(f"Ссылка {i+1}: нет папок с ID")
             continue
         
-        for subfolder in subfolders:
-            group_id = extract_group_id(subfolder['name'])
-            if not group_id:
-                continue
-            
-            success, msg = publish_folder(subfolder['id'], group_id)
-            if success:
-                total_published += 1
-            else:
-                errors.append(f"{subfolder['name']}: {msg}")
-            
-            time.sleep(120)  # 2 минуты
+        all_subfolders.extend(subfolders)
+    
+    if not all_subfolders:
+        send_message(user_id, "❌ Не найдено папок с ID групп для публикации.")
+        return
+    
+    total = len(all_subfolders)
+    logger.info(f"📊 Всего папок для публикации: {total}")
+    send_message(user_id, f"✅ Найдено {total} папок для публикации. Начинаю...")
+    
+    published = 0
+    publication_errors = []
+    post_number = 0
+    
+    for subfolder in all_subfolders:
+        post_number += 1
+        
+        if not user_publications.get(user_id, True):
+            send_message(user_id, "⏹️ Публикация остановлена пользователем.")
+            break
+        
+        group_id = extract_group_id(subfolder['name'])
+        if not group_id:
+            continue
+        
+        # Высчитываем задержку
+        if post_number == 1:
+            delay = 0  # Первый пост сразу
+        else:
+            delay = random.randint(TIMING["min_delay"], TIMING["max_delay"])
+        
+        logger.info(f"⏳ Пост {post_number}/{total}, задержка: {delay} сек.")
+        
+        if post_number > 1:
+            time.sleep(delay)
+        
+        # Проверяем батч-паузу (каждые 10 постов)
+        if (post_number - 1) % TIMING["batch_size"] == 0 and post_number > 1:
+            logger.info(f"⏳ Пауза {TIMING['batch_pause']} сек. после {TIMING['batch_size']} постов")
+            time.sleep(TIMING["batch_pause"])
+        
+        # Публикуем
+        success, msg = publish_folder(subfolder['id'], group_id, post_number, total)
+        if success:
+            published += 1
+        else:
+            publication_errors.append(f"{subfolder['name']}: {msg}")
     
     # Итог
-    msg = f"✅ **ПУБЛИКАЦИЯ ЗАВЕРШЕНА!**\n\n📊 Обработано: {len(links)}\n✅ Опубликовано: {total_published}\n❌ Ошибок: {len(errors)}"
-    if errors:
-        msg += "\n\n⚠️ Ошибки:\n" + "\n".join(errors[:5])
-    send_message(user_id, msg)
+    result_msg = f"✅ **ПУБЛИКАЦИЯ ЗАВЕРШЕНА!**\n\n📊 Всего папок: {total}\n✅ Опубликовано: {published}\n❌ Ошибок: {len(publication_errors)}"
+    if publication_errors:
+        result_msg += "\n\n⚠️ Ошибки:\n" + "\n".join(publication_errors[:5])
+    
+    send_message(user_id, result_msg)
+    user_publications[user_id] = True
 
 # ========== МЕНЮ ==========
 def show_main_menu(user_id):
-    keyboard = {
-        "text": "🏠 **Главное меню**\n\nВыберите действие:",
-        "format": "markdown",
-        "attachments": [{
-            "type": "inline_keyboard",
-            "payload": {
-                "buttons": [
-                    [{"text": "📄 Загрузить ссылки", "type": "callback", "payload": "upload_links"}],
-                    [{"text": "⏹ Остановить", "type": "callback", "payload": "stop"}]
-                ]
-            }
-        }]
-    }
-    requests.post(
-        f"{BASE_URL}/messages",
-        headers={"Authorization": TOKEN, "Content-Type": "application/json"},
-        params={"user_id": user_id},
-        json=keyboard,
-        timeout=30,
-        verify=False
+    """Главное меню с кнопками"""
+    send_keyboard(
+        user_id,
+        "🏠 **Главное меню**\n\nВыберите действие:",
+        [
+            {"text": "📄 Загрузить ссылки", "payload": "upload_links"},
+            {"text": "⏹ Остановить", "payload": "stop"}
+        ]
     )
 
 # ========== ЭНДПОИНТЫ ==========
@@ -267,7 +346,7 @@ def webhook():
         payload = None
         file_id = None
         
-        # Простой парсинг
+        # Парсинг данных
         if 'message' in data:
             msg = data['message']
             if 'sender' in msg:
@@ -291,13 +370,14 @@ def webhook():
 
         logger.info(f"💬 user_id={user_id}, text={text}, payload={payload}, file_id={file_id}")
 
-        # Кнопки
+        # Обработка кнопок
         if payload:
             if payload == "upload_links":
                 send_message(user_id, "📁 **Отправьте файл .txt со ссылками**\n\nКаждая ссылка на новой строке.")
                 user_states[user_id] = 'waiting_file'
             elif payload == "stop":
-                send_message(user_id, "⏹️ Остановлено")
+                send_message(user_id, "⏹️ Публикация остановлена.")
+                user_publications[user_id] = False
             return jsonify({"ok": True}), 200
 
         # Команда /start
@@ -314,6 +394,7 @@ def webhook():
                 if links:
                     send_message(user_id, f"✅ Получено {len(links)} ссылок. Начинаю публикацию...")
                     user_states[user_id] = None
+                    user_publications[user_id] = True
                     start_publication(user_id, links)
                 else:
                     send_message(user_id, "❌ Ссылок не найдено")
