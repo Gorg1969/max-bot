@@ -21,11 +21,33 @@ class FileManager:
         shutil.rmtree(folder, ignore_errors=True)
     
     def extract_zip(self, user_id, zip_path):
+        """Распаковка ZIP с правильной кодировкой для русских названий"""
         user_folder = self.get_user_folder(user_id)
         try:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(user_folder)
-            return True
+                for file_info in zip_ref.infolist():
+                    # Пробуем разные кодировки для русского языка
+                    filename = None
+                    for encoding in ['utf-8', 'cp866', 'cp1251', 'koi8-r', 'cp437']:
+                        try:
+                            filename = file_info.filename.encode('cp437').decode(encoding)
+                            break
+                        except:
+                            continue
+                    
+                    # Если не удалось декодировать — оставляем как есть
+                    if filename is None:
+                        filename = file_info.filename
+                    
+                    # Извлекаем файл
+                    if filename.endswith('/'):
+                        os.makedirs(os.path.join(user_folder, filename), exist_ok=True)
+                    else:
+                        target_path = os.path.join(user_folder, filename)
+                        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                        with open(target_path, 'wb') as f:
+                            f.write(zip_ref.read(file_info))
+                return True
         except Exception as e:
             logger.error(f"❌ Ошибка распаковки: {e}")
             return False
@@ -47,9 +69,14 @@ class FileManager:
     
     def extract_group_id(self, folder_name):
         """Извлечение ID группы из названия папки (с минусом!)"""
+        # Приводим к правильной кодировке, если нужно
+        try:
+            folder_name = folder_name.encode('latin1').decode('utf-8')
+        except:
+            pass
+        
         match = re.search(r'-(\d+)', folder_name)
         if match:
-            # Возвращаем ID с минусом (как в MAX)
             return f"-{match.group(1)}"
         return None
     
