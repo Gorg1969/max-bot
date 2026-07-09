@@ -21,16 +21,16 @@ BASE_URL = "https://platform-api2.max.ru"
 
 # ========== НАСТРОЙКИ ТАЙМИНГОВ ==========
 TIMING = {
-    "min_delay": 60,            # Минимальная задержка между постами (1 минута)
-    "max_delay": 180,           # Максимальная задержка между постами (3 минуты)
-    "batch_size": 10,           # Постов в батче
-    "batch_pause": 300,         # Пауза после батча (5 минут)
+    "min_delay": 60,
+    "max_delay": 180,
+    "batch_size": 10,
+    "batch_pause": 300,
 }
 
 # ========== ХРАНИЛИЩЕ ==========
 user_states = {}
 user_publications = {}
-user_links = {}  # Храним ссылки для каждого пользователя
+user_links = {}
 
 # ========== ОТПРАВКА СООБЩЕНИЙ ==========
 def send_message(user_id, text):
@@ -257,13 +257,11 @@ def start_publication(user_id, links):
         if not group_id:
             continue
         
-        # Задержка
         if post_number > 1:
             delay = random.randint(TIMING["min_delay"], TIMING["max_delay"])
             logger.info(f"⏳ Задержка {delay} сек. перед постом {post_number}")
             time.sleep(delay)
         
-        # Батч-пауза
         if (post_number - 1) % TIMING["batch_size"] == 0 and post_number > 1:
             logger.info(f"⏳ Пауза {TIMING['batch_pause']} сек.")
             time.sleep(TIMING["batch_pause"])
@@ -337,9 +335,10 @@ def webhook():
         payload = None
         file_id = None
         
-        # Парсим данные
+        # ========== ПРАВИЛЬНЫЙ ПАРСИНГ ==========
         if 'message' in data:
             msg = data['message']
+            # БЕРЁМ user_id ТОЛЬКО ИЗ SENDER!
             if 'sender' in msg:
                 user_id = msg['sender'].get('user_id')
             if 'body' in msg:
@@ -356,7 +355,12 @@ def webhook():
             if not user_id and 'user' in cb:
                 user_id = cb['user'].get('user_id')
         
+        # Если user_id всё ещё None - пробуем найти в recipient
+        if not user_id and 'recipient' in data:
+            user_id = data['recipient'].get('user_id')
+        
         if not user_id:
+            logger.warning("⚠️ Не удалось найти user_id")
             return jsonify({"ok": True}), 200
 
         logger.info(f"💬 user_id={user_id}, text={text}, payload={payload}, file_id={file_id}")
