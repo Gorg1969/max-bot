@@ -28,7 +28,6 @@ TIMING = {
 }
 
 # ========== ХРАНИЛИЩЕ ==========
-user_links = {}
 user_publications = {}
 
 # ========== ОТПРАВКА СООБЩЕНИЙ ==========
@@ -69,12 +68,11 @@ def extract_group_id(folder_name):
 
 # ========== ПАРСИНГ СТРОКИ СО ССЫЛКАМИ ==========
 def parse_links_from_string(text):
-    """Парсинг ссылок из строки (через запятую, пробел или новую строку)"""
     pattern = r'https://drive\.google\.com/drive/folders/[a-zA-Z0-9_-]+'
     links = re.findall(pattern, text)
     return links
 
-# ========== ПОЛУЧЕНИЕ ФАЙЛОВ ==========
+# ========== ПОЛУЧЕНИЕ ФАЙЛОВ ИЗ ПАПКИ ==========
 def get_public_files(folder_id):
     try:
         url = f"https://drive.google.com/drive/folders/{folder_id}"
@@ -106,25 +104,21 @@ def download_public_file(file_id):
         logger.error(f"❌ Ошибка скачивания: {e}")
         return None
 
-# ========== ПАРСИНГ ФАЙЛА ==========
-def parse_links_file(content):
-    lines = content.strip().split('\n')
-    links = []
-    for line in lines:
-        line = line.strip()
-        if line and not line.startswith('#') and 'drive.google.com' in line:
-            links.append(line)
-    return links
-
-# ========== ПУБЛИКАЦИЯ ПАПКИ ==========
-def publish_folder(folder_id, group_id, post_number=None, total_posts=None):
+# ========== ПУБЛИКАЦИЯ ПАПКИ (ПРЯМО ПО ССЫЛКЕ) ==========
+def publish_folder_by_link(folder_url, group_id, post_number=None, total_posts=None):
+    """Публикация папки напрямую по ссылке (без поиска подпапок)"""
     try:
-        logger.info(f"📤 Публикация {folder_id} -> {group_id}")
+        folder_id = extract_folder_id_from_url(folder_url)
+        if not folder_id:
+            return False, "Неверная ссылка"
+        
+        logger.info(f"📤 Публикация {folder_url} -> {group_id}")
         
         files = get_public_files(folder_id)
         if not files:
-            return False, "Нет файлов"
+            return False, "Нет файлов в папке"
         
+        # Находим info.txt
         info_file = None
         for f in files:
             if f['name'].lower() in ['info.txt', 'info.md']:
@@ -134,10 +128,12 @@ def publish_folder(folder_id, group_id, post_number=None, total_posts=None):
         if not info_file:
             return False, "Нет info.txt"
         
+        # Скачиваем info.txt
         info_text = download_public_file(info_file['id'])
         if not info_text:
             return False, "Не удалось скачать info.txt"
         
+        # Отправляем текст
         if info_text:
             if post_number and total_posts:
                 header = f"📝 **Пост {post_number}/{total_posts}**\n\n"
@@ -145,6 +141,7 @@ def publish_folder(folder_id, group_id, post_number=None, total_posts=None):
             else:
                 send_message(group_id, info_text)
         
+        # Отправляем изображения (до 10 штук)
         images = [f for f in files if f['name'].lower().endswith(('.jpg', '.jpeg', '.png', '.gif'))][:10]
         for image in images:
             send_message(group_id, f"📷 {image['name']}\n🔗 https://drive.google.com/file/d/{image['id']}/view")
@@ -153,78 +150,65 @@ def publish_folder(folder_id, group_id, post_number=None, total_posts=None):
     except Exception as e:
         return False, str(e)
 
-# ========== ПОИСК ПОДПАПОК ==========
-def find_subfolders_with_id(folder_url):
-    folder_id = extract_folder_id_from_url(folder_url)
-    if not folder_id:
-        return [], "Неверная ссылка"
-    
-    try:
-        url = f"https://drive.google.com/drive/folders/{folder_id}"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        folder_pattern = r'https://drive.google.com/drive/folders/([a-zA-Z0-9_-]+)[^"]*'
-        folder_ids = re.findall(folder_pattern, response.text)
-        folder_ids = list(set(folder_ids))
-        
-        name_pattern = r'<span class="[^"]*">([^<]+)</span>'
-        names = re.findall(name_pattern, response.text)
-        
-        result = []
-        for i, fid in enumerate(folder_ids):
-            name = names[i] if i < len(names) else f"Папка {i+1}"
-            if extract_group_id(name):
-                result.append({'id': fid, 'name': name})
-        
-        return result, None
-    except Exception as e:
-        return [], str(e)
-
-# ========== ЗАПУСК ПУБЛИКАЦИИ ==========
+# ========== ЗАПУСК ПУБЛИКАЦИИ (ПРЯМО ПО ССЫЛКАМ) ==========
 def start_publication(user_id, links):
     logger.info(f"🚀 Запуск публикации для {user_id}, ссылок: {len(links)}")
     
-    all_subfolders = []
+    # Извлекаем ID группы из каждой ссылки (по названию папки)
+    folders_to_publish = []
     errors = []
     
     for i, folder_url in enumerate(links):
-        logger.info(f"📌 Обработка ссылки {i+1}/{len(links)}")
-        subfolders, error = find_subfolders_with_id(folder_url)
-        
-        if error:
-            errors.append(f"Ссылка {i+1}: {error}")
+        # Пробуем получить название папки
+        folder_id = extract_folder_id_from_url(folder_url)
+        if not folder_id:
+            errors.append(f"Ссылка {i+1}: неверный ID")
             continue
         
-        if not subfolders:
-            errors.append(f"Ссылка {i+1}: нет папок с ID")
+        # Получаем название папки (через парсинг страницы)
+        try:
+            url = f"https://drive.google.com/drive/folders/{folder_id}"
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            
+            # Ищем название папки
+            name_pattern = r'<span class="[^"]*">([^<]+)</span>'
+            names = re.findall(name_pattern, response.text)
+            folder_name = names[0] if names else f"Папка {i+1}"
+        except:
+            folder_name = f"Папка {i+1}"
+        
+        # Извлекаем ID группы из названия
+        group_id = extract_group_id(folder_name)
+        if not group_id:
+            errors.append(f"Ссылка {i+1}: нет ID группы в названии '{folder_name}'")
             continue
         
-        all_subfolders.extend(subfolders)
+        folders_to_publish.append({
+            'url': folder_url,
+            'name': folder_name,
+            'group_id': group_id
+        })
     
-    if not all_subfolders:
+    if not folders_to_publish:
         send_message(user_id, "❌ Не найдено папок с ID групп для публикации.")
         return
     
-    total = len(all_subfolders)
+    total = len(folders_to_publish)
     logger.info(f"📊 Всего папок для публикации: {total}")
-    send_message(user_id, f"✅ Найдено {total} папок. Начинаю публикацию...")
+    send_message(user_id, f"✅ Найдено {total} папок с ID групп. Начинаю публикацию...")
     
     published = 0
     publication_errors = []
     post_number = 0
     
-    for subfolder in all_subfolders:
+    for folder in folders_to_publish:
         post_number += 1
         
         if not user_publications.get(user_id, True):
             send_message(user_id, "⏹️ Публикация остановлена.")
             break
-        
-        group_id = extract_group_id(subfolder['name'])
-        if not group_id:
-            continue
         
         if post_number > 1:
             delay = random.randint(TIMING["min_delay"], TIMING["max_delay"])
@@ -235,12 +219,20 @@ def start_publication(user_id, links):
             logger.info(f"⏳ Пауза {TIMING['batch_pause']} сек.")
             time.sleep(TIMING["batch_pause"])
         
-        success, msg = publish_folder(subfolder['id'], group_id, post_number, total)
+        success, msg = publish_folder_by_link(
+            folder['url'], 
+            folder['group_id'], 
+            post_number, 
+            total
+        )
         if success:
             published += 1
+            logger.info(f"✅ Опубликовано: {folder['name']}")
         else:
-            publication_errors.append(f"{subfolder['name']}: {msg}")
+            publication_errors.append(f"{folder['name']}: {msg}")
+            logger.error(f"❌ Ошибка: {folder['name']} - {msg}")
     
+    # Итоговое сообщение
     result_msg = f"✅ **ПУБЛИКАЦИЯ ЗАВЕРШЕНА!**\n\n📊 Всего папок: {total}\n✅ Опубликовано: {published}\n❌ Ошибок: {len(publication_errors)}"
     if publication_errors:
         result_msg += "\n\n⚠️ Ошибки:\n" + "\n".join(publication_errors[:5])
@@ -310,11 +302,11 @@ def webhook():
             send_message(
                 user_id,
                 "🏠 **Главное меню**\n\n"
-                "📄 **Отправьте ссылку на файл .txt** со ссылками на папки.\n"
-                "Каждая ссылка на новой строке.\n\n"
-                "📌 **Или отправьте ссылки одной строкой через запятую:**\n"
+                "📄 **Отправьте ссылки на папки** (через запятую или с новой строки).\n"
+                "В названии папки должен быть ID группы: `Название -123456789`\n\n"
+                "📌 **Пример:**\n"
                 "`https://drive.google.com/drive/folders/ABC123, https://drive.google.com/drive/folders/DEF456`\n\n"
-                "▶️ После загрузки публикация начнётся автоматически.\n"
+                "▶️ После отправки публикация начнётся автоматически.\n"
                 "⏹ Для остановки отправьте /stop"
             )
             return jsonify({"ok": True}), 200
@@ -327,24 +319,8 @@ def webhook():
 
         # ========== ОБРАБОТКА ССЫЛОК ==========
         if text and 'drive.google.com' in text:
-            # Пробуем как ссылку на файл
-            file_id = extract_folder_id_from_url(text)
-            if file_id:
-                content = download_public_file(file_id)
-                if content:
-                    links = parse_links_file(content)
-                    if links:
-                        user_links[user_id] = links
-                        send_message(user_id, f"✅ Получено {len(links)} ссылок. Начинаю публикацию...")
-                        user_publications[user_id] = True
-                        start_publication(user_id, links)
-                        return jsonify({"ok": True}), 200
-            
-            # Если не файл — парсим строку
             links = parse_links_from_string(text)
             if links:
-                user_links[user_id] = links
-                send_message(user_id, f"✅ Получено {len(links)} ссылок. Начинаю публикацию...")
                 user_publications[user_id] = True
                 start_publication(user_id, links)
             else:
