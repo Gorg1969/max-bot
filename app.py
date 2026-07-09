@@ -332,7 +332,40 @@ def webhook():
     except Exception as e:
         logger.error(f"❌ ОШИБКА: {e}")
         return jsonify({"ok": False}), 500
-
+@app.route('/diagnose/<path:folder_url>')
+def diagnose(folder_url):
+    """Диагностика: проверяет, что видит бот в папке"""
+    try:
+        folder_id = extract_folder_id_from_url(folder_url)
+        if not folder_id:
+            return "❌ Не удалось извлечь ID папки из ссылки"
+        
+        # Получаем название папки
+        url = f"https://drive.google.com/drive/folders/{folder_id}"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        # Ищем название
+        name_pattern = r'<span class="[^"]*">([^<]+)</span>'
+        names = re.findall(name_pattern, response.text)
+        folder_name = names[0] if names else "Не найдено"
+        
+        # Ищем ID группы
+        group_id = extract_group_id(folder_name)
+        
+        # Ищем файлы
+        files = get_public_files(folder_id)
+        
+        return {
+            "folder_name": folder_name,
+            "group_id": group_id,
+            "files_count": len(files),
+            "files": [f['name'] for f in files[:5]],
+            "has_info": any(f['name'].lower() in ['info.txt', 'info.md'] for f in files),
+            "images": [f['name'] for f in files if f['name'].lower().endswith(('.jpg', '.jpeg', '.png', '.gif'))][:3]
+        }
+    except Exception as e:
+        return {"error": str(e)}
 # ========== ЗАПУСК ==========
 
 if __name__ == "__main__":
