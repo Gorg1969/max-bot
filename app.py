@@ -9,15 +9,19 @@ from modules import Database, FileManager, Publisher, WebInterface
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024 * 2
+# ========== СНИМАЕМ ОГРАНИЧЕНИЯ НА РАЗМЕР ФАЙЛА ==========
+app.config['MAX_CONTENT_LENGTH'] = None
+app.config['MAX_FORM_MEMORY_SIZE'] = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ========== КОНФИГ ==========
 TOKEN = os.environ.get("TOKEN") or os.environ.get("MAX_BOT_TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
 DATA_DIR = "/app/data"
 
+# ========== ИНИЦИАЛИЗАЦИЯ МОДУЛЕЙ ==========
 db = Database()
 fm = FileManager(DATA_DIR)
 
@@ -93,13 +97,23 @@ api = APIClient()
 publisher = Publisher(api, fm, db)
 web = WebInterface(fm, publisher)
 
+# ========== ОБРАБОТКА ОШИБОК ==========
+@app.errorhandler(413)
+def request_entity_too_large(error):
+    return jsonify({'success': False, 'message': 'Файл слишком большой для сервера'}), 413
+
+@app.errorhandler(400)
+def bad_request(error):
+    return jsonify({'success': False, 'message': 'Ошибка запроса: возможно, файл слишком большой'}), 400
+
+# ========== МАРШРУТЫ ==========
+
 @app.route('/')
 def index():
     return "🤖 MAX Bot is running!"
 
 @app.route('/help')
 def help_page():
-    """Страница помощи"""
     return web.help_page()
 
 @app.route('/upload', methods=['GET', 'POST'])
