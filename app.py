@@ -61,8 +61,18 @@ def extract_folder_id_from_url(url):
             return match.group(1)
     return None
 
-def get_subfolders_recursive(folder_id, depth=0, max_depth=5):
-    """Рекурсивное получение всех подпапок с ID групп"""
+def get_subfolders_recursive(folder_id, depth=0, max_depth=5, visited=None):
+    """Рекурсивное получение всех подпапок с ID групп (без циклов)"""
+    if visited is None:
+        visited = set()
+    
+    # Если уже обрабатывали эту папку — пропускаем
+    if folder_id in visited:
+        logger.info(f"⏭️ Пропускаю уже обработанную папку: {folder_id}")
+        return []
+    
+    visited.add(folder_id)
+    
     try:
         url = f"https://drive.google.com/drive/folders/{folder_id}"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
@@ -81,6 +91,10 @@ def get_subfolders_recursive(folder_id, depth=0, max_depth=5):
         
         result = []
         for i, fid in enumerate(folder_ids):
+            # Пропускаем текущую папку (саму себя)
+            if fid == folder_id:
+                continue
+            
             name = names[i] if i < len(names) else f"Папка {i+1}"
             
             # Проверяем, есть ли в названии ID группы
@@ -92,7 +106,7 @@ def get_subfolders_recursive(folder_id, depth=0, max_depth=5):
                 # Нет ID группы — заходим внутрь (рекурсия)
                 if depth < max_depth:
                     logger.info(f"📂 Захожу в папку: {name} (глубина {depth+1})")
-                    deeper = get_subfolders_recursive(fid, depth + 1, max_depth)
+                    deeper = get_subfolders_recursive(fid, depth + 1, max_depth, visited)
                     result.extend(deeper)
                 else:
                     logger.warning(f"⚠️ Максимальная глубина достигнута в папке: {name}")
@@ -219,7 +233,7 @@ def start_publication(user_id, folder_url):
     
     api_client.send_message(user_id, f"✅ **Папка принята!**\n\n📁 ID: `{folder_id}`\n⏳ Получаю список подпапок...")
     
-    # 2. Получаем список подпапок (рекурсивно)
+    # 2. Получаем список подпапок (рекурсивно, без циклов)
     subfolders = get_subfolders_recursive(folder_id)
     if not subfolders:
         api_client.send_message(user_id, "❌ Не найдено папок с ID групп.")
