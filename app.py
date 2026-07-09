@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, redirect, url_for
+from flask import Flask, request, jsonify, render_template_string
 import requests
 import logging
 import os
@@ -9,6 +9,9 @@ from modules import Database, FileManager, Publisher, WebInterface
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
+# Снимаем ограничение на размер файла
+app.config['MAX_CONTENT_LENGTH'] = None  # Без ограничений
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -48,18 +51,46 @@ web = WebInterface(fm, publisher)
 def index():
     return "🤖 MAX Bot is running!"
 
-@app.route('/upload')
-def upload_page():
-    """Страница загрузки архива"""
-    return web.upload_page()
-
-@app.route('/upload', methods=['POST'])
+@app.route('/upload', methods=['GET', 'POST'])
 def upload_file():
-    """Обработка загруженного архива"""
-    # Временно используем фиксированный user_id (можно доработать)
-    user_id = 151296248
-    result = web.upload_file(request, user_id)
-    return jsonify(result)
+    """Страница загрузки и обработка архива"""
+    if request.method == 'GET':
+        return web.upload_page()
+    
+    # POST — обработка загрузки
+    try:
+        # Временно используем фиксированный user_id (можно доработать)
+        user_id = 151296248
+        
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'message': 'Файл не выбран'})
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'success': False, 'message': 'Файл не выбран'})
+        
+        if not file.filename.endswith('.zip'):
+            return jsonify({'success': False, 'message': 'Файл должен быть в формате .zip'})
+        
+        # Сохраняем файл
+        user_folder = fm.get_user_folder(user_id)
+        zip_path = os.path.join(user_folder, 'temp.zip')
+        file.save(zip_path)
+        logger.info(f"📥 Файл сохранён: {zip_path} ({os.path.getsize(zip_path)} байт)")
+        
+        # Распаковываем
+        if fm.extract_zip(user_id, zip_path):
+            os.remove(zip_path)
+            # Запускаем публикацию
+            publisher.start(user_id)
+            return jsonify({'success': True, 'message': 'Архив распакован. Публикация началась!'})
+        else:
+            fm.clear_user_data(user_id)
+            return jsonify({'success': False, 'message': 'Ошибка распаковки архива'})
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки: {e}")
+        return jsonify({'success': False, 'message': f'Ошибка: {str(e)}'})
 
 @app.route('/health')
 def health():
