@@ -1,16 +1,17 @@
 import re
-import json
-from typing import Dict, List, Optional
+import requests
+import logging
 
-class GoogleDriveStorage:
-    """Работа с Google Drive (заглушка)"""
+logger = logging.getLogger(__name__)
+
+class GoogleDrive:
+    """Работа с Google Drive"""
     
-    def __init__(self, user_id: int, credentials=None):
-        self.user_id = user_id
-        self.credentials = credentials
+    def __init__(self):
+        self.base_url = "https://drive.google.com"
     
-    def get_folder_id_from_url(self, url: str) -> Optional[str]:
-        """Извлечение folder_id из ссылки"""
+    def extract_folder_id(self, url):
+        """Извлечение ID папки из ссылки"""
         patterns = [
             r'folders/([a-zA-Z0-9_-]+)',
             r'id=([a-zA-Z0-9_-]+)',
@@ -22,41 +23,80 @@ class GoogleDriveStorage:
                 return match.group(1)
         return None
     
-    def list_subfolders(self, folder_id: str) -> List[Dict]:
-        """Получение списка подпапок (заглушка)"""
-        return [
-            {"id": "sub1", "name": "Самосвалы 8 -76576474415864"},
-            {"id": "sub2", "name": "Экскаваторы -987654321"}
-        ]
+    def get_files(self, folder_id):
+        """Получение списка файлов в папке"""
+        try:
+            url = f"https://drive.google.com/drive/folders/{folder_id}"
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            
+            file_pattern = r'https://drive.google.com/file/d/([a-zA-Z0-9_-]+)/view[^"]*'
+            file_ids = re.findall(file_pattern, response.text)
+            
+            name_pattern = r'<span class="[^"]*">([^<]+\.(jpg|jpeg|png|gif|txt|md))</span>'
+            names = re.findall(name_pattern, response.text)
+            
+            files = []
+            for i, file_id in enumerate(file_ids):
+                name = names[i][0] if i < len(names) else f"file_{file_id}"
+                files.append({'id': file_id, 'name': name})
+            return files
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения файлов: {e}")
+            return []
     
-    def list_files_in_folder(self, folder_id: str) -> List[Dict]:
-        """Получение списка файлов (заглушка)"""
-        return [
-            {"id": "file1", "name": "info.txt"},
-            {"id": "file2", "name": "image1.jpg"},
-            {"id": "file3", "name": "image2.png"}
-        ]
+    def download_file(self, file_id):
+        """Скачивание файла"""
+        try:
+            url = f"https://drive.google.com/uc?export=download&id={file_id}"
+            response = requests.get(url, timeout=10)
+            return response.text
+        except Exception as e:
+            logger.error(f"❌ Ошибка скачивания: {e}")
+            return None
     
-    def download_text_file(self, file_id: str) -> Optional[str]:
-        """Скачивание текстового файла (заглушка)"""
-        return "**Тестовое объявление**\n\nЭто тестовое сообщение."
+    def publish_folder(self, folder_id, group_id, post_number=None, total_posts=None):
+        """Публикация папки"""
+        try:
+            logger.info(f"📤 Публикация {folder_id} -> {group_id}")
+            
+            files = self.get_files(folder_id)
+            if not files:
+                return False, "Нет файлов в папке"
+            
+            info_file = None
+            for f in files:
+                if f['name'].lower() in ['info.txt', 'info.md']:
+                    info_file = f
+                    break
+            
+            if not info_file:
+                return False, "Нет info.txt"
+            
+            info_text = self.download_file(info_file['id'])
+            if not info_text:
+                return False, "Не удалось скачать info.txt"
+            
+            # Отправляем текст
+            if info_text:
+                if post_number and total_posts:
+                    header = f"📝 **Пост {post_number}/{total_posts}**\n\n"
+                    self._send_message(group_id, header + info_text)
+                else:
+                    self._send_message(group_id, info_text)
+            
+            # Отправляем изображения
+            images = [f for f in files if f['name'].lower().endswith(('.jpg', '.jpeg', '.png', '.gif'))][:10]
+            for image in images:
+                self._send_message(group_id, f"📷 {image['name']}\n🔗 https://drive.google.com/file/d/{image['id']}/view")
+            
+            return True, "Успешно"
+        except Exception as e:
+            return False, str(e)
     
-    def download_image(self, file_id: str, file_name: str) -> Optional[bytes]:
-        """Скачивание изображения (заглушка)"""
-        return b"fake_image_data"
-    
-    def get_or_create_swap_folder(self, root_folder_id: str) -> str:
-        """Получение папки для swap (заглушка)"""
-        return "swap_folder_id"
-    
-    def read_swap_file(self, swap_folder_id: str, user_id: int) -> Optional[Dict]:
-        """Чтение файла подкачки (заглушка)"""
-        return None
-    
-    def write_swap_file(self, swap_folder_id: str, user_id: int, data: Dict):
-        """Запись файла подкачки (заглушка)"""
-        pass
-    
-    def delete_swap_file(self, swap_folder_id: str, user_id: int):
-        """Удаление файла подкачки (заглушка)"""
-        pass
+    def _send_message(self, chat_id, text):
+        """Внутренняя отправка сообщения (заглушка)"""
+        # Здесь будет вызов API MAX
+        logger.info(f"📤 Отправка в {chat_id}: {text[:50]}...")
+        return True
