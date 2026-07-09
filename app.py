@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("TOKEN") or os.environ.get("MAX_BOT_TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
 
+# ========== ХРАНИЛИЩЕ СОСТОЯНИЙ ==========
+user_states = {}
+
 # ========== API КЛИЕНТ ДЛЯ MAX ==========
 class MaxAPIClient:
     def __init__(self):
@@ -43,6 +46,17 @@ class MaxAPIClient:
         except Exception as e:
             logger.error(f"❌ Ошибка отправки: {e}")
             return False
+    
+    def send_file(self, user_id, file_content, filename="links.txt"):
+        """Отправка файла пользователю (для выгрузки)"""
+        try:
+            headers = self.get_headers()
+            # В MAX нужно использовать multipart/form-data
+            # Пока отправляем текстовое сообщение
+            return self.send_message(user_id, f"📄 Файл: {filename}\n\n{file_content[:500]}...")
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки файла: {e}")
+            return False
 
 api_client = MaxAPIClient()
 
@@ -61,71 +75,12 @@ def extract_folder_id_from_url(url):
             return match.group(1)
     return None
 
-def get_subfolders_recursive(folder_id, depth=0, max_depth=5, visited=None):
-    """Рекурсивное получение всех подпапок с ID групп (без циклов)"""
-    if visited is None:
-        visited = set()
-    
-    # Если уже обрабатывали эту папку — пропускаем
-    if folder_id in visited:
-        logger.info(f"⏭️ Пропускаю уже обработанную папку: {folder_id}")
-        return []
-    
-    visited.add(folder_id)
-    
-    try:
-        url = f"https://drive.google.com/drive/folders/{folder_id}"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        # Ищем ссылки на подпапки
-        folder_pattern = r'https://drive.google.com/drive/folders/([a-zA-Z0-9_-]+)[^"]*'
-        folder_ids = re.findall(folder_pattern, response.text)
-        folder_ids = list(set(folder_ids))
-        
-        # Пытаемся найти названия
-        name_pattern = r'<span class="[^"]*">([^<]+)</span>'
-        names = re.findall(name_pattern, response.text)
-        
-        result = []
-        for i, fid in enumerate(folder_ids):
-            # Пропускаем текущую папку (саму себя)
-            if fid == folder_id:
-                continue
-            
-            name = names[i] if i < len(names) else f"Папка {i+1}"
-            
-            # Проверяем, есть ли в названии ID группы
-            if re.search(r'-(\d+)', name):
-                # Есть ID группы — добавляем
-                result.append({'id': fid, 'name': name})
-                logger.info(f"📁 Найдена папка с ID: {name}")
-            else:
-                # Нет ID группы — заходим внутрь (рекурсия)
-                if depth < max_depth:
-                    logger.info(f"📂 Захожу в папку: {name} (глубина {depth+1})")
-                    deeper = get_subfolders_recursive(fid, depth + 1, max_depth, visited)
-                    result.extend(deeper)
-                else:
-                    logger.warning(f"⚠️ Максимальная глубина достигнута в папке: {name}")
-        
-        return result
-    except Exception as e:
-        logger.error(f"❌ Ошибка получения подпапок: {e}")
-        return []
-
 def extract_group_id(folder_name):
     """Извлечение ID группы из названия папки"""
     match = re.search(r'-(\d+)', folder_name)
     if match:
-        group_id = match.group(1)
-        logger.info(f"✅ Извлечён ID группы: {group_id} из '{folder_name}'")
-        return group_id
-    else:
-        logger.warning(f"⚠️ Не найден ID группы в: '{folder_name}'")
-        return None
+        return match.group(1)
+    return None
 
 def get_public_files(folder_id):
     """Получение списка файлов в публичной папке Google Drive"""
@@ -174,6 +129,18 @@ def download_public_image(file_id):
         logger.error(f"❌ Ошибка скачивания изображения: {e}")
         return None
 
+def parse_links_file(content):
+    """Парсинг файла со ссылками"""
+    lines = content.strip().split('\n')
+    links = []
+    for line in lines:
+        line = line.strip()
+        if line and not line.startswith('#'):
+            # Проверяем, что это ссылка на Google Drive
+            if 'drive.google.com' in line:
+                links.append(line)
+    return links
+
 def publish_folder(user_id, folder_id, group_id):
     """Публикация одной папки"""
     try:
@@ -181,7 +148,6 @@ def publish_folder(user_id, folder_id, group_id):
         
         files = get_public_files(folder_id)
         if not files:
-            logger.warning(f"⚠️ Нет файлов в папке {folder_id}")
             return False, "Нет файлов в папке"
         
         # Находим info.txt
@@ -192,7 +158,6 @@ def publish_folder(user_id, folder_id, group_id):
                 break
         
         if not info_file:
-            logger.warning(f"⚠️ Нет info.txt в папке {folder_id}")
             return False, "Нет info.txt"
         
         # Скачиваем info.txt
@@ -221,103 +186,123 @@ def publish_folder(user_id, folder_id, group_id):
         logger.error(f"❌ Ошибка публикации: {e}")
         return False, str(e)
 
-def start_publication(user_id, folder_url):
-    """Запуск публикации с подробным логированием"""
-    logger.info(f"🚀 Запуск публикации для пользователя {user_id}")
-    
-    # 1. Извлекаем ID папки
+def process_folder(user_id, folder_url):
+    """Обработка одной папки (поиск подпапок с ID групп)"""
     folder_id = extract_folder_id_from_url(folder_url)
     if not folder_id:
-        api_client.send_message(user_id, "❌ Не удалось извлечь ID папки из ссылки.")
-        return
+        return [], f"Неверная ссылка: {folder_url}"
     
-    logger.info(f"📁 ID папки: {folder_id}")
-    api_client.send_message(user_id, f"✅ **Папка принята!**\n\n📁 ID: `{folder_id}`\n⏳ Получаю список подпапок...")
-    
-    # 2. Получаем список подпапок (рекурсивно, без циклов)
-    subfolders = get_subfolders_recursive(folder_id)
-    
-    # Логируем результат
-    logger.info(f"📊 Найдено подпапок с ID групп: {len(subfolders)}")
-    
-    if not subfolders:
-        logger.warning("⚠️ Не найдено папок с ID групп")
-        api_client.send_message(user_id, "❌ Не найдено папок с ID групп.\n\nПроверьте, что в папках есть ID группы в формате `-123456789`")
-        return
-    
-    # Логируем все найденные папки
-    for sf in subfolders:
-        logger.info(f"📁 Найдена папка: {sf['name']} (ID: {sf['id']})")
-        group_id = extract_group_id(sf['name'])
-        if group_id:
-            logger.info(f"  ✅ ID группы: {group_id}")
-        else:
-            logger.warning(f"  ❌ Нет ID группы в названии")
+    # Получаем содержимое папки
+    try:
+        url = f"https://drive.google.com/drive/folders/{folder_id}"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        # Ищем ссылки на подпапки
+        folder_pattern = r'https://drive.google.com/drive/folders/([a-zA-Z0-9_-]+)[^"]*'
+        folder_ids = re.findall(folder_pattern, response.text)
+        folder_ids = list(set(folder_ids))
+        
+        # Пытаемся найти названия
+        name_pattern = r'<span class="[^"]*">([^<]+)</span>'
+        names = re.findall(name_pattern, response.text)
+        
+        result = []
+        for i, fid in enumerate(folder_ids):
+            name = names[i] if i < len(names) else f"Папка {i+1}"
+            if extract_group_id(name):
+                result.append({'id': fid, 'name': name})
+        
+        return result, None
+    except Exception as e:
+        return [], f"Ошибка доступа: {e}"
+
+def start_publication_from_links(user_id, links):
+    """Публикация по списку ссылок"""
+    logger.info(f"🚀 Запуск публикации из файла для пользователя {user_id}")
+    logger.info(f"📊 Получено ссылок: {len(links)}")
     
     api_client.send_message(
         user_id,
-        f"✅ **Найдено папок с ID групп: {len(subfolders)}**\n\n"
-        f"📁 Начинаю публикацию...\n"
-        f"⏳ Это займёт некоторое время."
+        f"📁 **Получено ссылок: {len(links)}**\n\n"
+        f"⏳ Начинаю публикацию...\n"
+        f"Это займёт некоторое время."
     )
     
-    # 3. Публикуем каждую папку
-    published_count = 0
-    errors = []
+    total_published = 0
+    total_errors = []
+    processed_links = 0
     
-    for i, subfolder in enumerate(subfolders):
-        # Извлекаем ID группы из названия
-        group_id = extract_group_id(subfolder['name'])
-        if not group_id:
-            error_msg = f"{subfolder['name']} - нет ID группы"
-            errors.append(error_msg)
-            api_client.send_message(user_id, f"❌ {error_msg}")
+    for i, folder_url in enumerate(links):
+        processed_links += 1
+        logger.info(f"📌 Обработка ссылки {i+1}/{len(links)}: {folder_url}")
+        
+        # Получаем подпапки с ID групп
+        subfolders, error = process_folder(user_id, folder_url)
+        
+        if error:
+            total_errors.append(f"Ссылка {i+1}: {error}")
+            api_client.send_message(user_id, f"❌ Ссылка {i+1}: {error}")
             continue
         
-        logger.info(f"📤 Публикация {i+1}/{len(subfolders)}: {subfolder['name']} -> группа {group_id}")
+        if not subfolders:
+            total_errors.append(f"Ссылка {i+1}: нет папок с ID групп")
+            api_client.send_message(user_id, f"⚠️ Ссылка {i+1}: нет папок с ID групп")
+            continue
         
-        # Сообщение пользователю о ходе
         api_client.send_message(
             user_id,
-            f"📤 **{i+1}/{len(subfolders)}** Публикую: {subfolder['name']}"
+            f"📤 **Ссылка {i+1}/{len(links)}**\n"
+            f"Найдено папок: {len(subfolders)}"
         )
         
-        # Публикуем папку
-        success, msg = publish_folder(user_id, subfolder['id'], group_id)
-        if success:
-            published_count += 1
-            api_client.send_message(user_id, f"✅ {subfolder['name']} - опубликовано")
-            logger.info(f"✅ {subfolder['name']} - опубликовано")
-        else:
-            errors.append(f"{subfolder['name']} - {msg}")
-            api_client.send_message(user_id, f"❌ {subfolder['name']} - ошибка: {msg}")
-            logger.error(f"❌ {subfolder['name']} - ошибка: {msg}")
-        
-        # Задержка между постами (2 минуты)
-        if i < len(subfolders) - 1:
-            api_client.send_message(user_id, f"⏳ Пауза 2 минуты...")
-            time.sleep(120)
-        
-        # Пауза после 10 постов
-        if (i + 1) % 10 == 0 and i < len(subfolders) - 1:
-            api_client.send_message(user_id, "⏳ Пауза 5 минут...")
-            time.sleep(300)
+        # Публикуем каждую подпапку
+        for j, subfolder in enumerate(subfolders):
+            group_id = extract_group_id(subfolder['name'])
+            if not group_id:
+                total_errors.append(f"{subfolder['name']} - нет ID группы")
+                continue
+            
+            api_client.send_message(
+                user_id,
+                f"📤 **{j+1}/{len(subfolders)}** Публикую: {subfolder['name']}"
+            )
+            
+            success, msg = publish_folder(user_id, subfolder['id'], group_id)
+            if success:
+                total_published += 1
+                api_client.send_message(user_id, f"✅ {subfolder['name']} - опубликовано")
+            else:
+                total_errors.append(f"{subfolder['name']} - {msg}")
+                api_client.send_message(user_id, f"❌ {subfolder['name']} - ошибка: {msg}")
+            
+            # Задержка между постами (2 минуты)
+            if j < len(subfolders) - 1:
+                api_client.send_message(user_id, f"⏳ Пауза 2 минуты...")
+                time.sleep(120)
+            
+            # Пауза после 10 постов
+            if (j + 1) % 10 == 0 and j < len(subfolders) - 1:
+                api_client.send_message(user_id, "⏳ Пауза 5 минут...")
+                time.sleep(300)
     
-    # 4. Завершение
+    # Завершение
     result_msg = (
         f"✅ **ПУБЛИКАЦИЯ ЗАВЕРШЕНА!**\n\n"
-        f"📁 Всего папок: {len(subfolders)}\n"
-        f"✅ Опубликовано: {published_count}\n"
-        f"❌ Ошибок: {len(subfolders) - published_count}"
+        f"📊 Обработано ссылок: {processed_links}\n"
+        f"✅ Опубликовано папок: {total_published}\n"
+        f"❌ Ошибок: {len(total_errors)}"
     )
     
-    if errors:
-        result_msg += "\n\n⚠️ **Ошибки:**\n" + "\n".join(errors[:5])
-        if len(errors) > 5:
-            result_msg += f"\n... и ещё {len(errors) - 5} ошибок"
+    if total_errors:
+        result_msg += "\n\n⚠️ **Ошибки:**\n" + "\n".join(total_errors[:5])
+        if len(total_errors) > 5:
+            result_msg += f"\n... и ещё {len(total_errors) - 5} ошибок"
     
     api_client.send_message(user_id, result_msg)
     logger.info(f"🏁 Публикация завершена для пользователя {user_id}")
+
 # ========== ЭНДПОИНТЫ ==========
 
 @app.route('/')
@@ -361,7 +346,9 @@ def webhook():
         user_id = None
         text = None
         payload = None
+        file_id = None
         
+        # Извлекаем данные
         if 'callback' in data:
             callback = data['callback']
             payload = callback.get('payload')
@@ -373,14 +360,20 @@ def webhook():
             if 'sender' in message:
                 user_id = message['sender'].get('user_id')
             if 'body' in message:
-                text = message['body'].get('text')
+                body = message['body']
+                text = body.get('text')
+                # Проверяем, есть ли вложение (файл)
+                if 'attachments' in body:
+                    for att in body['attachments']:
+                        if att.get('type') == 'file':
+                            file_id = att.get('payload', {}).get('id')
         
         if not user_id:
             return jsonify({"ok": True}), 200
 
-        logger.info(f"💬 user_id={user_id}, text='{text}', payload='{payload}'")
+        logger.info(f"💬 user_id={user_id}, text='{text}', payload='{payload}', file_id={file_id}")
 
-        # Обработка кнопок (callback)
+        # ========== ОБРАБОТКА КНОПОК ==========
         if payload:
             if payload == "choose_folder":
                 api_client.send_message(
@@ -388,25 +381,42 @@ def webhook():
                     "📁 **Введите ссылку на корневую папку Google Drive:**\n\n"
                     "Пример: `https://drive.google.com/drive/folders/ABC123XYZ`"
                 )
+                user_states[user_id] = 'waiting_link'
+            
+            elif payload == "upload_links":
+                api_client.send_message(
+                    user_id,
+                    "📁 **Отправьте файл со ссылками**\n\n"
+                    "Файл должен быть в формате `.txt`.\n"
+                    "Каждая ссылка — на новой строке.\n\n"
+                    "Пример:\n"
+                    "`https://drive.google.com/drive/folders/ABC123`\n"
+                    "`https://drive.google.com/drive/folders/DEF456`"
+                )
+                user_states[user_id] = 'waiting_link_file'
+            
             elif payload == "start_publish":
                 api_client.send_message(
                     user_id,
-                    "📁 **Сначала выберите папку через /choose**"
+                    "📁 **Сначала выберите папку через /choose или загрузите файл со ссылками**"
                 )
+            
             elif payload == "stop":
                 api_client.send_message(user_id, "⏹️ Публикация остановлена.")
+            
             elif payload == "help":
                 api_client.send_message(
                     user_id,
                     "📖 **Помощь**\n\n"
                     "/start - Главное меню\n"
                     "/choose - Выбрать папку\n"
+                    "/upload_links - Загрузить файл со ссылками\n"
                     "/publish - Начать публикацию\n"
                     "/stop - Остановить"
                 )
             return jsonify({"ok": True}), 200
 
-        # Обработка команд
+        # ========== ОБРАБОТКА КОМАНД ==========
         if text:
             text_lower = text.lower().strip()
             
@@ -415,6 +425,7 @@ def webhook():
                     user_id,
                     "🏠 **Главное меню**\n\n"
                     "📂 /choose - Выбрать папку\n"
+                    "📄 /upload_links - Загрузить файл со ссылками\n"
                     "▶️ /publish - Начать публикацию\n"
                     "⏹ /stop - Остановить\n"
                     "ℹ️ /help - Помощь"
@@ -426,20 +437,66 @@ def webhook():
                     "📁 **Введите ссылку на корневую папку Google Drive:**\n\n"
                     "Пример: `https://drive.google.com/drive/folders/ABC123XYZ`"
                 )
+                user_states[user_id] = 'waiting_link'
+            
+            elif text_lower == "/upload_links":
+                api_client.send_message(
+                    user_id,
+                    "📁 **Отправьте файл со ссылками**\n\n"
+                    "Файл должен быть в формате `.txt`.\n"
+                    "Каждая ссылка — на новой строке.\n\n"
+                    "Пример:\n"
+                    "`https://drive.google.com/drive/folders/ABC123`\n"
+                    "`https://drive.google.com/drive/folders/DEF456`"
+                )
+                user_states[user_id] = 'waiting_link_file'
             
             elif text_lower == "/publish":
                 api_client.send_message(
                     user_id,
-                    "📁 **Сначала выберите папку через /choose**"
+                    "📁 **Сначала выберите папку через /choose или загрузите файл со ссылками**"
                 )
             
             elif text_lower == "/stop":
                 api_client.send_message(user_id, "⏹️ Публикация остановлена.")
             
-            elif text_lower.startswith("https://drive.google.com/"):
-                folder_url = text
-                api_client.send_message(user_id, "✅ Папка принята! Начинаю публикацию...")
-                start_publication(user_id, folder_url)
+            elif user_states.get(user_id) == 'waiting_link':
+                # Пользователь ввёл ссылку на папку
+                if text_lower.startswith("https://drive.google.com/"):
+                    folder_url = text
+                    api_client.send_message(user_id, "✅ Папка принята! Начинаю публикацию...")
+                    user_states[user_id] = None
+                    # Запускаем публикацию по одной ссылке
+                    start_publication_from_links(user_id, [folder_url])
+                else:
+                    api_client.send_message(user_id, "❌ Неверная ссылка. Введите ссылку на папку Google Drive.")
+            
+            elif user_states.get(user_id) == 'waiting_link_file':
+                # Ждём файл
+                pass  # Обрабатывается ниже, в блоке file_id
+        
+        # ========== ОБРАБОТКА ВЛОЖЕННОГО ФАЙЛА ==========
+        if file_id and user_states.get(user_id) == 'waiting_link_file':
+            api_client.send_message(user_id, "📥 Получаю файл...")
+            
+            # Скачиваем файл
+            file_content = download_public_file(file_id)
+            if file_content:
+                links = parse_links_file(file_content)
+                if links:
+                    api_client.send_message(
+                        user_id,
+                        f"✅ **Получено ссылок: {len(links)}**\n\n"
+                        f"📁 Начинаю публикацию...\n"
+                        f"⏳ Это займёт некоторое время."
+                    )
+                    user_states[user_id] = None
+                    start_publication_from_links(user_id, links)
+                else:
+                    api_client.send_message(user_id, "❌ Файл не содержит ссылок на Google Drive.")
+            else:
+                api_client.send_message(user_id, "❌ Не удалось прочитать файл.")
+            user_states[user_id] = None
 
         return jsonify({"ok": True}), 200
 
