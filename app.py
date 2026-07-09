@@ -47,18 +47,28 @@ def send_message(user_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
         return False
 
-# ========== ИЗВЛЕЧЕНИЕ ID ==========
+# ========== ИЗВЛЕЧЕНИЕ ID ЧЕРЕЗ API ==========
 def extract_folder_id_from_url(url):
-    patterns = [
-        r'folders/([a-zA-Z0-9_-]+)',
-        r'id=([a-zA-Z0-9_-]+)',
-        r'([a-zA-Z0-9_-]{28,})'
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
+    """Извлечение ID папки через бесплатный API"""
+    api_url = "https://universal-google-drive-id-extractor.vercel.app/"
+    
+    try:
+        response = requests.post(api_url, json={"url": url}, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            folder_id = data.get('id')
+            if folder_id:
+                logger.info(f"✅ API извлёк ID: {folder_id}")
+                return folder_id
+            else:
+                logger.warning(f"⚠️ API не вернул ID для: {url}")
+                return None
+        else:
+            logger.error(f"❌ Ошибка API: {response.status_code} - {response.text}")
+            return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка подключения к API: {e}")
+        return None
 
 def extract_group_id(folder_name):
     match = re.search(r'-(\d+)', folder_name)
@@ -104,13 +114,12 @@ def download_public_file(file_id):
         logger.error(f"❌ Ошибка скачивания: {e}")
         return None
 
-# ========== ПУБЛИКАЦИЯ ПАПКИ (ПРЯМО ПО ССЫЛКЕ) ==========
+# ========== ПУБЛИКАЦИЯ ПАПКИ ==========
 def publish_folder_by_link(folder_url, group_id, post_number=None, total_posts=None):
-    """Публикация папки напрямую по ссылке (без поиска подпапок)"""
     try:
         folder_id = extract_folder_id_from_url(folder_url)
         if not folder_id:
-            return False, "Неверная ссылка"
+            return False, "Не удалось извлечь ID папки"
         
         logger.info(f"📤 Публикация {folder_url} -> {group_id}")
         
@@ -118,7 +127,6 @@ def publish_folder_by_link(folder_url, group_id, post_number=None, total_posts=N
         if not files:
             return False, "Нет файлов в папке"
         
-        # Находим info.txt
         info_file = None
         for f in files:
             if f['name'].lower() in ['info.txt', 'info.md']:
@@ -128,12 +136,10 @@ def publish_folder_by_link(folder_url, group_id, post_number=None, total_posts=N
         if not info_file:
             return False, "Нет info.txt"
         
-        # Скачиваем info.txt
         info_text = download_public_file(info_file['id'])
         if not info_text:
             return False, "Не удалось скачать info.txt"
         
-        # Отправляем текст
         if info_text:
             if post_number and total_posts:
                 header = f"📝 **Пост {post_number}/{total_posts}**\n\n"
@@ -141,7 +147,6 @@ def publish_folder_by_link(folder_url, group_id, post_number=None, total_posts=N
             else:
                 send_message(group_id, info_text)
         
-        # Отправляем изображения (до 10 штук)
         images = [f for f in files if f['name'].lower().endswith(('.jpg', '.jpeg', '.png', '.gif'))][:10]
         for image in images:
             send_message(group_id, f"📷 {image['name']}\n🔗 https://drive.google.com/file/d/{image['id']}/view")
@@ -150,36 +155,33 @@ def publish_folder_by_link(folder_url, group_id, post_number=None, total_posts=N
     except Exception as e:
         return False, str(e)
 
-# ========== ЗАПУСК ПУБЛИКАЦИИ (ПРЯМО ПО ССЫЛКАМ) ==========
+# ========== ЗАПУСК ПУБЛИКАЦИИ ==========
 def start_publication(user_id, links):
     logger.info(f"🚀 Запуск публикации для {user_id}, ссылок: {len(links)}")
     
-    # Извлекаем ID группы из каждой ссылки (по названию папки)
     folders_to_publish = []
     errors = []
     
     for i, folder_url in enumerate(links):
-        # Пробуем получить название папки
+        # Получаем ID папки через API
         folder_id = extract_folder_id_from_url(folder_url)
         if not folder_id:
-            errors.append(f"Ссылка {i+1}: неверный ID")
+            errors.append(f"Ссылка {i+1}: не удалось извлечь ID")
             continue
         
-        # Получаем название папки (через парсинг страницы)
+        # Получаем название папки
         try:
             url = f"https://drive.google.com/drive/folders/{folder_id}"
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
             response = requests.get(url, headers=headers, timeout=10)
             response.raise_for_status()
             
-            # Ищем название папки
             name_pattern = r'<span class="[^"]*">([^<]+)</span>'
             names = re.findall(name_pattern, response.text)
             folder_name = names[0] if names else f"Папка {i+1}"
         except:
             folder_name = f"Папка {i+1}"
         
-        # Извлекаем ID группы из названия
         group_id = extract_group_id(folder_name)
         if not group_id:
             errors.append(f"Ссылка {i+1}: нет ID группы в названии '{folder_name}'")
@@ -232,7 +234,6 @@ def start_publication(user_id, links):
             publication_errors.append(f"{folder['name']}: {msg}")
             logger.error(f"❌ Ошибка: {folder['name']} - {msg}")
     
-    # Итоговое сообщение
     result_msg = f"✅ **ПУБЛИКАЦИЯ ЗАВЕРШЕНА!**\n\n📊 Всего папок: {total}\n✅ Опубликовано: {published}\n❌ Ошибок: {len(publication_errors)}"
     if publication_errors:
         result_msg += "\n\n⚠️ Ошибки:\n" + "\n".join(publication_errors[:5])
@@ -297,7 +298,6 @@ def webhook():
 
         logger.info(f"💬 user_id={user_id}, text={text}")
 
-        # ========== КОМАНДА /start ==========
         if text and text.strip() == '/start':
             send_message(
                 user_id,
@@ -311,13 +311,11 @@ def webhook():
             )
             return jsonify({"ok": True}), 200
 
-        # ========== ОСТАНОВКА ==========
         if text and text.strip() == '/stop':
             user_publications[user_id] = False
             send_message(user_id, "⏹️ Публикация остановлена.")
             return jsonify({"ok": True}), 200
 
-        # ========== ОБРАБОТКА ССЫЛОК ==========
         if text and 'drive.google.com' in text:
             links = parse_links_from_string(text)
             if links:
@@ -332,40 +330,7 @@ def webhook():
     except Exception as e:
         logger.error(f"❌ ОШИБКА: {e}")
         return jsonify({"ok": False}), 500
-@app.route('/diagnose/<path:folder_url>')
-def diagnose(folder_url):
-    """Диагностика: проверяет, что видит бот в папке"""
-    try:
-        folder_id = extract_folder_id_from_url(folder_url)
-        if not folder_id:
-            return "❌ Не удалось извлечь ID папки из ссылки"
-        
-        # Получаем название папки
-        url = f"https://drive.google.com/drive/folders/{folder_id}"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, headers=headers, timeout=10)
-        
-        # Ищем название
-        name_pattern = r'<span class="[^"]*">([^<]+)</span>'
-        names = re.findall(name_pattern, response.text)
-        folder_name = names[0] if names else "Не найдено"
-        
-        # Ищем ID группы
-        group_id = extract_group_id(folder_name)
-        
-        # Ищем файлы
-        files = get_public_files(folder_id)
-        
-        return {
-            "folder_name": folder_name,
-            "group_id": group_id,
-            "files_count": len(files),
-            "files": [f['name'] for f in files[:5]],
-            "has_info": any(f['name'].lower() in ['info.txt', 'info.md'] for f in files),
-            "images": [f['name'] for f in files if f['name'].lower().endswith(('.jpg', '.jpeg', '.png', '.gif'))][:3]
-        }
-    except Exception as e:
-        return {"error": str(e)}
+
 # ========== ЗАПУСК ==========
 
 if __name__ == "__main__":
