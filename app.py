@@ -9,24 +9,20 @@ from modules import Database, FileManager, Publisher, WebInterface
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
-# Снимаем ограничение на размер файла
-app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024 * 2  # 2 ГБ
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024 * 2
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ========== КОНФИГ ==========
 TOKEN = os.environ.get("TOKEN") or os.environ.get("MAX_BOT_TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
 DATA_DIR = "/app/data"
 
-# ========== ИНИЦИАЛИЗАЦИЯ МОДУЛЕЙ ==========
 db = Database()
 fm = FileManager(DATA_DIR)
 
 class APIClient:
     def send_message(self, user_id, text):
-        """Отправка сообщения пользователю (личное сообщение)"""
         try:
             payload = {"text": text, "format": "markdown"}
             response = requests.post(
@@ -47,19 +43,17 @@ class APIClient:
             return False
     
     def send_message_to_chat(self, chat_id, text):
-        """Отправка сообщения в группу (чат)"""
         try:
             payload = {"text": text, "format": "markdown"}
             response = requests.post(
                 f"{BASE_URL}/messages",
                 headers={"Authorization": TOKEN, "Content-Type": "application/json"},
-                params={"chat_id": chat_id},  # ← Здесь chat_id, а не user_id!
+                params={"chat_id": chat_id},
                 json=payload,
                 timeout=30,
                 verify=False
             )
             if response.status_code == 200:
-                logger.info(f"✅ Сообщение отправлено в чат {chat_id}")
                 return True
             else:
                 logger.error(f"❌ Ошибка отправки в чат: {response.status_code} - {response.text}")
@@ -67,12 +61,36 @@ class APIClient:
         except Exception as e:
             logger.error(f"❌ Ошибка отправки в чат: {e}")
             return False
+    
+    def send_message_to_chat_with_attachments(self, chat_id, text, attachments):
+        """Отправка сообщения с вложениями (изображениями)"""
+        try:
+            payload = {
+                "text": text,
+                "format": "markdown",
+                "attachments": attachments
+            }
+            response = requests.post(
+                f"{BASE_URL}/messages",
+                headers={"Authorization": TOKEN, "Content-Type": "application/json"},
+                params={"chat_id": chat_id},
+                json=payload,
+                timeout=30,
+                verify=False
+            )
+            if response.status_code == 200:
+                logger.info(f"✅ Сообщение с вложениями отправлено в чат {chat_id}")
+                return True
+            else:
+                logger.error(f"❌ Ошибка отправки с вложениями: {response.status_code} - {response.text}")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки с вложениями: {e}")
+            return False
 
 api = APIClient()
 publisher = Publisher(api, fm, db)
 web = WebInterface(fm, publisher)
-
-# ========== МАРШРУТЫ ==========
 
 @app.route('/')
 def index():
@@ -80,7 +98,6 @@ def index():
 
 @app.route('/upload', methods=['GET', 'POST'])
 def upload_file():
-    """Страница загрузки и обработка архива"""
     if request.method == 'GET':
         return web.upload_page()
     
@@ -88,7 +105,7 @@ def upload_file():
         if not request.files:
             return jsonify({'success': False, 'message': 'Файл не найден'}), 400
         
-        user_id = 151296248  # Временно фиксированный ID
+        user_id = 151296248
         
         if 'file' not in request.files:
             return jsonify({'success': False, 'message': 'Файл не выбран'}), 400
@@ -100,13 +117,11 @@ def upload_file():
         if not file.filename.lower().endswith('.zip'):
             return jsonify({'success': False, 'message': 'Файл должен быть в формате .zip'}), 400
         
-        # Сохраняем файл
         user_folder = fm.get_user_folder(user_id)
         zip_path = os.path.join(user_folder, 'temp.zip')
         file.save(zip_path)
         logger.info(f"📥 Файл сохранён: {zip_path} ({os.path.getsize(zip_path)} байт)")
         
-        # Распаковываем
         if fm.extract_zip(user_id, zip_path):
             os.remove(zip_path)
             publisher.start(user_id)
