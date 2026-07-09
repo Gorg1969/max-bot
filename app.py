@@ -21,10 +21,10 @@ BASE_URL = "https://platform-api2.max.ru"
 
 # ========== НАСТРОЙКИ ТАЙМИНГОВ ==========
 TIMING = {
-    "min_delay": 60,
-    "max_delay": 180,
-    "batch_size": 10,
-    "batch_pause": 300,
+    "min_delay": 60,            # 1 минута
+    "max_delay": 180,           # 3 минуты
+    "batch_size": 10,           # 10 постов
+    "batch_pause": 300,         # 5 минут
 }
 
 # ========== ХРАНИЛИЩЕ ==========
@@ -44,46 +44,9 @@ def send_message(user_id, text):
             timeout=30,
             verify=False
         )
-        logger.info(f"📤 Ответ: {response.status_code}")
         return response.status_code == 200
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
-        return False
-
-# ========== ОТПРАВКА КЛАВИАТУРЫ ==========
-def send_keyboard(user_id, text, buttons):
-    try:
-        keyboard_rows = []
-        for button in buttons:
-            keyboard_rows.append([{
-                "text": button["text"],
-                "type": "callback",
-                "payload": button["payload"]
-            }])
-
-        payload = {
-            "text": text,
-            "format": "markdown",
-            "attachments": [{
-                "type": "inline_keyboard",
-                "payload": {
-                    "buttons": keyboard_rows
-                }
-            }]
-        }
-
-        response = requests.post(
-            f"{BASE_URL}/messages",
-            headers={"Authorization": TOKEN, "Content-Type": "application/json"},
-            params={"user_id": user_id},
-            json=payload,
-            timeout=30,
-            verify=False
-        )
-        logger.info(f"📤 Клавиатура: {response.status_code}")
-        return response.status_code == 200
-    except Exception as e:
-        logger.error(f"❌ Ошибка клавиатуры: {e}")
         return False
 
 # ========== ИЗВЛЕЧЕНИЕ ID ==========
@@ -240,7 +203,7 @@ def start_publication(user_id, links):
     
     total = len(all_subfolders)
     logger.info(f"📊 Всего папок для публикации: {total}")
-    send_message(user_id, f"✅ Найдено {total} папок для публикации. Начинаю...")
+    send_message(user_id, f"✅ Найдено {total} папок. Начинаю публикацию...")
     
     published = 0
     publication_errors = []
@@ -250,7 +213,7 @@ def start_publication(user_id, links):
         post_number += 1
         
         if not user_publications.get(user_id, True):
-            send_message(user_id, "⏹️ Публикация остановлена пользователем.")
+            send_message(user_id, "⏹️ Публикация остановлена.")
             break
         
         group_id = extract_group_id(subfolder['name'])
@@ -272,23 +235,15 @@ def start_publication(user_id, links):
         else:
             publication_errors.append(f"{subfolder['name']}: {msg}")
     
+    # ========== ИТОГОВОЕ СООБЩЕНИЕ (ТОЛЬКО ОН!) ==========
     result_msg = f"✅ **ПУБЛИКАЦИЯ ЗАВЕРШЕНА!**\n\n📊 Всего папок: {total}\n✅ Опубликовано: {published}\n❌ Ошибок: {len(publication_errors)}"
     if publication_errors:
         result_msg += "\n\n⚠️ Ошибки:\n" + "\n".join(publication_errors[:5])
+        if len(publication_errors) > 5:
+            result_msg += f"\n... и ещё {len(publication_errors) - 5} ошибок"
     
     send_message(user_id, result_msg)
-
-# ========== МЕНЮ ==========
-def show_main_menu(user_id):
-    send_keyboard(
-        user_id,
-        "🏠 **Главное меню**\n\nВыберите действие:",
-        [
-            {"text": "📄 Загрузить ссылки", "payload": "upload_links"},
-            {"text": "▶️ Опубликовать", "payload": "publish"},
-            {"text": "⏹ Остановить", "payload": "stop"}
-        ]
-    )
+    logger.info(f"🏁 Публикация завершена для {user_id}")
 
 # ========== ЭНДПОИНТЫ ==========
 
@@ -332,13 +287,11 @@ def webhook():
 
         user_id = None
         text = None
-        payload = None
         file_id = None
         
-        # ========== ПРАВИЛЬНЫЙ ПАРСИНГ ==========
+        # ========== ПАРСИНГ ==========
         if 'message' in data:
             msg = data['message']
-            # БЕРЁМ user_id ТОЛЬКО ИЗ SENDER!
             if 'sender' in msg:
                 user_id = msg['sender'].get('user_id')
             if 'body' in msg:
@@ -349,62 +302,43 @@ def webhook():
                         if att.get('type') == 'file':
                             file_id = att.get('payload', {}).get('id')
         
-        if 'callback' in data:
-            cb = data['callback']
-            payload = cb.get('payload')
-            if not user_id and 'user' in cb:
-                user_id = cb['user'].get('user_id')
-        
-        # Если user_id всё ещё None - пробуем найти в recipient
-        if not user_id and 'recipient' in data:
-            user_id = data['recipient'].get('user_id')
-        
         if not user_id:
-            logger.warning("⚠️ Не удалось найти user_id")
             return jsonify({"ok": True}), 200
 
-        logger.info(f"💬 user_id={user_id}, text={text}, payload={payload}, file_id={file_id}")
-
-        # ========== КНОПКИ ==========
-        if payload:
-            if payload == "upload_links":
-                send_message(user_id, "📁 **Отправьте файл .txt со ссылками**\n\nКаждая ссылка на новой строке.")
-                user_states[user_id] = 'waiting_file'
-            
-            elif payload == "publish":
-                links = user_links.get(user_id, [])
-                if links:
-                    send_message(user_id, f"▶️ Начинаю публикацию {len(links)} ссылок...")
-                    user_publications[user_id] = True
-                    start_publication(user_id, links)
-                else:
-                    send_message(user_id, "❌ Сначала загрузите файл со ссылками через 'Загрузить ссылки'")
-            
-            elif payload == "stop":
-                send_message(user_id, "⏹️ Публикация остановлена.")
-                user_publications[user_id] = False
-            
-            return jsonify({"ok": True}), 200
+        logger.info(f"💬 user_id={user_id}, text={text}, file_id={file_id}")
 
         # ========== КОМАНДА /start ==========
         if text and text.strip() == '/start':
-            show_main_menu(user_id)
+            send_message(
+                user_id,
+                "🏠 **Главное меню**\n\n"
+                "📄 Отправьте файл .txt со ссылками на папки.\n"
+                "Каждая ссылка на новой строке.\n\n"
+                "▶️ После загрузки публикация начнётся автоматически.\n"
+                "⏹ Для остановки отправьте /stop"
+            )
+            return jsonify({"ok": True}), 200
+
+        # ========== ОСТАНОВКА ==========
+        if text and text.strip() == '/stop':
+            user_publications[user_id] = False
+            send_message(user_id, "⏹️ Публикация остановлена.")
             return jsonify({"ok": True}), 200
 
         # ========== ОБРАБОТКА ФАЙЛА ==========
-        if file_id and user_states.get(user_id) == 'waiting_file':
-            send_message(user_id, "📥 Получаю файл...")
+        if file_id:
             content = download_public_file(file_id)
             if content:
                 links = parse_links_file(content)
                 if links:
                     user_links[user_id] = links
-                    send_message(user_id, f"✅ Получено {len(links)} ссылок. Нажмите 'Опубликовать' для старта.")
+                    send_message(user_id, f"✅ Получено {len(links)} ссылок. Начинаю публикацию...")
+                    user_publications[user_id] = True
+                    start_publication(user_id, links)
                 else:
                     send_message(user_id, "❌ Ссылок не найдено")
             else:
                 send_message(user_id, "❌ Не удалось прочитать файл")
-            user_states[user_id] = None
             return jsonify({"ok": True}), 200
 
         return jsonify({"ok": True}), 200
