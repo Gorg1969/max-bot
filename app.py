@@ -7,6 +7,7 @@ import time
 import re
 import random
 import urllib3
+from modules import GoogleDrive, Publisher, Scheduler, UserState
 
 # ОТКЛЮЧАЕМ ПРЕДУПРЕЖДЕНИЯ SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -19,136 +20,60 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("TOKEN") or os.environ.get("MAX_BOT_TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
 
-# ========== НАСТРОЙКИ ТАЙМИНГОВ ==========
-TIMING = {
-    "min_delay": 60,
-    "max_delay": 180,
-    "batch_size": 10,
-    "batch_pause": 300,
-}
+# ========== ИНИЦИАЛИЗАЦИЯ МОДУЛЕЙ ==========
+drive = GoogleDrive()
+scheduler = Scheduler()
+user_state = UserState()
 
-# ========== ХРАНИЛИЩЕ ==========
-user_publications = {}
+# ========== API КЛИЕНТ ==========
+class MaxAPIClient:
+    def __init__(self):
+        self.base_url = BASE_URL
+        self.token = TOKEN
+    
+    def send_message(self, user_id, text, format="markdown"):
+        try:
+            payload = {"text": text, "format": format}
+            response = requests.post(
+                f"{self.base_url}/messages",
+                headers={"Authorization": self.token, "Content-Type": "application/json"},
+                params={"user_id": user_id},
+                json=payload,
+                timeout=30,
+                verify=False
+            )
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки: {e}")
+            return False
 
-# ========== ОТПРАВКА СООБЩЕНИЙ ==========
-def send_message(user_id, text):
-    try:
-        payload = {"text": text, "format": "markdown"}
-        response = requests.post(
-            f"{BASE_URL}/messages",
-            headers={"Authorization": TOKEN, "Content-Type": "application/json"},
-            params={"user_id": user_id},
-            json=payload,
-            timeout=30,
-            verify=False
-        )
-        return response.status_code == 200
-    except Exception as e:
-        logger.error(f"❌ Ошибка отправки: {e}")
-        return False
+api_client = MaxAPIClient()
 
-# ========== ИЗВЛЕЧЕНИЕ ID ПАПКИ (БЕЗ API) ==========
-def extract_folder_id_from_url(url):
-    """Извлечение ID папки из ссылки Google Drive"""
-    patterns = [
-        r'folders/([a-zA-Z0-9_-]+)',
-        r'id=([a-zA-Z0-9_-]+)',
-        r'([a-zA-Z0-9_-]{28,})'
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            folder_id = match.group(1)
-            logger.info(f"✅ Извлечён ID: {folder_id}")
-            return folder_id
-    return None
+# ========== ФУНКЦИИ ДЛЯ РАБОТЫ СО ССЫЛКАМИ ==========
+def parse_links_from_string(text):
+    pattern = r'https://drive\.google\.com/drive/folders/[a-zA-Z0-9_-]+'
+    return re.findall(pattern, text)
 
 def extract_group_id(folder_name):
     match = re.search(r'-(\d+)', folder_name)
-    if match:
-        return match.group(1)
-    return None
+    return match.group(1) if match else None
 
-# ========== ПАРСИНГ СТРОКИ СО ССЫЛКАМИ ==========
-def parse_links_from_string(text):
-    pattern = r'https://drive\.google\.com/drive/folders/[a-zA-Z0-9_-]+'
-    links = re.findall(pattern, text)
-    return links
-
-# ========== ПОЛУЧЕНИЕ ФАЙЛОВ ИЗ ПАПКИ ==========
-def get_public_files(folder_id):
+def get_folder_name(folder_id):
+    """Получение названия папки по ID"""
     try:
         url = f"https://drive.google.com/drive/folders/{folder_id}"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         
-        file_pattern = r'https://drive.google.com/file/d/([a-zA-Z0-9_-]+)/view[^"]*'
-        file_ids = re.findall(file_pattern, response.text)
-        
-        name_pattern = r'<span class="[^"]*">([^<]+\.(jpg|jpeg|png|gif|txt|md))</span>'
+        name_pattern = r'<span class="[^"]*">([^<]+)</span>'
         names = re.findall(name_pattern, response.text)
-        
-        files = []
-        for i, file_id in enumerate(file_ids):
-            name = names[i][0] if i < len(names) else f"file_{file_id}"
-            files.append({'id': file_id, 'name': name})
-        return files
+        return names[0] if names else "Неизвестная папка"
     except Exception as e:
-        logger.error(f"❌ Ошибка получения файлов: {e}")
-        return []
+        logger.error(f"❌ Ошибка получения названия: {e}")
+        return "Неизвестная папка"
 
-def download_public_file(file_id):
-    try:
-        url = f"https://drive.google.com/uc?export=download&id={file_id}"
-        response = requests.get(url, timeout=10)
-        return response.text
-    except Exception as e:
-        logger.error(f"❌ Ошибка скачивания: {e}")
-        return None
-
-# ========== ПУБЛИКАЦИЯ ПАПКИ ==========
-def publish_folder_by_link(folder_url, group_id, post_number=None, total_posts=None):
-    try:
-        folder_id = extract_folder_id_from_url(folder_url)
-        if not folder_id:
-            return False, "Не удалось извлечь ID папки"
-        
-        logger.info(f"📤 Публикация {folder_url} -> {group_id}")
-        
-        files = get_public_files(folder_id)
-        if not files:
-            return False, "Нет файлов в папке"
-        
-        info_file = None
-        for f in files:
-            if f['name'].lower() in ['info.txt', 'info.md']:
-                info_file = f
-                break
-        
-        if not info_file:
-            return False, "Нет info.txt"
-        
-        info_text = download_public_file(info_file['id'])
-        if not info_text:
-            return False, "Не удалось скачать info.txt"
-        
-        if info_text:
-            if post_number and total_posts:
-                header = f"📝 **Пост {post_number}/{total_posts}**\n\n"
-                send_message(group_id, header + info_text)
-            else:
-                send_message(group_id, info_text)
-        
-        images = [f for f in files if f['name'].lower().endswith(('.jpg', '.jpeg', '.png', '.gif'))][:10]
-        for image in images:
-            send_message(group_id, f"📷 {image['name']}\n🔗 https://drive.google.com/file/d/{image['id']}/view")
-        
-        return True, "Успешно"
-    except Exception as e:
-        return False, str(e)
-
-# ========== ЗАПУСК ПУБЛИКАЦИИ ==========
+# ========== ПУБЛИКАЦИЯ ==========
 def start_publication(user_id, links):
     logger.info(f"🚀 Запуск публикации для {user_id}, ссылок: {len(links)}")
     
@@ -156,43 +81,31 @@ def start_publication(user_id, links):
     errors = []
     
     for i, folder_url in enumerate(links):
-        # Извлекаем ID
-        folder_id = extract_folder_id_from_url(folder_url)
+        folder_id = drive.extract_folder_id(folder_url)
         if not folder_id:
             errors.append(f"Ссылка {i+1}: не удалось извлечь ID")
             continue
         
-        # Получаем название папки
-        try:
-            url = f"https://drive.google.com/drive/folders/{folder_id}"
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            
-            name_pattern = r'<span class="[^"]*">([^<]+)</span>'
-            names = re.findall(name_pattern, response.text)
-            folder_name = names[0] if names else f"Папка {i+1}"
-        except:
-            folder_name = f"Папка {i+1}"
-        
+        folder_name = get_folder_name(folder_id)
         group_id = extract_group_id(folder_name)
+        
         if not group_id:
             errors.append(f"Ссылка {i+1}: нет ID группы в названии '{folder_name}'")
             continue
         
         folders_to_publish.append({
             'url': folder_url,
+            'id': folder_id,
             'name': folder_name,
             'group_id': group_id
         })
     
     if not folders_to_publish:
-        send_message(user_id, "❌ Не найдено папок с ID групп для публикации.")
+        api_client.send_message(user_id, "❌ Не найдено папок с ID групп для публикации.")
         return
     
     total = len(folders_to_publish)
-    logger.info(f"📊 Всего папок для публикации: {total}")
-    send_message(user_id, f"✅ Найдено {total} папок с ID групп. Начинаю публикацию...")
+    api_client.send_message(user_id, f"✅ Найдено {total} папок. Начинаю публикацию...")
     
     published = 0
     publication_errors = []
@@ -201,25 +114,21 @@ def start_publication(user_id, links):
     for folder in folders_to_publish:
         post_number += 1
         
-        if not user_publications.get(user_id, True):
-            send_message(user_id, "⏹️ Публикация остановлена.")
+        if not user_state.is_publication_active(user_id):
+            api_client.send_message(user_id, "⏹️ Публикация остановлена.")
             break
         
         if post_number > 1:
-            delay = random.randint(TIMING["min_delay"], TIMING["max_delay"])
+            delay = random.randint(60, 180)
             logger.info(f"⏳ Задержка {delay} сек. перед постом {post_number}")
             time.sleep(delay)
         
-        if (post_number - 1) % TIMING["batch_size"] == 0 and post_number > 1:
-            logger.info(f"⏳ Пауза {TIMING['batch_pause']} сек.")
-            time.sleep(TIMING["batch_pause"])
+        if (post_number - 1) % 10 == 0 and post_number > 1:
+            logger.info("⏳ Пауза 5 минут")
+            time.sleep(300)
         
-        success, msg = publish_folder_by_link(
-            folder['url'], 
-            folder['group_id'], 
-            post_number, 
-            total
-        )
+        # Публикуем папку
+        success, msg = drive.publish_folder(folder['id'], folder['group_id'], post_number, total)
         if success:
             published += 1
             logger.info(f"✅ Опубликовано: {folder['name']}")
@@ -227,14 +136,15 @@ def start_publication(user_id, links):
             publication_errors.append(f"{folder['name']}: {msg}")
             logger.error(f"❌ Ошибка: {folder['name']} - {msg}")
     
+    # Итог
     result_msg = f"✅ **ПУБЛИКАЦИЯ ЗАВЕРШЕНА!**\n\n📊 Всего папок: {total}\n✅ Опубликовано: {published}\n❌ Ошибок: {len(publication_errors)}"
     if publication_errors:
         result_msg += "\n\n⚠️ Ошибки:\n" + "\n".join(publication_errors[:5])
         if len(publication_errors) > 5:
             result_msg += f"\n... и ещё {len(publication_errors) - 5} ошибок"
     
-    send_message(user_id, result_msg)
-    logger.info(f"🏁 Публикация завершена для {user_id}")
+    api_client.send_message(user_id, result_msg)
+    user_state.stop_publication(user_id)
 
 # ========== ЭНДПОИНТЫ ==========
 
@@ -292,7 +202,7 @@ def webhook():
         logger.info(f"💬 user_id={user_id}, text={text}")
 
         if text and text.strip() == '/start':
-            send_message(
+            api_client.send_message(
                 user_id,
                 "🏠 **Главное меню**\n\n"
                 "📄 **Отправьте ссылки на папки** (через запятую или с новой строки).\n"
@@ -305,17 +215,17 @@ def webhook():
             return jsonify({"ok": True}), 200
 
         if text and text.strip() == '/stop':
-            user_publications[user_id] = False
-            send_message(user_id, "⏹️ Публикация остановлена.")
+            user_state.stop_publication(user_id)
+            api_client.send_message(user_id, "⏹️ Публикация остановлена.")
             return jsonify({"ok": True}), 200
 
         if text and 'drive.google.com' in text:
             links = parse_links_from_string(text)
             if links:
-                user_publications[user_id] = True
+                user_state.start_publication(user_id)
                 start_publication(user_id, links)
             else:
-                send_message(user_id, "❌ Ссылок не найдено")
+                api_client.send_message(user_id, "❌ Ссылок не найдено")
             return jsonify({"ok": True}), 200
 
         return jsonify({"ok": True}), 200
