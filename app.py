@@ -47,28 +47,21 @@ def send_message(user_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
         return False
 
-# ========== ИЗВЛЕЧЕНИЕ ID ЧЕРЕЗ API ==========
+# ========== ИЗВЛЕЧЕНИЕ ID ПАПКИ (БЕЗ API) ==========
 def extract_folder_id_from_url(url):
-    """Извлечение ID папки через бесплатный API"""
-    api_url = "https://universal-google-drive-id-extractor.vercel.app/"
-    
-    try:
-        response = requests.post(api_url, json={"url": url}, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            folder_id = data.get('id')
-            if folder_id:
-                logger.info(f"✅ API извлёк ID: {folder_id}")
-                return folder_id
-            else:
-                logger.warning(f"⚠️ API не вернул ID для: {url}")
-                return None
-        else:
-            logger.error(f"❌ Ошибка API: {response.status_code} - {response.text}")
-            return None
-    except Exception as e:
-        logger.error(f"❌ Ошибка подключения к API: {e}")
-        return None
+    """Извлечение ID папки из ссылки Google Drive"""
+    patterns = [
+        r'folders/([a-zA-Z0-9_-]+)',
+        r'id=([a-zA-Z0-9_-]+)',
+        r'([a-zA-Z0-9_-]{28,})'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            folder_id = match.group(1)
+            logger.info(f"✅ Извлечён ID: {folder_id}")
+            return folder_id
+    return None
 
 def extract_group_id(folder_name):
     match = re.search(r'-(\d+)', folder_name)
@@ -163,7 +156,7 @@ def start_publication(user_id, links):
     errors = []
     
     for i, folder_url in enumerate(links):
-        # Получаем ID папки через API
+        # Извлекаем ID
         folder_id = extract_folder_id_from_url(folder_url)
         if not folder_id:
             errors.append(f"Ссылка {i+1}: не удалось извлечь ID")
