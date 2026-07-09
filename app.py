@@ -66,7 +66,6 @@ class APIClient:
             return False
     
     def send_message_to_chat_with_attachments(self, chat_id, text, attachments):
-        """Отправка сообщения с вложениями (изображениями)"""
         try:
             payload = {
                 "text": text,
@@ -82,7 +81,6 @@ class APIClient:
                 verify=False
             )
             if response.status_code == 200:
-                logger.info(f"✅ Сообщение с вложениями отправлено в чат {chat_id}")
                 return True
             else:
                 logger.error(f"❌ Ошибка отправки с вложениями: {response.status_code} - {response.text}")
@@ -98,6 +96,11 @@ web = WebInterface(fm, publisher)
 @app.route('/')
 def index():
     return "🤖 MAX Bot is running!"
+
+@app.route('/help')
+def help_page():
+    """Страница помощи"""
+    return web.help_page()
 
 @app.route('/upload', methods=['GET', 'POST'])
 def upload_file():
@@ -196,6 +199,7 @@ def webhook():
                 "• Формат: `.zip`\n"
                 "• Внутри папки с ID групп: `Название -123456789`\n"
                 "• В каждой папке: `info.txt` и изображения\n\n"
+                "📖 [Инструкция](https://maxbot.bothost.tech/help)\n\n"
                 "⏹ Для остановки публикации отправьте `/stop`"
             )
             return jsonify({"ok": True}), 200
