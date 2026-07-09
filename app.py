@@ -61,8 +61,8 @@ def extract_folder_id_from_url(url):
             return match.group(1)
     return None
 
-def get_subfolders_from_public_folder(folder_id):
-    """Получение списка подпапок в публичной папке"""
+def get_subfolders_recursive(folder_id, depth=0, max_depth=5):
+    """Рекурсивное получение всех подпапок с ID групп"""
     try:
         url = f"https://drive.google.com/drive/folders/{folder_id}"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
@@ -79,31 +79,31 @@ def get_subfolders_from_public_folder(folder_id):
         name_pattern = r'<span class="[^"]*">([^<]+)</span>'
         names = re.findall(name_pattern, response.text)
         
-        subfolders = []
+        result = []
         for i, fid in enumerate(folder_ids):
-            # Пытаемся получить имя из разных источников
-            if i < len(names):
-                name = names[i]
-            else:
-                name = f"Папка {i+1}"
+            name = names[i] if i < len(names) else f"Папка {i+1}"
             
-            subfolders.append({
-                'id': fid,
-                'name': name
-            })
+            # Проверяем, есть ли в названии ID группы
+            if re.search(r'-(\d+)', name):
+                # Есть ID группы — добавляем
+                result.append({'id': fid, 'name': name})
+                logger.info(f"📁 Найдена папка с ID: {name}")
+            else:
+                # Нет ID группы — заходим внутрь (рекурсия)
+                if depth < max_depth:
+                    logger.info(f"📂 Захожу в папку: {name} (глубина {depth+1})")
+                    deeper = get_subfolders_recursive(fid, depth + 1, max_depth)
+                    result.extend(deeper)
+                else:
+                    logger.warning(f"⚠️ Максимальная глубина достигнута в папке: {name}")
         
-        logger.info(f"📁 Найдено подпапок: {len(subfolders)}")
-        for sf in subfolders:
-            logger.info(f"  - {sf['name']} (ID: {sf['id']})")
-        
-        return subfolders
+        return result
     except Exception as e:
         logger.error(f"❌ Ошибка получения подпапок: {e}")
         return []
 
 def extract_group_id(folder_name):
     """Извлечение ID группы из названия папки"""
-    # Ищем минус и цифры после него
     match = re.search(r'-(\d+)', folder_name)
     if match:
         group_id = match.group(1)
@@ -219,10 +219,10 @@ def start_publication(user_id, folder_url):
     
     api_client.send_message(user_id, f"✅ **Папка принята!**\n\n📁 ID: `{folder_id}`\n⏳ Получаю список подпапок...")
     
-    # 2. Получаем список подпапок
-    subfolders = get_subfolders_from_public_folder(folder_id)
+    # 2. Получаем список подпапок (рекурсивно)
+    subfolders = get_subfolders_recursive(folder_id)
     if not subfolders:
-        api_client.send_message(user_id, "❌ В корневой папке нет подпапок.")
+        api_client.send_message(user_id, "❌ Не найдено папок с ID групп.")
         return
     
     # Логируем все найденные папки
@@ -236,7 +236,7 @@ def start_publication(user_id, folder_url):
     
     api_client.send_message(
         user_id,
-        f"✅ **Найдено папок: {len(subfolders)}**\n\n"
+        f"✅ **Найдено папок с ID групп: {len(subfolders)}**\n\n"
         f"📁 Начинаю публикацию...\n"
         f"⏳ Это займёт некоторое время."
     )
