@@ -2,7 +2,6 @@ import os
 import zipfile
 import shutil
 import re
-import requests
 import logging
 
 logger = logging.getLogger(__name__)
@@ -47,8 +46,12 @@ class FileManager:
         return subfolders
     
     def extract_group_id(self, folder_name):
+        """Извлечение ID группы из названия папки (с минусом!)"""
         match = re.search(r'-(\d+)', folder_name)
-        return match.group(1) if match else None
+        if match:
+            # Возвращаем ID с минусом (как в MAX)
+            return f"-{match.group(1)}"
+        return None
     
     def extract_folder_id_from_url(self, url):
         patterns = [
