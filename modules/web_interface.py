@@ -4,131 +4,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# ========== СТРАНИЦА ПОМОЩИ (HTML) ==========
-HELP_PAGE = """
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Помощь - MAX Bot</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 800px;
-            margin: 50px auto;
-            padding: 20px;
-            background: #f5f5f5;
-        }
-        .container {
-            background: white;
-            padding: 30px;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        h1 { color: #333; }
-        h2 { color: #4CAF50; margin-top: 30px; }
-        .step {
-            background: #e8f4f8;
-            padding: 15px;
-            border-radius: 5px;
-            margin: 15px 0;
-        }
-        .step code {
-            background: #d0e4ed;
-            padding: 2px 6px;
-            border-radius: 3px;
-        }
-        .example {
-            background: #f0f0f0;
-            padding: 15px;
-            border-radius: 5px;
-            margin: 10px 0;
-            font-family: monospace;
-            white-space: pre-wrap;
-        }
-        .footer {
-            text-align: center;
-            margin-top: 30px;
-            font-size: 12px;
-            color: #999;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>📖 Помощь</h1>
-        
-        <h2>📌 Как пользоваться ботом</h2>
-        
-        <div class="step">
-            <strong>Шаг 1: Подготовьте архив</strong><br>
-            • Формат: <code>.zip</code><br>
-            • Внутри папки с названиями: <code>Название -123456789</code><br>
-            • В каждой папке: <code>info.txt</code> и изображения<br>
-            • <strong>Важно!</strong> ID группы в названии папки должен быть правильным.
-        </div>
-        
-        <div class="step">
-            <strong>Шаг 2: Загрузите архив</strong><br>
-            • Откройте веб-интерфейс: <a href="/upload">/upload</a><br>
-            • Нажмите "Выбрать файл" и выберите архив<br>
-            • Нажмите "Загрузить и опубликовать"
-        </div>
-        
-        <div class="step">
-            <strong>Шаг 3: Ожидайте публикации</strong><br>
-            • Бот автоматически найдёт папки с ID групп<br>
-            • Публикация идёт с задержкой 1-3 минуты между постами<br>
-            • После 10 постов — пауза 5 минут<br>
-            • Вы получите уведомление о завершении
-        </div>
-        
-        <h2>📝 Форматирование текста (Markdown)</h2>
-        
-        <div class="example">
-<strong>Жирный</strong>: **текст** или __текст__<br>
-<em>Курсив</em>: *текст* или _текст_<br>
-<ins>Подчёркнутый</ins>: ++текст++<br>
-<del>Зачёркнутый</del>: ~~текст~~<br>
-<mark>Выделенный</mark>: ^^текст^^<br>
-<code>Моноширинный</code>: `код`<br>
-<strong>Гиперссылка</strong>: [Текст ссылки](https://example.com)<br>
-<strong>Изображение</strong>: ![Описание](https://example.com/image.jpg)<br>
-<strong>Заголовок</strong>: # Заголовок<br>
-<blockquote>Цитата: > Текст цитаты</blockquote>
-        </div>
-        
-        <div class="step">
-            <strong>Пример info.txt с Markdown:</strong>
-            <div class="example">
-**Самосвал Howo T5G 8x4**
-
-*Дизельный, 10,5 л, 440 л.с., МТ*
-
-**Цена:** 4 781 000 руб с НДС
-
-**Пробег:** 184 179 км  
-**Год:** 2023  
-**Место:** Уфа, ул. Рассветная, д 77/3
-
-[Подробнее на сайте](https://example.com)
-            </div>
-        </div>
-        
-        <h2>⏹ Остановка публикации</h2>
-        <div class="step">
-            Отправьте боту команду <code>/stop</code> в MAX.
-        </div>
-        
-        <div class="footer">
-            MAX Bot v1.0 | © 2026
-        </div>
-    </div>
-</body>
-</html>
-"""
-
 UPLOAD_HTML = """
 <!DOCTYPE html>
 <html lang="ru">
@@ -159,16 +34,23 @@ UPLOAD_HTML = """
             font-size: 14px;
         }
         .info code { background: #d0e4ed; padding: 2px 6px; border-radius: 3px; }
-        .file-input-wrapper { margin: 20px 0; }
-        .file-input-wrapper input[type="file"] {
-            display: block;
-            width: 100%;
-            padding: 10px;
+        .file-input-wrapper {
+            margin: 20px 0;
+            padding: 30px;
             border: 2px dashed #ccc;
-            border-radius: 5px;
+            border-radius: 10px;
+            text-align: center;
             cursor: pointer;
         }
-        .file-input-wrapper input[type="file"]:hover { border-color: #4CAF50; }
+        .file-input-wrapper:hover { border-color: #4CAF50; }
+        .file-input-wrapper input[type="file"] {
+            display: none;
+        }
+        .file-input-wrapper label {
+            cursor: pointer;
+            font-size: 16px;
+            color: #666;
+        }
         .btn {
             display: block;
             width: 100%;
@@ -179,6 +61,7 @@ UPLOAD_HTML = """
             border-radius: 5px;
             font-size: 16px;
             cursor: pointer;
+            margin-top: 10px;
         }
         .btn:hover { background: #45a049; }
         .btn:disabled { background: #ccc; cursor: not-allowed; }
@@ -189,7 +72,6 @@ UPLOAD_HTML = """
         .footer { text-align: center; margin-top: 20px; font-size: 12px; color: #999; }
         .help-link { text-align: center; margin-top: 15px; }
         .help-link a { color: #4CAF50; text-decoration: none; }
-        .help-link a:hover { text-decoration: underline; }
     </style>
 </head>
 <body>
@@ -203,12 +85,13 @@ UPLOAD_HTML = """
             • <strong>Ограничений на размер нет</strong>
         </div>
         
-        <form id="uploadForm" enctype="multipart/form-data">
-            <div class="file-input-wrapper">
-                <input type="file" id="fileInput" name="file" accept=".zip" required>
-            </div>
-            <button type="submit" class="btn" id="submitBtn">📤 Загрузить и опубликовать</button>
-        </form>
+        <div class="file-input-wrapper" onclick="document.getElementById('fileInput').click()">
+            <input type="file" id="fileInput" name="file" accept=".zip">
+            <label for="fileInput">📂 <strong>Выберите ZIP-архив</strong><br>
+            <span style="font-size: 14px; color: #999;">(просто нажмите и выберите файл)</span></label>
+        </div>
+        
+        <button class="btn" id="submitBtn" disabled>📤 Загрузить и опубликовать</button>
         
         <div id="status" class="status"></div>
         
@@ -220,15 +103,27 @@ UPLOAD_HTML = """
     </div>
 
     <script>
-        document.getElementById('uploadForm').addEventListener('submit', async function(e) {
-            e.preventDefault();
-            
-            const fileInput = document.getElementById('fileInput');
+        document.getElementById('fileInput').addEventListener('change', function() {
+            const file = this.files[0];
             const submitBtn = document.getElementById('submitBtn');
             const statusDiv = document.getElementById('status');
             
+            if (file) {
+                submitBtn.disabled = false;
+                showStatus('✅ Выбран файл: ' + file.name + ' (' + (file.size / 1024 / 1024).toFixed(1) + ' МБ)', 'info');
+            } else {
+                submitBtn.disabled = true;
+                showStatus('', '');
+            }
+        });
+        
+        document.getElementById('submitBtn').addEventListener('click', async function() {
+            const fileInput = document.getElementById('fileInput');
+            const submitBtn = this;
+            const statusDiv = document.getElementById('status');
+            
             if (!fileInput.files.length) {
-                showStatus('Выберите файл для загрузки', 'error');
+                showStatus('❌ Выберите файл для загрузки', 'error');
                 return;
             }
             
@@ -270,7 +165,7 @@ UPLOAD_HTML = """
         function showStatus(message, type) {
             const statusDiv = document.getElementById('status');
             statusDiv.textContent = message;
-            statusDiv.className = 'status ' + type;
+            statusDiv.className = 'status ' + (type || '');
         }
     </script>
 </body>
@@ -284,9 +179,6 @@ class WebInterface:
     
     def upload_page(self):
         return render_template_string(UPLOAD_HTML)
-    
-    def help_page(self):
-        return render_template_string(HELP_PAGE)
     
     def upload_file(self, request, user_id):
         if 'file' not in request.files:
