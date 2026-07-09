@@ -10,7 +10,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 # Снимаем ограничение на размер файла
-app.config['MAX_CONTENT_LENGTH'] = None  # Без ограничений
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024 * 2  # 2 ГБ
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,7 +36,11 @@ class APIClient:
                 timeout=30,
                 verify=False
             )
-            return response.status_code == 200
+            if response.status_code == 200:
+                return True
+            else:
+                logger.error(f"❌ Ошибка отправки: {response.status_code} - {response.text}")
+                return False
         except Exception as e:
             logger.error(f"❌ Ошибка отправки: {e}")
             return False
@@ -57,20 +61,28 @@ def upload_file():
     if request.method == 'GET':
         return web.upload_page()
     
-    # POST — обработка загрузки
+    # ========== POST — обработка загрузки ==========
     try:
-        # Временно используем фиксированный user_id (можно доработать)
+        # Проверяем, что это multipart/form-data
+        if not request.files:
+            logger.error("❌ Нет файлов в запросе")
+            return jsonify({'success': False, 'message': 'Файл не найден'}), 400
+        
+        # Временно используем фиксированный user_id
         user_id = 151296248
         
         if 'file' not in request.files:
-            return jsonify({'success': False, 'message': 'Файл не выбран'})
+            logger.error("❌ Нет поля 'file' в запросе")
+            return jsonify({'success': False, 'message': 'Файл не выбран'}), 400
         
         file = request.files['file']
         if file.filename == '':
-            return jsonify({'success': False, 'message': 'Файл не выбран'})
+            logger.error("❌ Пустое имя файла")
+            return jsonify({'success': False, 'message': 'Файл не выбран'}), 400
         
-        if not file.filename.endswith('.zip'):
-            return jsonify({'success': False, 'message': 'Файл должен быть в формате .zip'})
+        if not file.filename.lower().endswith('.zip'):
+            logger.error(f"❌ Неверный формат: {file.filename}")
+            return jsonify({'success': False, 'message': 'Файл должен быть в формате .zip'}), 400
         
         # Сохраняем файл
         user_folder = fm.get_user_folder(user_id)
@@ -86,11 +98,11 @@ def upload_file():
             return jsonify({'success': True, 'message': 'Архив распакован. Публикация началась!'})
         else:
             fm.clear_user_data(user_id)
-            return jsonify({'success': False, 'message': 'Ошибка распаковки архива'})
+            return jsonify({'success': False, 'message': 'Ошибка распаковки архива'}), 500
             
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки: {e}")
-        return jsonify({'success': False, 'message': f'Ошибка: {str(e)}'})
+        return jsonify({'success': False, 'message': f'Ошибка: {str(e)}'}), 500
 
 @app.route('/health')
 def health():
