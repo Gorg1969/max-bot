@@ -21,16 +21,15 @@ BASE_URL = "https://platform-api2.max.ru"
 
 # ========== НАСТРОЙКИ ТАЙМИНГОВ ==========
 TIMING = {
-    "min_delay": 60,            # 1 минута
-    "max_delay": 180,           # 3 минуты
-    "batch_size": 10,           # 10 постов
-    "batch_pause": 300,         # 5 минут
+    "min_delay": 60,
+    "max_delay": 180,
+    "batch_size": 10,
+    "batch_pause": 300,
 }
 
 # ========== ХРАНИЛИЩЕ ==========
-user_states = {}
-user_publications = {}
 user_links = {}
+user_publications = {}
 
 # ========== ОТПРАВКА СООБЩЕНИЙ ==========
 def send_message(user_id, text):
@@ -67,6 +66,13 @@ def extract_group_id(folder_name):
     if match:
         return match.group(1)
     return None
+
+# ========== ПАРСИНГ СТРОКИ СО ССЫЛКАМИ ==========
+def parse_links_from_string(text):
+    """Парсинг ссылок из строки (через запятую, пробел или новую строку)"""
+    pattern = r'https://drive\.google\.com/drive/folders/[a-zA-Z0-9_-]+'
+    links = re.findall(pattern, text)
+    return links
 
 # ========== ПОЛУЧЕНИЕ ФАЙЛОВ ==========
 def get_public_files(folder_id):
@@ -235,7 +241,6 @@ def start_publication(user_id, links):
         else:
             publication_errors.append(f"{subfolder['name']}: {msg}")
     
-    # ========== ИТОГОВОЕ СООБЩЕНИЕ (ТОЛЬКО ОН!) ==========
     result_msg = f"✅ **ПУБЛИКАЦИЯ ЗАВЕРШЕНА!**\n\n📊 Всего папок: {total}\n✅ Опубликовано: {published}\n❌ Ошибок: {len(publication_errors)}"
     if publication_errors:
         result_msg += "\n\n⚠️ Ошибки:\n" + "\n".join(publication_errors[:5])
@@ -287,33 +292,28 @@ def webhook():
 
         user_id = None
         text = None
-        file_id = None
         
-        # ========== ПАРСИНГ ==========
         if 'message' in data:
             msg = data['message']
             if 'sender' in msg:
                 user_id = msg['sender'].get('user_id')
             if 'body' in msg:
-                body = msg['body']
-                text = body.get('text')
-                if 'attachments' in body:
-                    for att in body['attachments']:
-                        if att.get('type') == 'file':
-                            file_id = att.get('payload', {}).get('id')
+                text = msg['body'].get('text')
         
         if not user_id:
             return jsonify({"ok": True}), 200
 
-        logger.info(f"💬 user_id={user_id}, text={text}, file_id={file_id}")
+        logger.info(f"💬 user_id={user_id}, text={text}")
 
         # ========== КОМАНДА /start ==========
         if text and text.strip() == '/start':
             send_message(
                 user_id,
                 "🏠 **Главное меню**\n\n"
-                "📄 Отправьте файл .txt со ссылками на папки.\n"
+                "📄 **Отправьте ссылку на файл .txt** со ссылками на папки.\n"
                 "Каждая ссылка на новой строке.\n\n"
+                "📌 **Или отправьте ссылки одной строкой через запятую:**\n"
+                "`https://drive.google.com/drive/folders/ABC123, https://drive.google.com/drive/folders/DEF456`\n\n"
                 "▶️ После загрузки публикация начнётся автоматически.\n"
                 "⏹ Для остановки отправьте /stop"
             )
@@ -325,20 +325,30 @@ def webhook():
             send_message(user_id, "⏹️ Публикация остановлена.")
             return jsonify({"ok": True}), 200
 
-        # ========== ОБРАБОТКА ФАЙЛА ==========
-        if file_id:
-            content = download_public_file(file_id)
-            if content:
-                links = parse_links_file(content)
-                if links:
-                    user_links[user_id] = links
-                    send_message(user_id, f"✅ Получено {len(links)} ссылок. Начинаю публикацию...")
-                    user_publications[user_id] = True
-                    start_publication(user_id, links)
-                else:
-                    send_message(user_id, "❌ Ссылок не найдено")
+        # ========== ОБРАБОТКА ССЫЛОК ==========
+        if text and 'drive.google.com' in text:
+            # Пробуем как ссылку на файл
+            file_id = extract_folder_id_from_url(text)
+            if file_id:
+                content = download_public_file(file_id)
+                if content:
+                    links = parse_links_file(content)
+                    if links:
+                        user_links[user_id] = links
+                        send_message(user_id, f"✅ Получено {len(links)} ссылок. Начинаю публикацию...")
+                        user_publications[user_id] = True
+                        start_publication(user_id, links)
+                        return jsonify({"ok": True}), 200
+            
+            # Если не файл — парсим строку
+            links = parse_links_from_string(text)
+            if links:
+                user_links[user_id] = links
+                send_message(user_id, f"✅ Получено {len(links)} ссылок. Начинаю публикацию...")
+                user_publications[user_id] = True
+                start_publication(user_id, links)
             else:
-                send_message(user_id, "❌ Не удалось прочитать файл")
+                send_message(user_id, "❌ Ссылок не найдено")
             return jsonify({"ok": True}), 200
 
         return jsonify({"ok": True}), 200
