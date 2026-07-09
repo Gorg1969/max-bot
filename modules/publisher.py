@@ -4,6 +4,7 @@ import os
 import shutil
 import logging
 import sys
+import re
 
 if sys.platform == 'linux':
     sys.stdout.reconfigure(encoding='utf-8')
@@ -24,6 +25,7 @@ class Publisher:
             info_file = None
             images = []
             
+            # Сканируем папку
             for f in os.listdir(folder_path):
                 file_path = os.path.join(folder_path, f)
                 if os.path.isfile(file_path):
@@ -39,6 +41,7 @@ class Publisher:
                 logger.warning(f"⚠️ Нет info.txt в папке {folder_path}")
                 return False, "Нет info.txt"
             
+            # Читаем info.txt
             try:
                 with open(info_file, 'r', encoding='utf-8') as f:
                     info_text = f.read()
@@ -46,32 +49,47 @@ class Publisher:
                 with open(info_file, 'r', encoding='cp1251') as f:
                     info_text = f.read()
             
-            if info_text:
-                if post_number and total_posts:
-                    header = f"📝 **Пост {post_number}/{total_posts}**\n\n"
-                    full_text = header + info_text
-                else:
-                    full_text = info_text
-                
-                logger.info(f"📤 Отправка текста в группу {group_id}")
-                # ✅ ИСПРАВЛЕНО: используем chat_id, а не user_id
-                result = self.api.send_message_to_chat(group_id, full_text)
-                if not result:
-                    logger.error(f"❌ Не удалось отправить текст в группу {group_id}")
-                    return False, "Ошибка отправки текста"
-                else:
-                    logger.info(f"✅ Текст отправлен в группу {group_id}")
+            # Получаем прямые ссылки на изображения
+            image_urls = []
+            for image_path in images[:10]:  # Максимум 10 изображений
+                # Загружаем изображение на Google Drive или используем прямой путь
+                # Здесь мы используем прямой путь к файлу (он уже на сервере)
+                image_urls.append(image_path)
             
-            images = images[:10]
-            for image_path in images:
-                filename = os.path.basename(image_path)
-                logger.info(f"📤 Отправка изображения: {filename}")
-                # ✅ ИСПРАВЛЕНО: используем chat_id
-                result = self.api.send_message_to_chat(group_id, f"📷 {filename}")
-                if not result:
-                    logger.error(f"❌ Не удалось отправить изображение {filename}")
-                else:
-                    logger.info(f"✅ Изображение отправлено: {filename}")
+            # ========== ОТПРАВЛЯЕМ ВСЁ В ОДНОМ СООБЩЕНИИ ==========
+            
+            # Формируем текст
+            if post_number and total_posts:
+                full_text = f"📌 **Пост {post_number}/{total_posts}**\n\n{info_text}"
+            else:
+                full_text = info_text
+            
+            # Формируем вложения (изображения)
+            attachments = []
+            for image_path in image_urls:
+                # Используем прямую ссылку на файл
+                attachments.append({
+                    "type": "image",
+                    "payload": {
+                        "url": f"https://maxbot.bothost.tech/file/{os.path.basename(image_path)}"
+                        # ИЛИ можно использовать токен, если загружать через /uploads
+                    }
+                })
+            
+            # Отправляем одно сообщение с текстом и изображениями
+            logger.info(f"📤 Отправка сообщения в группу {group_id} с {len(attachments)} изображениями")
+            
+            result = self.api.send_message_to_chat_with_attachments(
+                chat_id=group_id,
+                text=full_text,
+                attachments=attachments
+            )
+            
+            if not result:
+                logger.error(f"❌ Не удалось отправить сообщение в группу {group_id}")
+                return False, "Ошибка отправки сообщения"
+            else:
+                logger.info(f"✅ Сообщение отправлено в группу {group_id}")
             
             return True, "Успешно"
         except Exception as e:
