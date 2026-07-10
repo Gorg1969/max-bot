@@ -1,254 +1,108 @@
-from flask import Flask, request, jsonify, session, redirect
-import requests
-import logging
 import os
-import urllib3
 import json
-from modules import Database, FileManager, Publisher, WebInterface, UserAuth, GoogleDrive
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import Flow
-from googleapiclient.discovery import build
+import logging
+import requests
+from flask import request, redirect, url_for
+from urllib.parse import urlencode
 
-# ОТКЛЮЧАЕМ ПРЕДУПРЕЖДЕНИЯ SSL
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")
-app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024 * 2
-
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TOKEN = os.environ.get("TOKEN") or os.environ.get("MAX_BOT_TOKEN")
-BASE_URL = "https://platform-api2.max.ru"
-DATA_DIR = "/app/data"
-CLIENT_SECRETS_FILE = "drive_keys.json"  # ← ЗДЕСЬ!
-
-db = Database()
-fm = FileManager(DATA_DIR)
-
-class APIClient:
-    def __init__(self):
-        self.token = TOKEN
+class UserAuth:
+    """Проверка пользователей и авторизация через Google OAuth"""
     
-    def send_message(self, user_id, text):
+    def __init__(self, db, client_id=None, client_secret=None, redirect_uri=None):
+        self.db = db  # ← Просто сохраняем db, не импортируем его
+        self.client_id = client_id or os.environ.get("GOOGLE_CLIENT_ID")
+        self.client_secret = client_secret or os.environ.get("GOOGLE_CLIENT_SECRET")
+        self.redirect_uri = redirect_uri or os.environ.get("OAUTH_REDIRECT_URI", "https://maxbot.bothost.tech/oauth2callback")
+        self.auth_url = "https://accounts.google.com/o/oauth2/auth"
+        self.token_url = "https://oauth2.googleapis.com/token"
+        self.scope = "https://www.googleapis.com/auth/drive.file"
+    
+    def get_authorization_url(self, user_id):
+        """Генерация ссылки для авторизации в Google"""
+        params = {
+            "client_id": self.client_id,
+            "redirect_uri": self.redirect_uri,
+            "response_type": "code",
+            "scope": self.scope,
+            "access_type": "offline",
+            "state": str(user_id),
+            "prompt": "consent"
+        }
+        return f"{self.auth_url}?{urlencode(params)}"
+    
+    def handle_oauth_callback(self, code, state):
+        """Обработка callback от Google после авторизации"""
         try:
-            payload = {"text": text, "format": "markdown"}
-            response = requests.post(
-                f"{BASE_URL}/messages",
-                headers={"Authorization": self.token, "Content-Type": "application/json"},
-                params={"user_id": user_id},
-                json=payload,
-                timeout=30,
-                verify=False
-            )
-            return response.status_code == 200
+            data = {
+                "code": code,
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+                "redirect_uri": self.redirect_uri,
+                "grant_type": "authorization_code"
+            }
+            response = requests.post(self.token_url, data=data, timeout=30)
+            
+            if response.status_code != 200:
+                logger.error(f"❌ Ошибка получения токена: {response.text}")
+                return None
+            
+            token_data = response.json()
+            user_id = int(state) if state else None
+            
+            if user_id:
+                self.db.save_user_token(
+                    user_id=user_id,
+                    access_token=token_data.get("access_token"),
+                    refresh_token=token_data.get("refresh_token"),
+                    expires_in=token_data.get("expires_in"),
+                    token_type=token_data.get("token_type")
+                )
+                logger.info(f"✅ Пользователь {user_id} успешно авторизован")
+                return token_data
+            
+            return None
         except Exception as e:
-            logger.error(f"❌ Ошибка отправки: {e}")
-            return False
-
-api = APIClient()
-publisher = Publisher(api, fm, db)
-web = WebInterface(fm, publisher)
-user_auth = UserAuth(db)
-
-# ========== АВТОРИЗАЦИЯ GOOGLE ==========
-
-@app.route('/auth')
-def auth():
-    """Начать процесс авторизации в Google Диске"""
-    user_id = request.args.get('user_id')
-    if not user_id:
-        return "❌ Не передан user_id", 400
+            logger.error(f"❌ Ошибка OAuth callback: {e}")
+            return None
     
-    # Проверяем, есть ли уже токен
-    if db.get_user_token(int(user_id)):
-        return "✅ Вы уже авторизованы! Вернитесь в бота."
+    def refresh_token_if_needed(self, user_id):
+        """Обновление токена, если он истёк"""
+        token_data = self.db.get_user_token(user_id)
+        if not token_data:
+            return None
+        
+        import time
+        if token_data.get("expires_at", 0) < time.time():
+            logger.info(f"🔄 Токен для {user_id} истёк, обновляем...")
+            data = {
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+                "refresh_token": token_data.get("refresh_token"),
+                "grant_type": "refresh_token"
+            }
+            try:
+                response = requests.post(self.token_url, data=data, timeout=30)
+                if response.status_code == 200:
+                    new_token = response.json()
+                    self.db.save_user_token(
+                        user_id=user_id,
+                        access_token=new_token.get("access_token"),
+                        refresh_token=token_data.get("refresh_token"),
+                        expires_in=new_token.get("expires_in")
+                    )
+                    logger.info(f"✅ Токен для {user_id} обновлён")
+                    return new_token.get("access_token")
+                else:
+                    logger.error(f"❌ Ошибка обновления токена: {response.text}")
+                    return None
+            except Exception as e:
+                logger.error(f"❌ Ошибка обновления токена: {e}")
+                return None
+        
+        return token_data.get("access_token")
     
-    # Создаём Flow для авторизации
-    flow = Flow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE,
-        scopes=['https://www.googleapis.com/auth/drive.file'],
-        redirect_uri='https://maxbot.bothost.tech/oauth2callback'
-    )
-    
-    # Генерируем ссылку
-    authorization_url, state = flow.authorization_url(
-        access_type='offline',
-        include_granted_scopes='true',
-        prompt='consent'
-    )
-    
-    # Сохраняем state и user_id в сессии
-    session['state'] = state
-    session['user_id'] = user_id
-    
-    return f"""
-    <html>
-    <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
-        <h2>🔐 Подключение Google Диска</h2>
-        <p>Нажмите кнопку, чтобы разрешить боту доступ к вашему Диску.</p>
-        <a href="{authorization_url}" target="_blank">
-            <button style="padding: 15px 30px; font-size: 18px; background: #4285F4; color: white; border: none; border-radius: 5px; cursor: pointer;">
-                📂 Подключить Google Диск
-            </button>
-        </a>
-        <p style="margin-top: 20px; font-size: 14px; color: #666;">
-            После авторизации вернитесь в бота и нажмите "Проверить подключение".
-        </p>
-    </body>
-    </html>
-    """
-
-@app.route('/oauth2callback')
-def oauth2callback():
-    """Обработка callback от Google"""
-    try:
-        # Проверяем state
-        if request.args.get('state') != session.get('state'):
-            return "❌ Ошибка: состояние не совпадает", 400
-        
-        # Получаем код
-        code = request.args.get('code')
-        user_id = session.get('user_id')
-        
-        if not user_id:
-            return "❌ Не найден user_id", 400
-        
-        # Обмениваем код на токен
-        flow = Flow.from_client_secrets_file(
-            CLIENT_SECRETS_FILE,
-            scopes=['https://www.googleapis.com/auth/drive.file'],
-            redirect_uri='https://maxbot.bothost.tech/oauth2callback'
-        )
-        flow.fetch_token(code=code)
-        credentials = flow.credentials
-        
-        # Сохраняем токен
-        db.save_user_token(
-            user_id=int(user_id),
-            access_token=credentials.token,
-            refresh_token=credentials.refresh_token,
-            expires_in=credentials.expiry
-        )
-        
-        # Очищаем сессию
-        session.clear()
-        
-        return """
-        <html>
-        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
-            <h2>✅ Авторизация прошла успешно!</h2>
-            <p>Теперь бот имеет доступ к вашему Google Диску.</p>
-            <p>Вернитесь в MAX и отправьте боту команду <strong>/start</strong>.</p>
-        </body>
-        </html>
-        """
-    except Exception as e:
-        logger.error(f"❌ Ошибка OAuth: {e}")
-        return f"❌ Ошибка: {e}", 500
-
-# ========== ОСТАЛЬНЫЕ МАРШРУТЫ ==========
-
-@app.route('/')
-def index():
-    return "🤖 MAX Bot is running!"
-
-@app.route('/upload', methods=['GET', 'POST'])
-def upload_file():
-    if request.method == 'GET':
-        return web.upload_page()
-    
-    try:
-        user_id = 151296248
-        result = web.upload_file(request, user_id)
-        if result['success']:
-            return jsonify(result)
-        else:
-            return jsonify(result), 500
-    except Exception as e:
-        logger.error(f"❌ Ошибка загрузки: {e}")
-        return jsonify({'success': False, 'message': f'Ошибка: {str(e)}'}), 500
-
-@app.route('/health')
-def health():
-    return {"status": "ok"}
-
-@app.route('/setup_webhook')
-def setup_webhook():
-    token = request.args.get('token') or TOKEN
-    if not token:
-        return "❌ Токен не найден", 400
-    
-    webhook_url = "https://maxbot.bothost.tech/webhook"
-    headers = {"Authorization": token, "Content-Type": "application/json"}
-    
-    try:
-        r = requests.post(
-            "https://platform-api2.max.ru/subscriptions",
-            headers=headers,
-            json={"url": webhook_url},
-            timeout=10,
-            verify=False
-        )
-        return f"✅ Вебхук настроен: {r.status_code}"
-    except Exception as e:
-        return f"❌ Ошибка: {e}"
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    try:
-        data = request.get_json()
-        logger.info("📩 ПОЛУЧЕН ВЕБХУК!")
-
-        if not data:
-            return jsonify({"ok": True}), 200
-
-        user_id = None
-        text = None
-        
-        if 'message' in data:
-            msg = data['message']
-            if 'sender' in msg:
-                user_id = msg['sender'].get('user_id')
-            if 'body' in msg:
-                text = msg['body'].get('text')
-        
-        if not user_id:
-            return jsonify({"ok": True}), 200
-
-        logger.info(f"💬 user_id={user_id}, text={text}")
-
-        if text and text.strip() == '/start':
-            api.send_message(
-                user_id,
-                "🏠 **Главное меню**\n\n"
-                "📤 **Загрузите архив:**\n"
-                "1. Загрузите ZIP-архив на Google Drive.\n"
-                "2. Откройте доступ 'Всем, у кого есть ссылка'.\n"
-                "3. Скопируйте ссылку и отправьте боту.\n\n"
-                "📌 Бот скачает архив и начнёт публикацию.\n"
-                "⏹ Для остановки публикации отправьте `/stop`"
-            )
-            return jsonify({"ok": True}), 200
-
-        if text and text.strip() == '/stop':
-            publisher.stop(user_id)
-            api.send_message(user_id, "⏹️ Публикация остановлена.")
-            return jsonify({"ok": True}), 200
-
-        if text and 'drive.google.com' in text:
-            # Обработка ссылки
-            api.send_message(user_id, "📥 Получил ссылку. Начинаю обработку...")
-            # Здесь вызывается функция обработки
-            return jsonify({"ok": True}), 200
-
-        return jsonify({"ok": True}), 200
-
-    except Exception as e:
-        logger.error(f"❌ ОШИБКА: {e}")
-        return jsonify({"ok": False}), 500
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 3000))
-    app.run(host='0.0.0.0', port=port)
+    def get_user_token(self, user_id):
+        """Получение валидного токена для пользователя"""
+        return self.refresh_token_if_needed(user_id)
