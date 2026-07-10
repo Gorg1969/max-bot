@@ -22,13 +22,17 @@ class Publisher:
         self.base_url = "https://platform-api2.max.ru"
     
     def upload_image_to_max(self, image_path, token):
+        """Загрузка изображения на сервер MAX через /uploads"""
         try:
+            # 1. Получаем URL для загрузки
             upload_url = f"{self.base_url}/uploads?type=image"
             headers = {"Authorization": token}
             
+            logger.info(f"📤 Запрос URL для загрузки: {upload_url}")
             response = requests.post(upload_url, headers=headers, timeout=30, verify=False)
+            
             if response.status_code != 200:
-                logger.error(f"❌ Ошибка получения URL для загрузки: {response.text}")
+                logger.error(f"❌ Ошибка получения URL: {response.status_code} - {response.text}")
                 return None
             
             upload_data = response.json()
@@ -37,9 +41,14 @@ class Publisher:
                 logger.error(f"❌ Нет URL для загрузки: {upload_data}")
                 return None
             
+            logger.info(f"📤 Получен URL для загрузки: {upload_url[:50]}...")
+            
+            # 2. Загружаем изображение
             with open(image_path, 'rb') as f:
                 files = {'data': f}
                 response = requests.post(upload_url, files=files, timeout=60, verify=False)
+            
+            logger.info(f"📤 Ответ загрузки: {response.status_code}")
             
             if response.status_code == 200:
                 result = response.json()
@@ -51,7 +60,7 @@ class Publisher:
                     logger.error(f"❌ Нет токена в ответе: {result}")
                     return None
             else:
-                logger.error(f"❌ Ошибка загрузки изображения: {response.status_code} - {response.text}")
+                logger.error(f"❌ Ошибка загрузки изображения: {response.status_code} - {response.text[:200]}")
                 return None
                 
         except Exception as e:
@@ -65,6 +74,7 @@ class Publisher:
             info_file = None
             images = []
             
+            # Сканируем папку
             for f in os.listdir(folder_path):
                 file_path = os.path.join(folder_path, f)
                 if os.path.isfile(file_path):
@@ -80,6 +90,7 @@ class Publisher:
                 logger.warning(f"⚠️ Нет info.txt в папке {folder_path}")
                 return False, "Нет info.txt"
             
+            # Читаем info.txt
             try:
                 with open(info_file, 'r', encoding='utf-8') as f:
                     info_text = f.read()
@@ -91,8 +102,13 @@ class Publisher:
             full_text = info_text
             
             # ========== ЗАГРУЖАЕМ ИЗОБРАЖЕНИЯ ==========
-            images = images[:10]
+            images = images[:10]  # Максимум 10 изображений
             image_tokens = []
+            
+            if not images:
+                logger.warning("⚠️ Нет изображений в папке")
+            else:
+                logger.info(f"🖼️ Найдено изображений: {len(images)}")
             
             for image_path in images:
                 logger.info(f"📤 Загрузка изображения: {os.path.basename(image_path)}")
@@ -103,7 +119,9 @@ class Publisher:
                 else:
                     logger.warning(f"⚠️ Не удалось загрузить изображение: {image_path}")
             
+            # ========== ОТПРАВКА СООБЩЕНИЯ ==========
             if not image_tokens:
+                # Если нет изображений — отправляем только текст
                 logger.warning("⚠️ Нет загруженных изображений, отправляю только текст")
                 result = self.api.send_message_to_chat(group_id, full_text)
                 if result:
@@ -111,11 +129,14 @@ class Publisher:
                 else:
                     return False, "Ошибка отправки текста"
             
+            # Если есть изображения — отправляем с вложениями
             logger.info(f"📤 Отправка сообщения в группу {group_id} с {len(image_tokens)} изображениями")
             
-            logger.info("⏳ Ожидание обработки изображений на сервере (3 секунды)...")
+            # Ждём обработки на сервере
+            logger.info("⏳ Ожидание обработки изображений (3 секунды)...")
             time.sleep(3)
             
+            # Формируем attachments
             attachments = []
             for token in image_tokens:
                 attachments.append({
@@ -133,6 +154,7 @@ class Publisher:
                 logger.info(f"✅ Сообщение с галереей отправлено в группу {group_id}")
                 return True, "Успешно"
             else:
+                # Если не получилось с attachments — пробуем только текст
                 logger.warning("⚠️ Не удалось отправить с attachments, пробую только текст")
                 result = self.api.send_message_to_chat(group_id, full_text)
                 if result:
@@ -180,8 +202,9 @@ class Publisher:
             post_number += 1
             self.db.update_status(folder['name'], 'processing')
             
+            # ✅ НОВЫЙ ИНТЕРВАЛ: 30-60 секунд
             if post_number > 1:
-                delay = random.randint(60, 180)
+                delay = random.randint(30, 60)
                 logger.info(f"⏳ Задержка {delay} сек. перед постом {post_number}")
                 self.api.send_message(user_id, f"⏳ Пауза {delay} сек. перед постом {post_number}/{total}")
                 time.sleep(delay)
