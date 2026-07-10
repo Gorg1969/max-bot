@@ -30,7 +30,8 @@ class Database:
     def save_user_token(self, user_id, access_token, refresh_token=None, expires_in=None, token_type='Bearer'):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
-        expires_at = int(time.time()) + expires_in if expires_in else None
+        # ✅ ИСПРАВЛЕННАЯ СТРОКА:
+        expires_at = int(time.time() + expires_in) if expires_in else None
         c.execute('''
             INSERT OR REPLACE INTO user_tokens 
             (user_id, access_token, refresh_token, token_type, expires_at, updated_at)
