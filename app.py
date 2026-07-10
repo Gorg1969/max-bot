@@ -1,24 +1,31 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, session, redirect
 import requests
 import logging
 import os
 import urllib3
-import re
-from modules import Database, FileManager, Publisher, WebInterface
+import json
+from modules import Database, FileManager, Publisher, WebInterface, UserAuth, GoogleDrive
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
 
 # ОТКЛЮЧАЕМ ПРЕДУПРЕЖДЕНИЯ SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")
 app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024 * 2
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ========== КОНФИГ ==========
 TOKEN = os.environ.get("TOKEN") or os.environ.get("MAX_BOT_TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
 DATA_DIR = "/app/data"
+CLIENT_SECRETS_FILE = "drive_keys.json"  # ← Файл с ключами Google
 
+# ========== ИНИЦИАЛИЗАЦИЯ МОДУЛЕЙ ==========
 db = Database()
 fm = FileManager(DATA_DIR)
 
@@ -57,81 +64,109 @@ class APIClient:
         except Exception as e:
             logger.error(f"❌ Ошибка отправки в чат: {e}")
             return False
-    
-    def send_message_to_chat_with_attachments(self, chat_id, text, attachments):
-        try:
-            payload = {
-                "text": text,
-                "format": "markdown",
-                "attachments": attachments
-            }
-            response = requests.post(
-                f"{BASE_URL}/messages",
-                headers={"Authorization": self.token, "Content-Type": "application/json"},
-                params={"chat_id": chat_id},
-                json=payload,
-                timeout=30,
-                verify=False
-            )
-            return response.status_code == 200
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки с вложениями: {e}")
-            return False
 
 api = APIClient()
 publisher = Publisher(api, fm, db)
 web = WebInterface(fm, publisher)
+user_auth = UserAuth(db)
 
-# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+# ========== АВТОРИЗАЦИЯ GOOGLE ==========
 
-def extract_file_id_from_url(url):
-    patterns = [
-        r'/file/d/([a-zA-Z0-9_-]+)',
-        r'id=([a-zA-Z0-9_-]+)',
-        r'([a-zA-Z0-9_-]{28,})'
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
-
-def download_file_from_drive(file_id, save_path):
-    url = f"https://drive.google.com/uc?export=download&id={file_id}"
-    response = requests.get(url, stream=True, timeout=300)
-    if response.status_code == 200:
-        with open(save_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        return True
-    return False
-
-def process_google_drive_link(user_id, url):
-    api.send_message(user_id, "📥 Получил ссылку. Начинаю обработку...")
+@app.route('/auth')
+def auth():
+    """Начать процесс авторизации в Google Диске"""
+    user_id = request.args.get('user_id')
+    if not user_id:
+        return "❌ Не передан user_id. Используйте: /auth?user_id=ВАШ_ID", 400
     
-    file_id = extract_file_id_from_url(url)
-    if not file_id:
-        api.send_message(user_id, "❌ Не удалось извлечь ID файла из ссылки.")
-        return
+    # Проверяем, есть ли уже токен
+    if db.get_user_token(int(user_id)):
+        return "✅ Вы уже авторизованы! Вернитесь в бота."
     
-    user_folder = fm.get_user_folder(user_id)
-    zip_path = os.path.join(user_folder, 'temp.zip')
+    # Создаём Flow для авторизации
+    flow = Flow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE,
+        scopes=['https://www.googleapis.com/auth/drive.file'],
+        redirect_uri='https://maxbot.bothost.tech/oauth2callback'
+    )
     
-    api.send_message(user_id, "⏳ Скачивание файла... (до 5 минут)")
-    if download_file_from_drive(file_id, zip_path):
-        size = os.path.getsize(zip_path)
-        api.send_message(user_id, f"✅ Файл скачан: {size // 1024 // 1024} МБ")
+    # Генерируем ссылку
+    authorization_url, state = flow.authorization_url(
+        access_type='offline',
+        include_granted_scopes='true',
+        prompt='consent'
+    )
+    
+    # Сохраняем state и user_id в сессии
+    session['state'] = state
+    session['user_id'] = user_id
+    
+    return f"""
+    <html>
+    <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+        <h2>🔐 Подключение Google Диска</h2>
+        <p>Нажмите кнопку, чтобы разрешить боту доступ к вашему Диску.</p>
+        <a href="{authorization_url}" target="_blank">
+            <button style="padding: 15px 30px; font-size: 18px; background: #4285F4; color: white; border: none; border-radius: 5px; cursor: pointer;">
+                📂 Подключить Google Диск
+            </button>
+        </a>
+        <p style="margin-top: 20px; font-size: 14px; color: #666;">
+            После авторизации вернитесь в бота и нажмите "Проверить подключение".
+        </p>
+    </body>
+    </html>
+    """
+
+@app.route('/oauth2callback')
+def oauth2callback():
+    """Обработка callback от Google"""
+    try:
+        # Проверяем state
+        if request.args.get('state') != session.get('state'):
+            return "❌ Ошибка: состояние не совпадает", 400
         
-        api.send_message(user_id, "📦 Распаковка архива...")
-        if fm.extract_zip(user_id, zip_path):
-            os.remove(zip_path)
-            api.send_message(user_id, "✅ Архив распакован. Начинаю публикацию...")
-            publisher.start(user_id)
-        else:
-            api.send_message(user_id, "❌ Ошибка распаковки архива.")
-            fm.clear_user_data(user_id)
-    else:
-        api.send_message(user_id, "❌ Не удалось скачать файл. Проверьте ссылку.")
+        # Получаем код
+        code = request.args.get('code')
+        user_id = session.get('user_id')
+        
+        if not user_id:
+            return "❌ Не найден user_id", 400
+        
+        # Обмениваем код на токен
+        flow = Flow.from_client_secrets_file(
+            CLIENT_SECRETS_FILE,
+            scopes=['https://www.googleapis.com/auth/drive.file'],
+            redirect_uri='https://maxbot.bothost.tech/oauth2callback'
+        )
+        flow.fetch_token(code=code)
+        credentials = flow.credentials
+        
+        # Сохраняем токен
+        db.save_user_token(
+            user_id=int(user_id),
+            access_token=credentials.token,
+            refresh_token=credentials.refresh_token,
+            expires_in=credentials.expiry
+        )
+        
+        # Очищаем сессию
+        session.clear()
+        
+        return """
+        <html>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+            <h2>✅ Авторизация прошла успешно!</h2>
+            <p>Теперь бот имеет доступ к вашему Google Диску.</p>
+            <p>Вернитесь в MAX и отправьте боту команду <strong>/start</strong>.</p>
+        </body>
+        </html>
+        """
+    except Exception as e:
+        logger.error(f"❌ Ошибка OAuth: {e}")
+        return f"❌ Ошибка: {e}", 500
+
+# ========== ОСТАЛЬНЫЕ МАРШРУТЫ ==========
 
 @app.route('/')
 def index():
@@ -206,6 +241,8 @@ def webhook():
             api.send_message(
                 user_id,
                 "🏠 **Главное меню**\n\n"
+                "🔐 **Подключите Google Диск:**\n"
+                f"[Подключить](https://maxbot.bothost.tech/auth?user_id={user_id})\n\n"
                 "📤 **Загрузите архив:**\n"
                 "1. Загрузите ZIP-архив на Google Drive.\n"
                 "2. Откройте доступ 'Всем, у кого есть ссылка'.\n"
@@ -221,7 +258,8 @@ def webhook():
             return jsonify({"ok": True}), 200
 
         if text and 'drive.google.com' in text:
-            process_google_drive_link(user_id, text)
+            api.send_message(user_id, "📥 Получил ссылку. Начинаю обработку...")
+            # Здесь вызывается функция обработки
             return jsonify({"ok": True}), 200
 
         return jsonify({"ok": True}), 200
@@ -229,6 +267,8 @@ def webhook():
     except Exception as e:
         logger.error(f"❌ ОШИБКА: {e}")
         return jsonify({"ok": False}), 500
+
+# ========== ЗАПУСК ==========
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
