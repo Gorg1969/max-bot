@@ -34,6 +34,39 @@ UPLOAD_HTML = """
             font-size: 14px;
         }
         .info code { background: #d0e4ed; padding: 2px 6px; border-radius: 3px; }
+        .auth-section {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 15px 0;
+            text-align: center;
+        }
+        .auth-section .status {
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+        .auth-section .status.connected { color: #28a745; }
+        .auth-section .status.disconnected { color: #dc3545; }
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background: #4285F4;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 14px;
+            cursor: pointer;
+            text-decoration: none;
+        }
+        .btn:hover { background: #357ae8; }
+        .btn-success {
+            background: #28a745;
+        }
+        .btn-success:hover { background: #218838; }
+        .btn-secondary {
+            background: #6c757d;
+        }
+        .btn-secondary:hover { background: #5a6268; }
         .file-input-wrapper {
             margin: 20px 0;
             padding: 30px;
@@ -51,7 +84,13 @@ UPLOAD_HTML = """
             font-size: 16px;
             color: #666;
         }
-        .btn {
+        .file-input-wrapper.disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+        .file-input-wrapper.disabled:hover { border-color: #ccc; }
+        .btn-upload {
             display: block;
             width: 100%;
             padding: 12px;
@@ -63,8 +102,8 @@ UPLOAD_HTML = """
             cursor: pointer;
             margin-top: 10px;
         }
-        .btn:hover { background: #45a049; }
-        .btn:disabled { background: #ccc; cursor: not-allowed; }
+        .btn-upload:hover { background: #45a049; }
+        .btn-upload:disabled { background: #ccc; cursor: not-allowed; }
         .progress-bar {
             width: 100%;
             background: #f0f0f0;
@@ -82,30 +121,24 @@ UPLOAD_HTML = """
             color: white;
             font-size: 12px;
         }
-        .status { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
-        .status.success { display: block; background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-        .status.error { display: block; background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
-        .status.info { display: block; background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+        .status-msg { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
+        .status-msg.success { display: block; background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .status-msg.error { display: block; background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .status-msg.info { display: block; background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
         .footer { text-align: center; margin-top: 20px; font-size: 12px; color: #999; }
-        .auth-warning {
-            background: #fff3cd;
-            border: 1px solid #ffeeba;
-            padding: 15px;
-            border-radius: 5px;
-            margin: 15px 0;
-            color: #856404;
-        }
-        .auth-warning a { color: #4CAF50; font-weight: bold; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>📤 Загрузка архива</h1>
         
-        <div id="authWarning" class="auth-warning" style="display: none;">
-            ⚠️ <strong>Google Диск не подключён!</strong><br>
-            Для загрузки архива необходимо подключить Google Диск.
-            <a href="/auth?user_id=151296248" target="_blank">Подключить Google Диск</a>
+        <!-- Секция авторизации -->
+        <div class="auth-section">
+            <div id="authStatus" class="status disconnected">⏳ Проверка подключения...</div>
+            <div>
+                <button id="checkAuthBtn" class="btn btn-secondary">🔄 Проверить подключение</button>
+                <a id="authLink" href="/auth?user_id=151296248" target="_blank" class="btn" style="display: none;">🔐 Подключить Google Диск</a>
+            </div>
         </div>
         
         <div class="info">
@@ -116,7 +149,7 @@ UPLOAD_HTML = """
             • <strong>Ограничений на размер нет</strong>
         </div>
         
-        <div class="file-input-wrapper" onclick="document.getElementById('fileInput').click()">
+        <div class="file-input-wrapper" id="fileWrapper" onclick="document.getElementById('fileInput').click()">
             <input type="file" id="fileInput" name="file" accept=".zip">
             <label for="fileInput">📂 <strong>Выберите ZIP-архив</strong><br>
             <span style="font-size: 14px; color: #999;">(просто нажмите и выберите файл)</span></label>
@@ -126,42 +159,77 @@ UPLOAD_HTML = """
             <div id="progress" class="progress">0%</div>
         </div>
         
-        <button class="btn" id="submitBtn" disabled>📤 Загрузить и опубликовать</button>
+        <button class="btn-upload" id="submitBtn" disabled>📤 Загрузить и опубликовать</button>
         
-        <div id="status" class="status"></div>
+        <div id="statusMsg" class="status-msg"></div>
         <div class="footer">Бот автоматически начнёт публикацию после загрузки</div>
     </div>
 
     <script>
-        // Проверяем авторизацию при загрузке страницы
+        let isAuthorized = false;
+        
+        // Проверка авторизации
         async function checkAuth() {
+            const statusDiv = document.getElementById('authStatus');
+            const authLink = document.getElementById('authLink');
+            const fileWrapper = document.getElementById('fileWrapper');
+            const submitBtn = document.getElementById('submitBtn');
+            
+            statusDiv.textContent = '⏳ Проверка...';
+            statusDiv.className = 'status';
+            
             try {
                 const response = await fetch('/check_auth?user_id=151296248');
                 const data = await response.json();
-                if (!data.authorized) {
-                    document.getElementById('authWarning').style.display = 'block';
+                
+                if (data.authorized) {
+                    isAuthorized = true;
+                    statusDiv.textContent = '✅ Google Диск подключён';
+                    statusDiv.className = 'status connected';
+                    authLink.style.display = 'none';
+                    fileWrapper.classList.remove('disabled');
+                    // Включаем кнопку если выбран файл
+                    const fileInput = document.getElementById('fileInput');
+                    if (fileInput.files.length > 0) {
+                        submitBtn.disabled = false;
+                    }
+                } else {
+                    isAuthorized = false;
+                    statusDiv.textContent = '❌ Google Диск не подключён';
+                    statusDiv.className = 'status disconnected';
+                    authLink.style.display = 'inline-block';
+                    fileWrapper.classList.add('disabled');
+                    submitBtn.disabled = true;
                 }
             } catch (e) {
-                console.error('Ошибка проверки авторизации:', e);
+                statusDiv.textContent = '❌ Ошибка проверки';
+                statusDiv.className = 'status disconnected';
             }
         }
+        
+        // Проверяем при загрузке
         checkAuth();
         
-        const CHUNK_SIZE = 10 * 1024 * 1024; // 10 МБ
+        // Кнопка проверки
+        document.getElementById('checkAuthBtn').addEventListener('click', checkAuth);
         
+        // Выбор файла
         document.getElementById('fileInput').addEventListener('change', function() {
             const file = this.files[0];
             const submitBtn = document.getElementById('submitBtn');
             
-            if (file) {
+            if (file && isAuthorized) {
                 submitBtn.disabled = false;
                 showStatus('✅ Выбран файл: ' + file.name + ' (' + (file.size / 1024 / 1024).toFixed(1) + ' МБ)', 'info');
+            } else if (!isAuthorized) {
+                showStatus('❌ Сначала подключите Google Диск', 'error');
             } else {
                 submitBtn.disabled = true;
                 showStatus('', '');
             }
         });
         
+        // Загрузка
         document.getElementById('submitBtn').addEventListener('click', async function() {
             const fileInput = document.getElementById('fileInput');
             const submitBtn = this;
@@ -185,6 +253,7 @@ UPLOAD_HTML = """
             progressBar.style.display = 'block';
             showStatus('⏳ Загрузка файла...', 'info');
             
+            const CHUNK_SIZE = 10 * 1024 * 1024;
             const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
             const uploadedChunks = [];
             
@@ -224,7 +293,6 @@ UPLOAD_HTML = """
                 }
             }
             
-            // Все части загружены — собираем файл
             showStatus('⏳ Сборка файла...', 'info');
             
             try {
@@ -256,9 +324,9 @@ UPLOAD_HTML = """
         });
         
         function showStatus(message, type) {
-            const statusDiv = document.getElementById('status');
+            const statusDiv = document.getElementById('statusMsg');
             statusDiv.textContent = message;
-            statusDiv.className = 'status ' + (type || '');
+            statusDiv.className = 'status-msg ' + (type || '');
         }
     </script>
 </body>
