@@ -107,7 +107,8 @@ class Database:
         conn.close()
         logger.info(f"📝 Добавлена публикация: {folder_name} -> {group_id}")
     
-    def update_publication_status(self, folder_name, status, error=None):
+    def update_status(self, folder_name, status, error=None):
+        """Обновление статуса публикации"""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         if error:
@@ -124,6 +125,7 @@ class Database:
             ''', (status, folder_name))
         conn.commit()
         conn.close()
+        logger.info(f"📊 Статус {folder_name} обновлён: {status}")
     
     def get_pending_publications(self, user_id):
         conn = sqlite3.connect(self.db_path)
@@ -142,3 +144,4 @@ class Database:
         c.execute('DELETE FROM publications WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
+        logger.info(f"🧹 Публикации пользователя {user_id} очищены")
