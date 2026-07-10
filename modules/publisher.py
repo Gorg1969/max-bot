@@ -7,6 +7,7 @@ import sys
 import requests
 import json
 import re
+import io
 
 if sys.platform == 'linux':
     sys.stdout.reconfigure(encoding='utf-8')
@@ -98,7 +99,7 @@ class Publisher:
                 with open(info_file, 'r', encoding='cp1251') as f:
                     info_text = f.read()
             
-            # ✅ УБРАНА СТРОКА "Пост X/Y" — теперь только текст из info.txt
+            # Текст без номера поста
             full_text = info_text
             
             # ========== ЗАГРУЖАЕМ ИЗОБРАЖЕНИЯ ==========
@@ -115,7 +116,7 @@ class Publisher:
                 upload_token = self.upload_image_to_max(image_path, bot_token)
                 if upload_token:
                     image_tokens.append(upload_token)
-                    time.sleep(0.5)
+                    time.sleep(0.5)  # Пауза между загрузками
                 else:
                     logger.warning(f"⚠️ Не удалось загрузить изображение: {image_path}")
             
@@ -202,7 +203,7 @@ class Publisher:
             post_number += 1
             self.db.update_status(folder['name'], 'processing')
             
-            # ✅ НОВЫЙ ИНТЕРВАЛ: 30-60 секунд
+            # Задержка 30-60 секунд между постами
             if post_number > 1:
                 delay = random.randint(30, 60)
                 logger.info(f"⏳ Задержка {delay} сек. перед постом {post_number}")
