@@ -35,11 +35,10 @@ CLIENT_SECRETS_FILE = None
 creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 if creds_json:
     try:
-        # Сохраняем во временный файл
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
             f.write(creds_json)
             CLIENT_SECRETS_FILE = f.name
-        logger.info(f"✅ Credentials загружены из переменной окружения: {CLIENT_SECRETS_FILE}")
+        logger.info(f"✅ Credentials загружены из переменной окружения")
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки credentials из переменной: {e}")
 
@@ -201,32 +200,27 @@ def check_auth():
     token = user_auth.get_user_token(int(user_id))
     return jsonify({'authorized': token is not None})
 
-# ========== ЗАГРУЗКА ЧАСТЯМИ ==========
+# ========== ЗАГРУЗКА НА GOOGLE ДИСК ==========
 
-@app.route('/upload_chunk', methods=['POST'])
-def upload_chunk():
+@app.route('/upload_to_drive', methods=['POST'])
+def upload_to_drive():
     try:
         user_id = int(request.form.get('user_id', 151296248))
-        result = web.upload_chunk(request, user_id)
+        
+        # Проверяем авторизацию
+        token = user_auth.get_user_token(user_id)
+        if not token:
+            return jsonify({'success': False, 'message': 'Google Диск не подключён'}), 401
+        
+        drive = GoogleDrive(token)
+        result = web.upload_to_drive(request, user_id, drive)
+        
         if result['success']:
             return jsonify(result)
         else:
             return jsonify(result), 500
     except Exception as e:
-        logger.error(f"❌ Ошибка загрузки части: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-@app.route('/assemble_file', methods=['POST'])
-def assemble_file():
-    try:
-        user_id = 151296248
-        result = web.assemble_file(request, user_id)
-        if result['success']:
-            return jsonify(result)
-        else:
-            return jsonify(result), 500
-    except Exception as e:
-        logger.error(f"❌ Ошибка сборки: {e}")
+        logger.error(f"❌ Ошибка загрузки: {e}")
         return jsonify({'success': False, 'message': str(e)}), 500
 
 # ========== ОСТАЛЬНЫЕ МАРШРУТЫ ==========
