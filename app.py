@@ -20,10 +20,6 @@ TOKEN = os.environ.get("TOKEN") or os.environ.get("MAX_BOT_TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
 DATA_DIR = "/app/data"
 
-# ========== ГЛОБАЛЬНЫЕ СЧЁТЧИКИ ==========
-active_uploads = 0
-MAX_CONCURRENT_UPLOADS = 2  # Максимум одновременных загрузок
-
 # ========== ИНИЦИАЛИЗАЦИЯ МОДУЛЕЙ ==========
 db = Database()
 fm = FileManager(DATA_DIR)
@@ -68,52 +64,42 @@ api = APIClient()
 publisher = Publisher(api, fm, db)
 web = WebInterface(fm, publisher)
 
-# ========== ЗАГРУЗКА ЧАСТЯМИ ==========
+# ========== ПОТОКОВАЯ ЗАГРУЗКА ZIP ==========
 
-@app.route('/upload_chunk', methods=['POST'])
-def upload_chunk():
-    global active_uploads
-    
+@app.route('/upload_zip_stream', methods=['POST'])
+def upload_zip_stream():
+    """Потоковая загрузка и обработка ZIP-архива"""
     try:
         user_id = int(request.form.get('user_id', 151296248))
         
-        # Проверяем, не перегружен ли сервер
-        if active_uploads >= MAX_CONCURRENT_UPLOADS:
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'message': 'Файл не выбран'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'success': False, 'message': 'Файл не выбран'}), 400
+        
+        if not file.filename.endswith('.zip'):
+            return jsonify({'success': False, 'message': 'Файл должен быть в формате .zip'}), 400
+        
+        logger.info(f"📥 Начинаю обработку ZIP-архива: {file.filename}")
+        
+        result = web.process_zip_stream(file, user_id, publisher)
+        
+        if result['success']:
             return jsonify({
-                'success': False, 
-                'message': 'Сервер перегружен. Подождите, пока завершатся другие загрузки.'
-            }), 429
-        
-        active_uploads += 1
-        logger.info(f"📥 Активных загрузок: {active_uploads}/{MAX_CONCURRENT_UPLOADS}")
-        
-        try:
-            result = web.upload_chunk(request, user_id)
-            if result['success']:
-                return jsonify(result)
-            else:
-                return jsonify(result), 500
-        finally:
-            active_uploads -= 1
-            logger.info(f"📥 Активных загрузок: {active_uploads}/{MAX_CONCURRENT_UPLOADS}")
+                'success': True,
+                'message': f'Обработано {result["published"]} папок. Ошибок: {len(result["errors"])}',
+                'errors': result['errors']
+            })
+        else:
+            return jsonify({'success': False, 'message': result['message']}), 500
             
     except Exception as e:
-        active_uploads -= 1
-        logger.error(f"❌ Ошибка загрузки части: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-@app.route('/assemble_file', methods=['POST'])
-def assemble_file():
-    try:
-        user_id = 151296248
-        result = web.assemble_file(request, user_id)
-        if result['success']:
-            return jsonify(result)
-        else:
-            return jsonify(result), 500
-    except Exception as e:
-        logger.error(f"❌ Ошибка сборки: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
+        logger.error(f"❌ Ошибка обработки ZIP: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({'success': False, 'message': f'Ошибка: {str(e)}'}), 500
 
 # ========== ОСТАЛЬНЫЕ МАРШРУТЫ ==========
 
@@ -139,11 +125,7 @@ def upload_file():
 
 @app.route('/health')
 def health():
-    return {
-        "status": "ok",
-        "active_uploads": active_uploads,
-        "max_concurrent": MAX_CONCURRENT_UPLOADS
-    }
+    return {"status": "ok"}
 
 @app.route('/setup_webhook')
 def setup_webhook():
