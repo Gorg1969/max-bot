@@ -157,6 +157,18 @@ def oauth2callback():
         logger.error(f"❌ Ошибка OAuth: {e}")
         return f"❌ Ошибка: {e}", 500
 
+# ========== ПРОВЕРКА АВТОРИЗАЦИИ ==========
+
+@app.route('/check_auth')
+def check_auth():
+    """Проверка авторизации пользователя"""
+    user_id = request.args.get('user_id')
+    if not user_id:
+        return jsonify({'authorized': False, 'error': 'No user_id'}), 400
+    
+    token = user_auth.get_user_token(int(user_id))
+    return jsonify({'authorized': token is not None})
+
 # ========== ЗАГРУЗКА ЧАСТЯМИ ==========
 
 @app.route('/upload_chunk', methods=['POST'])
