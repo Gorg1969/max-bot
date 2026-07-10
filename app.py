@@ -1,9 +1,16 @@
-from flask import Flask, request, jsonify, session
+from flask import Flask, request, jsonify, session, redirect
 import requests
 import logging
 import os
 import urllib3
-from modules import Database, FileManager, Publisher, WebInterface, UserAuth
+import json
+import tempfile
+from modules import (
+    Database, FileManager, Publisher, WebInterface,
+    UserAuth, GoogleDrive,
+    process_google_drive_link
+)
+from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 
 # ОТКЛЮЧАЕМ ПРЕДУПРЕЖДЕНИЯ SSL
@@ -20,7 +27,31 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("TOKEN") or os.environ.get("MAX_BOT_TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
 DATA_DIR = "/app/data"
-CLIENT_SECRETS_FILE = "/app/drive_keys.json"
+
+# ========== ЗАГРУЗКА CREDENTIALS ==========
+CLIENT_SECRETS_FILE = None
+
+# 1. Пытаемся взять из переменной окружения
+creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+if creds_json:
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            f.write(creds_json)
+            CLIENT_SECRETS_FILE = f.name
+        logger.info(f"✅ Credentials загружены из переменной окружения")
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки credentials из переменной: {e}")
+
+# 2. Если не получилось — пробуем файл в корне
+if not CLIENT_SECRETS_FILE:
+    try:
+        if os.path.exists("/app/drive_keys.json"):
+            CLIENT_SECRETS_FILE = "/app/drive_keys.json"
+            logger.info(f"✅ Credentials загружены из файла: {CLIENT_SECRETS_FILE}")
+        else:
+            logger.error("❌ Не найдены credentials ни в переменной, ни в файле!")
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки credentials из файла: {e}")
 
 # ========== ИНИЦИАЛИЗАЦИЯ МОДУЛЕЙ ==========
 db = Database()
@@ -73,10 +104,13 @@ user_auth = UserAuth(db)
 def auth():
     user_id = request.args.get('user_id')
     if not user_id:
-        return "❌ Не передан user_id", 400
+        return "❌ Не передан user_id. Используйте: /auth?user_id=ВАШ_ID", 400
     
     if db.get_user_token(int(user_id)):
-        return "✅ Вы уже авторизованы!"
+        return "✅ Вы уже авторизованы! Вернитесь в бота."
+    
+    if not CLIENT_SECRETS_FILE:
+        return "❌ Ошибка: не найдены credentials Google. Обратитесь к администратору.", 500
     
     flow = Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE,
@@ -95,13 +129,17 @@ def auth():
     
     return f"""
     <html>
-    <body style="font-family: Arial; text-align: center; padding: 50px;">
+    <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
         <h2>🔐 Подключение Google Диска</h2>
-        <a href="{authorization_url}">
+        <p>Нажмите кнопку, чтобы разрешить боту доступ к вашему Диску.</p>
+        <a href="{authorization_url}" target="_blank">
             <button style="padding: 15px 30px; font-size: 18px; background: #4285F4; color: white; border: none; border-radius: 5px; cursor: pointer;">
                 📂 Подключить Google Диск
             </button>
         </a>
+        <p style="margin-top: 20px; font-size: 14px; color: #666;">
+            После авторизации вернитесь в бота и нажмите "Проверить подключение".
+        </p>
     </body>
     </html>
     """
@@ -117,6 +155,9 @@ def oauth2callback():
         
         if not user_id:
             return "❌ Не найден user_id", 400
+        
+        if not CLIENT_SECRETS_FILE:
+            return "❌ Ошибка: не найдены credentials Google", 500
         
         flow = Flow.from_client_secrets_file(
             CLIENT_SECRETS_FILE,
@@ -137,9 +178,10 @@ def oauth2callback():
         
         return """
         <html>
-        <body style="font-family: Arial; text-align: center; padding: 50px;">
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
             <h2>✅ Авторизация прошла успешно!</h2>
-            <p>Вернитесь в бота.</p>
+            <p>Теперь бот имеет доступ к вашему Google Диску.</p>
+            <p>Вернитесь в MAX и отправьте боту команду <strong>/start</strong>.</p>
         </body>
         </html>
         """
@@ -157,6 +199,29 @@ def check_auth():
     
     token = user_auth.get_user_token(int(user_id))
     return jsonify({'authorized': token is not None})
+
+# ========== ЗАГРУЗКА НА GOOGLE ДИСК ==========
+
+@app.route('/upload_to_drive', methods=['POST'])
+def upload_to_drive():
+    try:
+        user_id = int(request.form.get('user_id', 151296248))
+        
+        # Проверяем авторизацию
+        token = user_auth.get_user_token(user_id)
+        if not token:
+            return jsonify({'success': False, 'message': 'Google Диск не подключён'}), 401
+        
+        drive = GoogleDrive(token)
+        result = web.upload_to_drive(request, user_id, drive)
+        
+        if result['success']:
+            return jsonify(result)
+        else:
+            return jsonify(result), 500
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 # ========== ОСТАЛЬНЫЕ МАРШРУТЫ ==========
 
@@ -250,8 +315,7 @@ def webhook():
             return jsonify({"ok": True}), 200
 
         if text and 'drive.google.com' in text:
-            # Обработка ссылки (простая версия)
-            api.send_message(user_id, "📥 Получил ссылку. Обработка пока не реализована.")
+            process_google_drive_link(user_id, text, api, fm, publisher, user_auth)
             return jsonify({"ok": True}), 200
 
         return jsonify({"ok": True}), 200
