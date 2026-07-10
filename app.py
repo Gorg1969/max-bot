@@ -3,6 +3,8 @@ import requests
 import logging
 import os
 import urllib3
+import json
+import tempfile
 from modules import (
     Database, FileManager, Publisher, WebInterface,
     UserAuth, GoogleDrive,
@@ -25,7 +27,32 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("TOKEN") or os.environ.get("MAX_BOT_TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
 DATA_DIR = "/app/data"
-CLIENT_SECRETS_FILE = "/app/drive_keys.json"
+
+# ========== ЗАГРУЗКА CREDENTIALS ==========
+CLIENT_SECRETS_FILE = None
+
+# 1. Пытаемся взять из переменной окружения
+creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+if creds_json:
+    try:
+        # Сохраняем во временный файл
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            f.write(creds_json)
+            CLIENT_SECRETS_FILE = f.name
+        logger.info(f"✅ Credentials загружены из переменной окружения: {CLIENT_SECRETS_FILE}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки credentials из переменной: {e}")
+
+# 2. Если не получилось — пробуем файл в корне
+if not CLIENT_SECRETS_FILE:
+    try:
+        if os.path.exists("/app/drive_keys.json"):
+            CLIENT_SECRETS_FILE = "/app/drive_keys.json"
+            logger.info(f"✅ Credentials загружены из файла: {CLIENT_SECRETS_FILE}")
+        else:
+            logger.error("❌ Не найдены credentials ни в переменной, ни в файле!")
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки credentials из файла: {e}")
 
 # ========== ИНИЦИАЛИЗАЦИЯ МОДУЛЕЙ ==========
 db = Database()
@@ -83,6 +110,9 @@ def auth():
     if db.get_user_token(int(user_id)):
         return "✅ Вы уже авторизованы! Вернитесь в бота."
     
+    if not CLIENT_SECRETS_FILE:
+        return "❌ Ошибка: не найдены credentials Google. Обратитесь к администратору.", 500
+    
     flow = Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE,
         scopes=['https://www.googleapis.com/auth/drive.file'],
@@ -127,6 +157,9 @@ def oauth2callback():
         if not user_id:
             return "❌ Не найден user_id", 400
         
+        if not CLIENT_SECRETS_FILE:
+            return "❌ Ошибка: не найдены credentials Google", 500
+        
         flow = Flow.from_client_secrets_file(
             CLIENT_SECRETS_FILE,
             scopes=['https://www.googleapis.com/auth/drive.file'],
@@ -161,7 +194,6 @@ def oauth2callback():
 
 @app.route('/check_auth')
 def check_auth():
-    """Проверка авторизации пользователя"""
     user_id = request.args.get('user_id')
     if not user_id:
         return jsonify({'authorized': False, 'error': 'No user_id'}), 400
