@@ -21,11 +21,8 @@ class Publisher:
         self.is_running = {}
         self.base_url = "https://platform-api2.max.ru"
     
-    # ========== ЗАГРУЗКА ИЗОБРАЖЕНИЙ В MAX ==========
     def upload_image_to_max(self, image_path, token):
-        """Загрузка изображения на сервер MAX через /uploads"""
         try:
-            # 1. Получаем URL для загрузки
             upload_url = f"{self.base_url}/uploads?type=image"
             headers = {"Authorization": token}
             
@@ -40,7 +37,6 @@ class Publisher:
                 logger.error(f"❌ Нет URL для загрузки: {upload_data}")
                 return None
             
-            # 2. Загружаем изображение по полученному URL
             with open(image_path, 'rb') as f:
                 files = {'data': f}
                 response = requests.post(upload_url, files=files, timeout=60, verify=False)
@@ -62,7 +58,6 @@ class Publisher:
             logger.error(f"❌ Ошибка при загрузке изображения: {e}")
             return None
     
-    # ========== ПУБЛИКАЦИЯ ПАПКИ ==========
     def publish_folder(self, folder_path, group_id, bot_token, post_number=None, total_posts=None):
         try:
             logger.info(f"📤 Публикация папки: {folder_path} в группу {group_id}")
@@ -70,7 +65,6 @@ class Publisher:
             info_file = None
             images = []
             
-            # Сканируем папку
             for f in os.listdir(folder_path):
                 file_path = os.path.join(folder_path, f)
                 if os.path.isfile(file_path):
@@ -86,7 +80,6 @@ class Publisher:
                 logger.warning(f"⚠️ Нет info.txt в папке {folder_path}")
                 return False, "Нет info.txt"
             
-            # Читаем info.txt
             try:
                 with open(info_file, 'r', encoding='utf-8') as f:
                     info_text = f.read()
@@ -94,14 +87,11 @@ class Publisher:
                 with open(info_file, 'r', encoding='cp1251') as f:
                     info_text = f.read()
             
-            # Формируем текст
-            if post_number and total_posts:
-                full_text = f"📌 **Пост {post_number}/{total_posts}**\n\n{info_text}"
-            else:
-                full_text = info_text
+            # ✅ УБРАНА СТРОКА "Пост X/Y" — теперь только текст из info.txt
+            full_text = info_text
             
             # ========== ЗАГРУЖАЕМ ИЗОБРАЖЕНИЯ ==========
-            images = images[:10]  # Максимум 10 изображений
+            images = images[:10]
             image_tokens = []
             
             for image_path in images:
@@ -109,12 +99,10 @@ class Publisher:
                 upload_token = self.upload_image_to_max(image_path, bot_token)
                 if upload_token:
                     image_tokens.append(upload_token)
-                    # Пауза между загрузками, чтобы не перегружать сервер
                     time.sleep(0.5)
                 else:
                     logger.warning(f"⚠️ Не удалось загрузить изображение: {image_path}")
             
-            # Если ни одно изображение не загрузилось — отправляем только текст
             if not image_tokens:
                 logger.warning("⚠️ Нет загруженных изображений, отправляю только текст")
                 result = self.api.send_message_to_chat(group_id, full_text)
@@ -123,14 +111,11 @@ class Publisher:
                 else:
                     return False, "Ошибка отправки текста"
             
-            # ========== ОТПРАВЛЯЕМ СООБЩЕНИЕ С ГАЛЕРЕЕЙ ==========
             logger.info(f"📤 Отправка сообщения в группу {group_id} с {len(image_tokens)} изображениями")
             
-            # Ждём, пока изображения обработаются на сервере
             logger.info("⏳ Ожидание обработки изображений на сервере (3 секунды)...")
             time.sleep(3)
             
-            # Формируем attachments
             attachments = []
             for token in image_tokens:
                 attachments.append({
@@ -148,7 +133,6 @@ class Publisher:
                 logger.info(f"✅ Сообщение с галереей отправлено в группу {group_id}")
                 return True, "Успешно"
             else:
-                # Если не получилось с attachments — пробуем только текст
                 logger.warning("⚠️ Не удалось отправить с attachments, пробую только текст")
                 result = self.api.send_message_to_chat(group_id, full_text)
                 if result:
@@ -160,7 +144,6 @@ class Publisher:
             logger.error(f"❌ Ошибка публикации: {e}")
             return False, str(e)
     
-    # ========== ЗАПУСК ПУБЛИКАЦИИ ==========
     def start(self, user_id):
         logger.info(f"🚀 Запуск публикации для пользователя {user_id}")
         
