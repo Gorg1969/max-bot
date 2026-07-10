@@ -5,7 +5,7 @@ import logging
 import requests
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload, MediaIoBaseUpload
 from googleapiclient.errors import HttpError
 
 logger = logging.getLogger(__name__)
@@ -71,19 +71,24 @@ class GoogleDrive:
     
     # ========== РАБОТА С ФАЙЛАМИ ==========
     
-    def save_file_to_temp(self, file_data, filename, folder_id):
-        """Сохранение файла во временную папку"""
+    def save_file_to_temp(self, file_obj, filename, folder_id):
+        """Сохранение файла во временную папку из объекта FileStorage"""
         try:
             file_metadata = {
                 'name': filename,
                 'parents': [folder_id]
             }
-            media = MediaFileUpload(file_data, resumable=True)
+            
+            # Читаем содержимое файла в BytesIO
+            file_content = io.BytesIO(file_obj.read())
+            media = MediaIoBaseUpload(file_content, mimetype='application/zip', resumable=True)
+            
             file = self.drive.files().create(
                 body=file_metadata,
                 media_body=media,
                 fields='id'
             ).execute()
+            
             logger.info(f"✅ Файл сохранён во временную папку: {filename}")
             return file.get('id')
         except HttpError as e:
