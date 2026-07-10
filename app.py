@@ -56,7 +56,7 @@ fm = FileManager(DATA_DIR)
 class APIClient:
     def __init__(self):
         self.token = TOKEN
-    
+
     def send_message(self, user_id, text):
         try:
             payload = {"text": text, "format": "markdown"}
@@ -72,7 +72,7 @@ class APIClient:
         except Exception as e:
             logger.error(f"❌ Ошибка отправки: {e}")
             return False
-    
+
     def send_message_to_chat(self, chat_id, text):
         try:
             payload = {"text": text, "format": "markdown"}
@@ -101,29 +101,29 @@ def auth():
     user_id = request.args.get('user_id')
     if not user_id:
         return "❌ Не передан user_id. Используйте: /auth?user_id=ВАШ_ID", 400
-    
+
     if db.get_user_token(int(user_id)):
         return "✅ Вы уже авторизованы! Вернитесь в бота."
-    
+
     if not CLIENT_SECRETS_FILE:
         return "❌ Ошибка: не найдены credentials Google. Обратитесь к администратору.", 500
-    
+
     flow = Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE,
         scopes=['https://www.googleapis.com/auth/drive.file'],
         redirect_uri='https://maxbot.bothost.tech/oauth2callback'
     )
-    
+
     authorization_url, state = flow.authorization_url(
         access_type='offline',
         include_granted_scopes='true',
         prompt='consent'
     )
-    
+
     session['state'] = state
     session['user_id'] = user_id
-    
-        return f"""
+
+    return f"""
     <html>
     <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
         <h2>🔐 Подключение Google Диска</h2>
@@ -139,21 +139,22 @@ def auth():
     </body>
     </html>
     """
-    @app.route('/oauth2callback')
-     def oauth2callback():
+
+@app.route('/oauth2callback')
+def oauth2callback():
     try:
         if request.args.get('state') != session.get('state'):
             return "❌ Ошибка: состояние не совпадает", 400
-        
+
         code = request.args.get('code')
         user_id = session.get('user_id')
-        
+
         if not user_id:
             return "❌ Не найден user_id", 400
-        
+
         if not CLIENT_SECRETS_FILE:
             return "❌ Ошибка: не найдены credentials Google", 500
-        
+
         flow = Flow.from_client_secrets_file(
             CLIENT_SECRETS_FILE,
             scopes=['https://www.googleapis.com/auth/drive.file'],
@@ -161,16 +162,16 @@ def auth():
         )
         flow.fetch_token(code=code)
         credentials = flow.credentials
-        
+
         db.save_user_token(
             user_id=int(user_id),
             access_token=credentials.token,
             refresh_token=credentials.refresh_token,
             expires_in=credentials.expiry
         )
-        
+
         session.clear()
-        
+
         return """
         <html>
         <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
@@ -191,7 +192,7 @@ def check_auth():
     user_id = request.args.get('user_id')
     if not user_id:
         return jsonify({'authorized': False, 'error': 'No user_id'}), 400
-    
+
     token = user_auth.get_user_token(int(user_id))
     return jsonify({'authorized': token is not None})
 
@@ -201,15 +202,15 @@ def check_auth():
 def upload_to_drive():
     try:
         user_id = int(request.form.get('user_id', 151296248))
-        
+
         # Проверяем авторизацию
         token = user_auth.get_user_token(user_id)
         if not token:
             return jsonify({'success': False, 'message': 'Google Диск не подключён'}), 401
-        
+
         drive = GoogleDrive(token)
         result = web.upload_to_drive(request, user_id, drive)
-        
+
         if result['success']:
             return jsonify(result)
         else:
@@ -228,7 +229,7 @@ def index():
 def upload_file():
     if request.method == 'GET':
         return web.upload_page()
-    
+
     try:
         user_id = 151296248
         result = web.upload_file(request, user_id)
@@ -249,10 +250,10 @@ def setup_webhook():
     token = request.args.get('token') or TOKEN
     if not token:
         return "❌ Токен не найден", 400
-    
+
     webhook_url = "https://maxbot.bothost.tech/webhook"
     headers = {"Authorization": token, "Content-Type": "application/json"}
-    
+
     try:
         r = requests.post(
             "https://platform-api2.max.ru/subscriptions",
@@ -276,14 +277,14 @@ def webhook():
 
         user_id = None
         text = None
-        
+
         if 'message' in data:
             msg = data['message']
             if 'sender' in msg:
                 user_id = msg['sender'].get('user_id')
             if 'body' in msg:
                 text = msg['body'].get('text')
-        
+
         if not user_id:
             return jsonify({"ok": True}), 200
 
