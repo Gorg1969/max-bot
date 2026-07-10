@@ -4,6 +4,7 @@ import logging
 import os
 import urllib3
 import json
+import re
 from modules import Database, FileManager, Publisher, WebInterface, UserAuth, GoogleDrive
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -23,8 +24,7 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("TOKEN") or os.environ.get("MAX_BOT_TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
 DATA_DIR = "/app/data"
-# ✅ ИСПРАВЛЕНО: полный путь к файлу
-CLIENT_SECRETS_FILE = os.path.join(os.path.dirname(__file__), "drive_keys.json")
+CLIENT_SECRETS_FILE = "/app/drive_keys.json"
 
 # ========== ИНИЦИАЛИЗАЦИЯ МОДУЛЕЙ ==========
 db = Database()
@@ -71,34 +71,81 @@ publisher = Publisher(api, fm, db)
 web = WebInterface(fm, publisher)
 user_auth = UserAuth(db)
 
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+
+def extract_file_id_from_url(url):
+    patterns = [
+        r'/file/d/([a-zA-Z0-9_-]+)',
+        r'id=([a-zA-Z0-9_-]+)',
+        r'([a-zA-Z0-9_-]{28,})'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+def download_file_from_drive(file_id, save_path):
+    url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    response = requests.get(url, stream=True, timeout=300, verify=False)
+    if response.status_code == 200:
+        with open(save_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        return True
+    return False
+
+def process_google_drive_link(user_id, url):
+    """Обработка ссылки на файл с Google Drive"""
+    api.send_message(user_id, "📥 Получил ссылку. Начинаю обработку...")
+    
+    file_id = extract_file_id_from_url(url)
+    if not file_id:
+        api.send_message(user_id, "❌ Не удалось извлечь ID файла из ссылки.")
+        return
+    
+    user_folder = fm.get_user_folder(user_id)
+    zip_path = os.path.join(user_folder, 'temp.zip')
+    
+    api.send_message(user_id, "⏳ Скачивание файла... (до 5 минут)")
+    if download_file_from_drive(file_id, zip_path):
+        size = os.path.getsize(zip_path)
+        api.send_message(user_id, f"✅ Файл скачан: {size // 1024 // 1024} МБ")
+        
+        api.send_message(user_id, "📦 Распаковка архива...")
+        if fm.extract_zip(user_id, zip_path):
+            os.remove(zip_path)
+            api.send_message(user_id, "✅ Архив распакован. Начинаю публикацию...")
+            publisher.start(user_id)
+        else:
+            api.send_message(user_id, "❌ Ошибка распаковки архива.")
+            fm.clear_user_data(user_id)
+    else:
+        api.send_message(user_id, "❌ Не удалось скачать файл. Проверьте ссылку.")
+
 # ========== АВТОРИЗАЦИЯ GOOGLE ==========
 
 @app.route('/auth')
 def auth():
-    """Начать процесс авторизации в Google Диске"""
     user_id = request.args.get('user_id')
     if not user_id:
         return "❌ Не передан user_id. Используйте: /auth?user_id=ВАШ_ID", 400
     
-    # Проверяем, есть ли уже токен
     if db.get_user_token(int(user_id)):
         return "✅ Вы уже авторизованы! Вернитесь в бота."
     
-    # Создаём Flow для авторизации
     flow = Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE,
         scopes=['https://www.googleapis.com/auth/drive.file'],
         redirect_uri='https://maxbot.bothost.tech/oauth2callback'
     )
     
-    # Генерируем ссылку
     authorization_url, state = flow.authorization_url(
         access_type='offline',
         include_granted_scopes='true',
         prompt='consent'
     )
     
-    # Сохраняем state и user_id в сессии
     session['state'] = state
     session['user_id'] = user_id
     
@@ -121,20 +168,16 @@ def auth():
 
 @app.route('/oauth2callback')
 def oauth2callback():
-    """Обработка callback от Google"""
     try:
-        # Проверяем state
         if request.args.get('state') != session.get('state'):
             return "❌ Ошибка: состояние не совпадает", 400
         
-        # Получаем код
         code = request.args.get('code')
         user_id = session.get('user_id')
         
         if not user_id:
             return "❌ Не найден user_id", 400
         
-        # Обмениваем код на токен
         flow = Flow.from_client_secrets_file(
             CLIENT_SECRETS_FILE,
             scopes=['https://www.googleapis.com/auth/drive.file'],
@@ -143,7 +186,6 @@ def oauth2callback():
         flow.fetch_token(code=code)
         credentials = flow.credentials
         
-        # Сохраняем токен
         db.save_user_token(
             user_id=int(user_id),
             access_token=credentials.token,
@@ -151,7 +193,6 @@ def oauth2callback():
             expires_in=credentials.expiry
         )
         
-        # Очищаем сессию
         session.clear()
         
         return """
@@ -258,9 +299,9 @@ def webhook():
             api.send_message(user_id, "⏹️ Публикация остановлена.")
             return jsonify({"ok": True}), 200
 
+        # ========== ОБРАБОТКА ССЫЛКИ НА GOOGLE DRIVE ==========
         if text and 'drive.google.com' in text:
-            api.send_message(user_id, "📥 Получил ссылку. Начинаю обработку...")
-            # Здесь вызывается функция обработки
+            process_google_drive_link(user_id, text)
             return jsonify({"ok": True}), 200
 
         return jsonify({"ok": True}), 200
