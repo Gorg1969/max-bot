@@ -202,22 +202,48 @@ def check_auth():
 def upload_to_drive():
     try:
         user_id = int(request.form.get('user_id', 151296248))
-
+        logger.info(f"📥 Запрос на загрузку от пользователя {user_id}")
+        
         # Проверяем авторизацию
         token = user_auth.get_user_token(user_id)
         if not token:
+            logger.warning(f"❌ Пользователь {user_id} не авторизован")
             return jsonify({'success': False, 'message': 'Google Диск не подключён'}), 401
-
+        
+        # Проверяем наличие файла
+        if 'file' not in request.files:
+            logger.warning("❌ Нет файла в запросе")
+            return jsonify({'success': False, 'message': 'Файл не выбран'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            logger.warning("❌ Пустое имя файла")
+            return jsonify({'success': False, 'message': 'Файл не выбран'}), 400
+        
+        if not file.filename.endswith('.zip'):
+            logger.warning(f"❌ Неверный формат файла: {file.filename}")
+            return jsonify({'success': False, 'message': 'Файл должен быть в формате .zip'}), 400
+        
+        logger.info(f"📤 Начинаю загрузку файла {file.filename} на Google Диск")
+        
+        # Создаём экземпляр GoogleDrive
         drive = GoogleDrive(token)
+        
+        # Вызываем метод загрузки
         result = web.upload_to_drive(request, user_id, drive)
-
+        
+        logger.info(f"✅ Результат загрузки: {result}")
+        
         if result['success']:
             return jsonify(result)
         else:
             return jsonify(result), 500
+            
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({'success': False, 'message': f'Ошибка: {str(e)}'}), 500
 
 # ========== ОСТАЛЬНЫЕ МАРШРУТЫ ==========
 
