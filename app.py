@@ -1,15 +1,11 @@
-from flask import Flask, request, jsonify, session, redirect
+from flask import Flask, request, jsonify, session
 import requests
 import logging
 import os
 import urllib3
 import json
 import tempfile
-from modules import (
-    Database, FileManager, Publisher, WebInterface,
-    UserAuth, GoogleDrive,
-    process_google_drive_link
-)
+from modules import Database, FileManager, Publisher, WebInterface, UserAuth, GoogleDrive
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 
@@ -38,7 +34,7 @@ if creds_json:
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
             f.write(creds_json)
             CLIENT_SECRETS_FILE = f.name
-        logger.info(f"✅ Credentials загружены из переменной окружения")
+        logger.info("✅ Credentials загружены из переменной окружения")
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки credentials из переменной: {e}")
 
@@ -127,7 +123,7 @@ def auth():
     session['state'] = state
     session['user_id'] = user_id
     
-    return f"""
+        return f"""
     <html>
     <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
         <h2>🔐 Подключение Google Диска</h2>
@@ -143,9 +139,8 @@ def auth():
     </body>
     </html>
     """
-
-@app.route('/oauth2callback')
-def oauth2callback():
+    @app.route('/oauth2callback')
+     def oauth2callback():
     try:
         if request.args.get('state') != session.get('state'):
             return "❌ Ошибка: состояние не совпадает", 400
@@ -315,7 +310,7 @@ def webhook():
             return jsonify({"ok": True}), 200
 
         if text and 'drive.google.com' in text:
-            process_google_drive_link(user_id, text, api, fm, publisher, user_auth)
+            api.send_message(user_id, "📥 Получил ссылку. Обработка пока не реализована.")
             return jsonify({"ok": True}), 200
 
         return jsonify({"ok": True}), 200
