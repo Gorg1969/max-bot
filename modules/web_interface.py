@@ -1,6 +1,8 @@
 from flask import render_template_string, request, jsonify
 import os
 import logging
+import io
+import zipfile
 
 logger = logging.getLogger(__name__)
 
@@ -59,13 +61,9 @@ UPLOAD_HTML = """
             text-decoration: none;
         }
         .btn:hover { background: #357ae8; }
-        .btn-success {
-            background: #28a745;
-        }
+        .btn-success { background: #28a745; }
         .btn-success:hover { background: #218838; }
-        .btn-secondary {
-            background: #6c757d;
-        }
+        .btn-secondary { background: #6c757d; }
         .btn-secondary:hover { background: #5a6268; }
         .file-input-wrapper {
             margin: 20px 0;
@@ -76,19 +74,9 @@ UPLOAD_HTML = """
             cursor: pointer;
         }
         .file-input-wrapper:hover { border-color: #4CAF50; }
-        .file-input-wrapper input[type="file"] {
-            display: none;
-        }
-        .file-input-wrapper label {
-            cursor: pointer;
-            font-size: 16px;
-            color: #666;
-        }
-        .file-input-wrapper.disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-            pointer-events: none;
-        }
+        .file-input-wrapper input[type="file"] { display: none; }
+        .file-input-wrapper label { cursor: pointer; font-size: 16px; color: #666; }
+        .file-input-wrapper.disabled { opacity: 0.5; cursor: not-allowed; pointer-events: none; }
         .file-input-wrapper.disabled:hover { border-color: #ccc; }
         .btn-upload {
             display: block;
@@ -132,7 +120,6 @@ UPLOAD_HTML = """
     <div class="container">
         <h1>📤 Загрузка архива</h1>
         
-        <!-- Секция авторизации -->
         <div class="auth-section">
             <div id="authStatus" class="status disconnected">⏳ Проверка подключения...</div>
             <div>
@@ -160,7 +147,6 @@ UPLOAD_HTML = """
         </div>
         
         <button class="btn-upload" id="submitBtn" disabled>📤 Загрузить и опубликовать</button>
-        
         <div id="statusMsg" class="status-msg"></div>
         <div class="footer">Бот автоматически начнёт публикацию после загрузки</div>
     </div>
@@ -168,7 +154,6 @@ UPLOAD_HTML = """
     <script>
         let isAuthorized = false;
         
-        // Проверка авторизации
         async function checkAuth() {
             const statusDiv = document.getElementById('authStatus');
             const authLink = document.getElementById('authLink');
@@ -188,9 +173,7 @@ UPLOAD_HTML = """
                     statusDiv.className = 'status connected';
                     authLink.style.display = 'none';
                     fileWrapper.classList.remove('disabled');
-                    // Включаем кнопку если выбран файл
-                    const fileInput = document.getElementById('fileInput');
-                    if (fileInput.files.length > 0) {
+                    if (document.getElementById('fileInput').files.length > 0) {
                         submitBtn.disabled = false;
                     }
                 } else {
@@ -207,13 +190,9 @@ UPLOAD_HTML = """
             }
         }
         
-        // Проверяем при загрузке
         checkAuth();
-        
-        // Кнопка проверки
         document.getElementById('checkAuthBtn').addEventListener('click', checkAuth);
         
-        // Выбор файла
         document.getElementById('fileInput').addEventListener('change', function() {
             const file = this.files[0];
             const submitBtn = document.getElementById('submitBtn');
@@ -229,7 +208,6 @@ UPLOAD_HTML = """
             }
         });
         
-        // Загрузка
         document.getElementById('submitBtn').addEventListener('click', async function() {
             const fileInput = document.getElementById('fileInput');
             const submitBtn = this;
@@ -242,7 +220,6 @@ UPLOAD_HTML = """
             }
             
             const file = fileInput.files[0];
-            
             if (!file.name.endsWith('.zip')) {
                 showStatus('❌ Файл должен быть в формате .zip', 'error');
                 return;
@@ -251,75 +228,32 @@ UPLOAD_HTML = """
             submitBtn.disabled = true;
             submitBtn.textContent = '⏳ Загрузка...';
             progressBar.style.display = 'block';
-            showStatus('⏳ Загрузка файла...', 'info');
-            
-            const CHUNK_SIZE = 10 * 1024 * 1024;
-            const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-            const uploadedChunks = [];
-            
-            for (let i = 0; i < totalChunks; i++) {
-                const start = i * CHUNK_SIZE;
-                const end = Math.min(start + CHUNK_SIZE, file.size);
-                const chunk = file.slice(start, end);
-                
-                const formData = new FormData();
-                formData.append('chunk', chunk);
-                formData.append('chunkIndex', i);
-                formData.append('totalChunks', totalChunks);
-                formData.append('filename', file.name);
-                formData.append('user_id', '151296248');
-                
-                try {
-                    const response = await fetch('/upload_chunk', {
-                        method: 'POST',
-                        body: formData
-                    });
-                    
-                    const result = await response.json();
-                    
-                    if (result.success) {
-                        uploadedChunks.push(i);
-                        const percent = Math.round((uploadedChunks.length / totalChunks) * 100);
-                        progress.style.width = percent + '%';
-                        progress.textContent = percent + '%';
-                    } else {
-                        throw new Error(result.message);
-                    }
-                } catch (error) {
-                    showStatus('❌ Ошибка загрузки: ' + error.message, 'error');
-                    submitBtn.disabled = false;
-                    submitBtn.textContent = '📤 Загрузить и опубликовать';
-                    return;
-                }
-            }
-            
-            showStatus('⏳ Сборка файла...', 'info');
+            showStatus('⏳ Загрузка файла на Google Диск...', 'info');
             
             try {
-                const response = await fetch('/assemble_file', {
+                const formData = new FormData();
+                formData.append('file', file);
+                formData.append('user_id', '151296248');
+                
+                const response = await fetch('/upload_to_drive', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        filename: file.name,
-                        user_id: '151296248',
-                        totalChunks: totalChunks
-                    })
+                    body: formData
                 });
                 
                 const result = await response.json();
                 
                 if (result.success) {
+                    progress.style.width = '100%';
+                    progress.textContent = '100%';
                     showStatus('✅ ' + result.message, 'success');
                 } else {
                     showStatus('❌ ' + result.message, 'error');
                 }
             } catch (error) {
-                showStatus('❌ Ошибка сборки: ' + error.message, 'error');
+                showStatus('❌ Ошибка загрузки: ' + error.message, 'error');
             } finally {
                 submitBtn.disabled = false;
                 submitBtn.textContent = '📤 Загрузить и опубликовать';
-                progress.style.width = '100%';
-                progress.textContent = '100%';
             }
         });
         
@@ -341,56 +275,30 @@ class WebInterface:
     def upload_page(self):
         return render_template_string(UPLOAD_HTML)
     
-    def upload_chunk(self, request, user_id):
-        if 'chunk' not in request.files:
-            return {'success': False, 'message': 'Нет части файла'}
+    def upload_to_drive(self, request, user_id, drive):
+        """Загрузка файла на Google Диск пользователя"""
+        if 'file' not in request.files:
+            return {'success': False, 'message': 'Файл не выбран'}
         
-        chunk = request.files['chunk']
-        chunk_index = int(request.form.get('chunkIndex', 0))
-        total_chunks = int(request.form.get('totalChunks', 0))
-        filename = request.form.get('filename', 'temp.zip')
+        file = request.files['file']
+        if file.filename == '':
+            return {'success': False, 'message': 'Файл не выбран'}
         
-        user_folder = self.fm.get_user_folder(user_id)
-        chunk_dir = os.path.join(user_folder, 'chunks')
-        os.makedirs(chunk_dir, exist_ok=True)
+        if not file.filename.endswith('.zip'):
+            return {'success': False, 'message': 'Файл должен быть в формате .zip'}
         
-        chunk_path = os.path.join(chunk_dir, f'chunk_{chunk_index}')
-        chunk.save(chunk_path)
+        # Создаём временную папку на Google Диске
+        temp_folder_id = drive.create_temp_folder(user_id)
+        if not temp_folder_id:
+            return {'success': False, 'message': 'Не удалось создать временную папку на Google Диске'}
         
-        logger.info(f"📥 Часть {chunk_index+1}/{total_chunks} сохранена")
-        return {'success': True}
-    
-    def assemble_file(self, request, user_id):
-        data = request.get_json()
-        filename = data.get('filename', 'temp.zip')
-        total_chunks = data.get('totalChunks', 0)
+        # Загружаем файл
+        file_id = drive.save_file_to_temp(file, file.filename, temp_folder_id)
+        if not file_id:
+            return {'success': False, 'message': 'Не удалось загрузить файл на Google Диск'}
         
-        user_folder = self.fm.get_user_folder(user_id)
-        chunk_dir = os.path.join(user_folder, 'chunks')
-        output_path = os.path.join(user_folder, filename)
+        logger.info(f"✅ Файл загружен на Google Диск: {file.filename}")
         
-        try:
-            with open(output_path, 'wb') as outfile:
-                for i in range(total_chunks):
-                    chunk_path = os.path.join(chunk_dir, f'chunk_{i}')
-                    if not os.path.exists(chunk_path):
-                        return {'success': False, 'message': f'Часть {i+1} не найдена'}
-                    
-                    with open(chunk_path, 'rb') as infile:
-                        outfile.write(infile.read())
-                    os.remove(chunk_path)
-            
-            os.rmdir(chunk_dir)
-            
-            logger.info(f"✅ Файл собран: {output_path} ({os.path.getsize(output_path)} байт)")
-            
-            if self.fm.extract_zip(user_id, output_path):
-                os.remove(output_path)
-                self.publisher.start(user_id)
-                return {'success': True, 'message': 'Архив распакован. Публикация началась!'}
-            else:
-                self.fm.clear_user_data(user_id)
-                return {'success': False, 'message': 'Ошибка распаковки архива'}
-        except Exception as e:
-            logger.error(f"❌ Ошибка сборки: {e}")
-            return {'success': False, 'message': f'Ошибка: {str(e)}'}
+        # Запускаем публикацию
+        self.publisher.start_from_drive(user_id, temp_folder_id)
+        return {'success': True, 'message': f'Файл загружен на Google Диск. Публикация началась!'}
