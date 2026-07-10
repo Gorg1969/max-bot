@@ -2,6 +2,7 @@ import sqlite3
 import os
 import time
 import logging
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +31,20 @@ class Database:
     def save_user_token(self, user_id, access_token, refresh_token=None, expires_in=None, token_type='Bearer'):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
-        # ✅ ИСПРАВЛЕННАЯ СТРОКА:
-        expires_at = int(time.time() + expires_in) if expires_in else None
+        
+        # ✅ ИСПРАВЛЕНО: конвертируем expires_in в секунды
+        if expires_in:
+            if isinstance(expires_in, timedelta):
+                expires_at = int(time.time() + expires_in.total_seconds())
+            elif isinstance(expires_in, datetime):
+                expires_at = int(expires_in.timestamp())
+            elif isinstance(expires_in, (int, float)):
+                expires_at = int(time.time() + expires_in)
+            else:
+                expires_at = int(time.time() + 3600)  # 1 час по умолчанию
+        else:
+            expires_at = None
+        
         c.execute('''
             INSERT OR REPLACE INTO user_tokens 
             (user_id, access_token, refresh_token, token_type, expires_at, updated_at)
