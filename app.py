@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("TOKEN") or os.environ.get("MAX_BOT_TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
 DATA_DIR = "/app/data"
-CLIENT_SECRETS_FILE = "drive_keys.json"  # ← Файл с ключами Google
+# ✅ ИСПРАВЛЕНО: полный путь к файлу
+CLIENT_SECRETS_FILE = os.path.join(os.path.dirname(__file__), "drive_keys.json")
 
 # ========== ИНИЦИАЛИЗАЦИЯ МОДУЛЕЙ ==========
 db = Database()
@@ -267,8 +268,6 @@ def webhook():
     except Exception as e:
         logger.error(f"❌ ОШИБКА: {e}")
         return jsonify({"ok": False}), 500
-
-# ========== ЗАПУСК ==========
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
