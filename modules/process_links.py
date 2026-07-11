@@ -124,8 +124,7 @@ def process_google_drive_link(link, download_dir="downloads"):
     print(f"🔑 ID файла: {file_id}")
     
     # Формируем имя для сохранения
-    # Пробуем получить имя файла из заголовков (можно расширить)
-    filename = f"file_{file_id}.zip"  # По умолчанию
+    filename = f"file_{file_id}.zip"
     
     # Полный путь для сохранения
     destination = os.path.join(download_dir, filename)
@@ -133,13 +132,17 @@ def process_google_drive_link(link, download_dir="downloads"):
     # Скачиваем файл
     return download_large_file_from_drive(file_id, destination)
 
-# Пример использования
-if __name__ == "__main__":
-    # Тестовая ссылка
-    test_link = "https://drive.google.com/file/d/1V7LRSzWASnPvd06nYvWDf4aQeiw9HFVo/view?usp=sharing"
-    
+# Сохраняем совместимость со старым кодом
+def download_file_from_drive(url, destination_path):
+    """
+    Устаревшая функция для обратной совместимости
+    """
     try:
-        result = process_google_drive_link(test_link)
-        print(f"✅ Файл сохранён: {result}")
+        file_id = extract_file_id_from_url(url)
+        if not file_id:
+            return False
+        result = download_large_file_from_drive(file_id, destination_path)
+        return True if result else False
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        print(f"❌ Ошибка скачивания: {e}")
+        return False
