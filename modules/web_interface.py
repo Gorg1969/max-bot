@@ -305,39 +305,34 @@ class WebInterface:
                     # ========== ЗАГРУЖАЕМ ИЗОБРАЖЕНИЯ В MAX ==========
                     image_tokens = []
                     
-                    for image_name in images[:10]:  # Максимум 10 изображений
+                    for image_name in images[:10]:
                         try:
-                            # Извлекаем изображение из ZIP
                             with zip_ref.open(image_name) as f:
                                 image_data = f.read()
                             
-                            # Создаём временный файл
                             with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
                                 tmp.write(image_data)
                                 tmp_path = tmp.name
                             
-                            # Загружаем в MAX
-                            logger.info(f"📤 Загрузка изображения: {image_name}")
                             token = publisher.upload_image_to_max(tmp_path, bot_token)
-                            
-                            # Удаляем временный файл
                             os.unlink(tmp_path)
                             
                             if token:
                                 image_tokens.append(token)
                                 logger.info(f"✅ Изображение загружено: {image_name}")
-                            else:
-                                logger.warning(f"⚠️ Не удалось загрузить: {image_name}")
                         except Exception as e:
-                            logger.error(f"❌ Ошибка загрузки изображения {image_name}: {e}")
+                            logger.error(f"❌ Ошибка загрузки {image_name}: {e}")
                     
-                    # ========== ОТПРАВЛЯЕМ СООБЩЕНИЕ ==========
+                    # ========== ОТПРАВЛЯЕМ ОДНО СООБЩЕНИЕ ==========
                     if image_tokens:
-                        # Отправляем с изображениями
                         attachments = [{"type": "image", "payload": {"token": t}} for t in image_tokens]
+                        
+                        # Добавляем номер поста
+                        full_text = f"📌 **Пост {i}/{total}**\n\n{info_content}"
+                        
                         result = publisher.api.send_message_to_chat_with_attachments(
                             chat_id=data['group_id'],
-                            text=info_content,
+                            text=full_text,
                             attachments=attachments
                         )
                         if result:
@@ -347,7 +342,8 @@ class WebInterface:
                             errors.append(f"{folder_name}: ошибка отправки")
                     else:
                         # Отправляем только текст
-                        result = publisher.api.send_message_to_chat(data['group_id'], info_content)
+                        full_text = f"📌 **Пост {i}/{total}**\n\n{info_content}"
+                        result = publisher.api.send_message_to_chat(data['group_id'], full_text)
                         if result:
                             published += 1
                             logger.info(f"✅ Опубликовано (только текст): {folder_name}")
