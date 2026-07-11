@@ -1,6 +1,9 @@
 from flask import render_template_string, request, jsonify
 import os
 import logging
+import zipfile
+import io
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -81,25 +84,11 @@ UPLOAD_HTML = """
         .status-msg.error { display: block; background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
         .status-msg.info { display: block; background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
         .footer { text-align: center; margin-top: 20px; font-size: 12px; color: #999; }
-        .server-load {
-            background: #fff3cd;
-            border: 1px solid #ffc107;
-            padding: 10px;
-            border-radius: 5px;
-            margin: 15px 0;
-            text-align: center;
-            font-size: 14px;
-            display: none;
-        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>📤 Загрузка архива</h1>
-        
-        <div id="serverLoad" class="server-load">
-            ⚠️ Сервер перегружен. Пожалуйста, подождите и попробуйте позже.
-        </div>
         
         <div class="info">
             <strong>📌 Требования к архиву:</strong><br>
@@ -125,31 +114,9 @@ UPLOAD_HTML = """
     </div>
 
     <script>
-        // Проверяем нагрузку на сервер
-        async function checkServerLoad() {
-            try {
-                const response = await fetch('/health');
-                const data = await response.json();
-                if (data.active_uploads >= data.max_concurrent) {
-                    document.getElementById('serverLoad').style.display = 'block';
-                    document.getElementById('submitBtn').disabled = true;
-                } else {
-                    document.getElementById('serverLoad').style.display = 'none';
-                }
-            } catch (e) {
-                console.error('Ошибка проверки нагрузки:', e);
-            }
-        }
-        
-        setInterval(checkServerLoad, 5000);
-        checkServerLoad();
-        
-        const CHUNK_SIZE = 10 * 1024 * 1024; // 10 МБ
-        
         document.getElementById('fileInput').addEventListener('change', function() {
             const file = this.files[0];
             const submitBtn = document.getElementById('submitBtn');
-            
             if (file) {
                 submitBtn.disabled = false;
                 showStatus('✅ Выбран файл: ' + file.name + ' (' + (file.size / 1024 / 1024).toFixed(1) + ' МБ)', 'info');
@@ -181,72 +148,30 @@ UPLOAD_HTML = """
             progressBar.style.display = 'block';
             showStatus('⏳ Загрузка файла...', 'info');
             
-            const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-            const uploadedChunks = [];
-            
-            for (let i = 0; i < totalChunks; i++) {
-                const start = i * CHUNK_SIZE;
-                const end = Math.min(start + CHUNK_SIZE, file.size);
-                const chunk = file.slice(start, end);
-                
+            try {
                 const formData = new FormData();
-                formData.append('chunk', chunk);
-                formData.append('chunkIndex', i);
-                formData.append('totalChunks', totalChunks);
-                formData.append('filename', file.name);
+                formData.append('file', file);
                 formData.append('user_id', '151296248');
                 
-                try {
-                    const response = await fetch('/upload_chunk', {
-                        method: 'POST',
-                        body: formData
-                    });
-                    
-                    const result = await response.json();
-                    
-                    if (result.success) {
-                        uploadedChunks.push(i);
-                        const percent = Math.round((uploadedChunks.length / totalChunks) * 100);
-                        progress.style.width = percent + '%';
-                        progress.textContent = percent + '%';
-                    } else {
-                        throw new Error(result.message);
-                    }
-                } catch (error) {
-                    showStatus('❌ Ошибка загрузки: ' + error.message, 'error');
-                    submitBtn.disabled = false;
-                    submitBtn.textContent = '📤 Загрузить и опубликовать';
-                    return;
-                }
-            }
-            
-            showStatus('⏳ Сборка файла...', 'info');
-            
-            try {
-                const response = await fetch('/assemble_file', {
+                const response = await fetch('/upload_zip_stream', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        filename: file.name,
-                        user_id: '151296248',
-                        totalChunks: totalChunks
-                    })
+                    body: formData
                 });
                 
                 const result = await response.json();
                 
                 if (result.success) {
+                    progress.style.width = '100%';
+                    progress.textContent = '100%';
                     showStatus('✅ ' + result.message, 'success');
                 } else {
                     showStatus('❌ ' + result.message, 'error');
                 }
             } catch (error) {
-                showStatus('❌ Ошибка сборки: ' + error.message, 'error');
+                showStatus('❌ Ошибка загрузки: ' + error.message, 'error');
             } finally {
                 submitBtn.disabled = false;
                 submitBtn.textContent = '📤 Загрузить и опубликовать';
-                progress.style.width = '100%';
-                progress.textContent = '100%';
             }
         });
         
@@ -321,3 +246,68 @@ class WebInterface:
         except Exception as e:
             logger.error(f"❌ Ошибка сборки: {e}")
             return {'success': False, 'message': f'Ошибка: {str(e)}'}
+    
+    def process_zip_stream(self, file, user_id, publisher):
+        """Потоковая обработка ZIP-архива без сохранения на диск"""
+        try:
+            zip_data = io.BytesIO(file.read())
+            published = 0
+            errors = []
+            
+            def extract_group_id(folder_name):
+                match = re.search(r'-(\d+)', folder_name)
+                return match.group(1) if match else None
+            
+            with zipfile.ZipFile(zip_data, 'r') as zip_ref:
+                # Находим все папки с ID групп
+                folders = {}
+                for name in zip_ref.namelist():
+                    if name.endswith('/'):
+                        folder_name = name.rstrip('/')
+                        group_id = extract_group_id(folder_name)
+                        if group_id:
+                            folders[folder_name] = {
+                                'group_id': group_id,
+                                'files': []
+                            }
+                    else:
+                        # Ищем родительскую папку
+                        for folder in folders:
+                            if name.startswith(folder + '/'):
+                                folders[folder]['files'].append(name)
+                                break
+                
+                total = len(folders)
+                
+                for i, (folder_name, data) in enumerate(folders.items(), 1):
+                    if not publisher.is_running.get(user_id, True):
+                        break
+                    
+                    # Извлекаем info.txt
+                    info_content = None
+                    images = []
+                    
+                    for file_name in data['files']:
+                        if file_name.lower().endswith(('info.txt', 'info.md')):
+                            with zip_ref.open(file_name) as f:
+                                info_content = f.read().decode('utf-8', errors='ignore')
+                        elif file_name.lower().endswith(('.jpg', '.jpeg', '.png', '.gif')):
+                            images.append(file_name)
+                    
+                    if not info_content:
+                        errors.append(f"{folder_name}: нет info.txt")
+                        continue
+                    
+                    # Отправляем сообщение
+                    logger.info(f"📤 Публикация {i}/{total}: {folder_name}")
+                    result = publisher.api.send_message_to_chat(data['group_id'], info_content)
+                    if result:
+                        published += 1
+                    else:
+                        errors.append(f"{folder_name}: ошибка отправки")
+            
+            return {'success': True, 'published': published, 'errors': errors}
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки ZIP: {e}")
+            return {'success': False, 'message': str(e)}
