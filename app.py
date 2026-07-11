@@ -4,7 +4,7 @@ import logging
 import os
 import urllib3
 from modules import Database, FileManager, Publisher, WebInterface
-from modules.process_links import download_file_from_drive
+from modules.process_links import process_google_drive_link, download_file_from_drive
 
 # ОТКЛЮЧАЕМ ПРЕДУПРЕЖДЕНИЯ SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -89,7 +89,7 @@ web = WebInterface(fm, publisher)
 
 @app.route('/process_drive_link', methods=['POST'])
 def process_drive_link():
-    """Обработка ссылки на Google Drive"""
+    """Обработка ссылки на Google Drive (поддержка больших файлов 200+ МБ)"""
     try:
         data = request.get_json()
         url = data.get('url')
@@ -100,11 +100,26 @@ def process_drive_link():
         
         logger.info(f"📥 Получена ссылка: {url}")
         
-        # Скачиваем файл
+        # Получаем папку пользователя
         user_folder = fm.get_user_folder(user_id)
         zip_path = os.path.join(user_folder, 'temp.zip')
         
-        if download_file_from_drive(url, zip_path):
+        # 🔥 ИСПОЛЬЗУЕМ НОВУЮ ФУНКЦИЮ С ПОДДЕРЖКОЙ БОЛЬШИХ ФАЙЛОВ
+        try:
+            # Пытаемся скачать через новую функцию
+            file_path = process_google_drive_link(url, download_dir=user_folder)
+            
+            # Если файл скачался под другим именем, переименовываем в temp.zip
+            if file_path != zip_path:
+                # Если temp.zip уже существует, удаляем
+                if os.path.exists(zip_path):
+                    os.remove(zip_path)
+                os.rename(file_path, zip_path)
+            
+            # Проверяем, что файл существует
+            if not os.path.exists(zip_path):
+                raise Exception("Файл не был скачан")
+            
             # Проверяем размер
             size = os.path.getsize(zip_path)
             logger.info(f"✅ Файл скачан: {size // 1024 // 1024} МБ")
@@ -117,8 +132,10 @@ def process_drive_link():
             else:
                 fm.clear_user_data(user_id)
                 return jsonify({'success': False, 'message': 'Ошибка распаковки архива'}), 500
-        else:
-            return jsonify({'success': False, 'message': 'Не удалось скачать файл. Проверьте ссылку и доступ к файлу.'}), 500
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка скачивания: {e}")
+            return jsonify({'success': False, 'message': f'Не удалось скачать файл: {str(e)}'}), 500
             
     except Exception as e:
         logger.error(f"❌ Ошибка обработки ссылки: {e}")
