@@ -1,105 +1,145 @@
-import re
 import requests
+import re
 import os
-import logging
-
-logger = logging.getLogger(__name__)
+from urllib.parse import urlparse, parse_qs
 
 def extract_file_id_from_url(url):
-    """Извлечение ID файла из любой ссылки Google Drive"""
-    patterns = [
-        r'/file/d/([a-zA-Z0-9_-]+)',
-        r'id=([a-zA-Z0-9_-]+)',
-        r'open\?id=([a-zA-Z0-9_-]+)',
-        r'([a-zA-Z0-9_-]{28,})'
-    ]
+    """
+    Извлекает file_id из ссылки Google Drive
+    Пример: https://drive.google.com/file/d/1V7LRSzWASnPvd06nYvWDf4aQeiw9HFVo/view
+    """
+    # Пробуем найти ID в пути
+    match = re.search(r'/d/([a-zA-Z0-9_-]+)', url)
+    if match:
+        return match.group(1)
     
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
+    # Пробуем найти ID в параметрах
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+    if 'id' in params:
+        return params['id'][0]
+    
     return None
 
-def convert_to_direct_link(url):
-    """Конвертация любой ссылки Google Drive в прямую ссылку для скачивания"""
-    file_id = extract_file_id_from_url(url)
-    if not file_id:
-        return None
-    return f"https://drive.google.com/uc?export=download&id={file_id}"
-
-def download_file_from_drive(url, save_path):
-    """Скачивание файла с Google Drive по ссылке (с автоконвертацией)"""
-    try:
-        file_id = extract_file_id_from_url(url)
-        if not file_id:
-            logger.error(f"❌ Не удалось извлечь ID из ссылки: {url}")
-            return False
-        
-        direct_url = convert_to_direct_link(url)
-        logger.info(f"📥 Скачивание: {direct_url}")
-        
-        response = requests.get(direct_url, stream=True, timeout=300, verify=False)
-        
-        if response.status_code != 200:
-            logger.error(f"❌ Ошибка скачивания: {response.status_code}")
-            return False
-        
-        # Проверяем, что это ZIP (PK = сигнатура ZIP)
-        content_start = response.content[:2]
-        if content_start != b'PK':
-            # Пробуем с confirm=1
-            logger.info("🔄 Пробую с confirm=1...")
-            direct_url = f"https://drive.google.com/uc?export=download&confirm=1&id={file_id}"
-            response = requests.get(direct_url, stream=True, timeout=300, verify=False)
-            
-            if response.status_code != 200 or response.content[:2] != b'PK':
-                logger.error("❌ Ссылка ведёт не на ZIP-архив")
-                return False
-        
-        # Сохраняем
-        with open(save_path, 'wb') as f:
-            for chunk in response.iter_content(8192):
-                f.write(chunk)
-        
-        logger.info(f"✅ Файл скачан: {save_path} ({os.path.getsize(save_path)} байт)")
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка скачивания: {e}")
-        return False
-
-def process_google_drive_link(user_id, url, api, fm, publisher, user_auth):
-    """Обработка ссылки на Google Drive (для бота)"""
-    api.send_message(user_id, "📥 Получил ссылку. Начинаю обработку...")
+def download_large_file_from_drive(file_id, destination_path, chunk_size=8192):
+    """
+    Скачивает большой файл с Google Drive с обработкой подтверждения
     
-    # Проверяем авторизацию
-    token = user_auth.get_user_token(user_id)
-    if not token:
-        api.send_message(user_id, "❌ Пользователь не авторизован. Подключите Google Диск через /auth")
-        return
+    Args:
+        file_id (str): ID файла в Google Drive
+        destination_path (str): Путь для сохранения файла
+        chunk_size (int): Размер чанка для скачивания
+    
+    Returns:
+        str: Путь к сохранённому файлу
+    
+    Raises:
+        Exception: Если не удалось скачать файл
+    """
+    
+    # Формируем начальную ссылку
+    download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    
+    # Создаём сессию для сохранения cookies
+    session = requests.Session()
+    
+    print(f"📥 Начинаем скачивание: {download_url}")
+    
+    try:
+        # Первый запрос - получаем страницу с подтверждением (если нужно)
+        response = session.get(download_url, stream=True, allow_redirects=True)
+        response.raise_for_status()
+        
+        # Проверяем, не перенаправило ли на страницу с подтверждением
+        if "confirm" in response.url:
+            print("🔄 Обнаружена страница подтверждения, извлекаем параметр...")
+            
+            # Извлекаем параметр confirm из URL
+            confirm_match = re.search(r"confirm=([^&]+)", response.url)
+            if confirm_match:
+                confirm_param = confirm_match.group(1)
+                print(f"✅ Найден параметр confirm: {confirm_param}")
+                
+                # Формируем новую ссылку с подтверждением
+                new_url = f"https://drive.google.com/uc?export=download&confirm={confirm_param}&id={file_id}"
+                print(f"🔄 Повторный запрос: {new_url}")
+                
+                # Делаем повторный запрос с подтверждением
+                response = session.get(new_url, stream=True)
+                response.raise_for_status()
+        
+        # Проверяем, что скачивается именно файл, а не HTML
+        content_type = response.headers.get("content-type", "")
+        
+        if "text/html" in content_type:
+            # Если всё равно получили HTML, возможно, файл требует авторизации
+            raise Exception("❌ Получен HTML вместо файла. Возможно, файл недоступен или требует входа в аккаунт.")
+        
+        # Определяем размер файла для прогресса
+        total_size = int(response.headers.get("content-length", 0))
+        if total_size > 0:
+            print(f"📦 Размер файла: {total_size / (1024*1024):.2f} МБ")
+        
+        # Скачиваем файл с прогрессом
+        downloaded = 0
+        with open(destination_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=chunk_size):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    
+                    # Показываем прогресс каждые 5 МБ
+                    if downloaded % (5 * 1024 * 1024) < chunk_size:
+                        progress = (downloaded / total_size * 100) if total_size > 0 else 0
+                        print(f"📥 Скачано: {downloaded / (1024*1024):.1f} МБ ({progress:.1f}%)")
+        
+        print(f"✅ Файл успешно скачан: {destination_path}")
+        return destination_path
+        
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"❌ Ошибка сети при скачивании: {e}")
+    except Exception as e:
+        raise Exception(f"❌ Ошибка при скачивании: {e}")
+
+def process_google_drive_link(link, download_dir="downloads"):
+    """
+    Основная функция для обработки ссылки Google Drive
+    
+    Args:
+        link (str): Ссылка на файл в Google Drive
+        download_dir (str): Директория для сохранения
+    
+    Returns:
+        str: Путь к скачанному файлу
+    """
+    
+    # Создаём папку для загрузок, если её нет
+    os.makedirs(download_dir, exist_ok=True)
     
     # Извлекаем ID файла
-    file_id = extract_file_id_from_url(url)
+    file_id = extract_file_id_from_url(link)
     if not file_id:
-        api.send_message(user_id, "❌ Не удалось извлечь ID файла из ссылки.")
-        return
+        raise ValueError("❌ Не удалось извлечь ID файла из ссылки")
     
-    # Сохраняем файл на сервер
-    user_folder = fm.get_user_folder(user_id)
-    zip_path = os.path.join(user_folder, 'temp.zip')
+    print(f"🔑 ID файла: {file_id}")
     
-    api.send_message(user_id, "⏳ Скачивание файла... (до 5 минут)")
-    if download_file_from_drive(url, zip_path):
-        size = os.path.getsize(zip_path)
-        api.send_message(user_id, f"✅ Файл скачан: {size // 1024 // 1024} МБ")
-        
-        api.send_message(user_id, "📦 Распаковка архива...")
-        if fm.extract_zip(user_id, zip_path):
-            os.remove(zip_path)
-            api.send_message(user_id, "✅ Архив распакован. Начинаю публикацию...")
-            publisher.start(user_id)
-        else:
-            api.send_message(user_id, "❌ Ошибка распаковки архива.")
-            fm.clear_user_data(user_id)
-    else:
-        api.send_message(user_id, "❌ Не удалось скачать файл. Проверьте ссылку.")
+    # Формируем имя для сохранения
+    # Пробуем получить имя файла из заголовков (можно расширить)
+    filename = f"file_{file_id}.zip"  # По умолчанию
+    
+    # Полный путь для сохранения
+    destination = os.path.join(download_dir, filename)
+    
+    # Скачиваем файл
+    return download_large_file_from_drive(file_id, destination)
+
+# Пример использования
+if __name__ == "__main__":
+    # Тестовая ссылка
+    test_link = "https://drive.google.com/file/d/1V7LRSzWASnPvd06nYvWDf4aQeiw9HFVo/view?usp=sharing"
+    
+    try:
+        result = process_google_drive_link(test_link)
+        print(f"✅ Файл сохранён: {result}")
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
