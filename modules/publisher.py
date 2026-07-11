@@ -8,6 +8,7 @@ import requests
 import json
 import re
 import io
+import tempfile
 
 if sys.platform == 'linux':
     sys.stdout.reconfigure(encoding='utf-8')
@@ -69,6 +70,7 @@ class Publisher:
             return None
     
     def publish_folder(self, folder_path, group_id, bot_token, post_number=None, total_posts=None):
+        """Публикация папки с текстом и фото в одном сообщении"""
         try:
             logger.info(f"📤 Публикация папки: {folder_path} в группу {group_id}")
             
@@ -99,69 +101,54 @@ class Publisher:
                 with open(info_file, 'r', encoding='cp1251') as f:
                     info_text = f.read()
             
-            # Текст без номера поста
-            full_text = info_text
-            
             # ========== ЗАГРУЖАЕМ ИЗОБРАЖЕНИЯ ==========
             images = images[:10]  # Максимум 10 изображений
             image_tokens = []
-            
-            if not images:
-                logger.warning("⚠️ Нет изображений в папке")
-            else:
-                logger.info(f"🖼️ Найдено изображений: {len(images)}")
             
             for image_path in images:
                 logger.info(f"📤 Загрузка изображения: {os.path.basename(image_path)}")
                 upload_token = self.upload_image_to_max(image_path, bot_token)
                 if upload_token:
                     image_tokens.append(upload_token)
-                    time.sleep(0.5)  # Пауза между загрузками
+                    time.sleep(0.5)
                 else:
                     logger.warning(f"⚠️ Не удалось загрузить изображение: {image_path}")
             
-            # ========== ОТПРАВКА СООБЩЕНИЯ ==========
-            if not image_tokens:
-                # Если нет изображений — отправляем только текст
-                logger.warning("⚠️ Нет загруженных изображений, отправляю только текст")
-                result = self.api.send_message_to_chat(group_id, full_text)
-                if result:
-                    return True, "Успешно (только текст)"
+            # ========== ОТПРАВЛЯЕМ ОДНО СООБЩЕНИЕ С ТЕКСТОМ И ФОТО ==========
+            if image_tokens:
+                attachments = [{"type": "image", "payload": {"token": t}} for t in image_tokens]
+                
+                # Добавляем номер поста, если нужно
+                if post_number and total_posts:
+                    full_text = f"📌 **Пост {post_number}/{total_posts}**\n\n{info_text}"
                 else:
-                    return False, "Ошибка отправки текста"
-            
-            # Если есть изображения — отправляем с вложениями
-            logger.info(f"📤 Отправка сообщения в группу {group_id} с {len(image_tokens)} изображениями")
-            
-            # Ждём обработки на сервере
-            logger.info("⏳ Ожидание обработки изображений (3 секунды)...")
-            time.sleep(3)
-            
-            # Формируем attachments
-            attachments = []
-            for token in image_tokens:
-                attachments.append({
-                    "type": "image",
-                    "payload": {"token": token}
-                })
-            
-            result = self.api.send_message_to_chat_with_attachments(
-                chat_id=group_id,
-                text=full_text,
-                attachments=attachments
-            )
-            
-            if result:
-                logger.info(f"✅ Сообщение с галереей отправлено в группу {group_id}")
-                return True, "Успешно"
-            else:
-                # Если не получилось с attachments — пробуем только текст
-                logger.warning("⚠️ Не удалось отправить с attachments, пробую только текст")
-                result = self.api.send_message_to_chat(group_id, full_text)
+                    full_text = info_text
+                
+                result = self.api.send_message_to_chat_with_attachments(
+                    chat_id=group_id,
+                    text=full_text,
+                    attachments=attachments
+                )
                 if result:
-                    return True, "Успешно (только текст)"
+                    logger.info(f"✅ Сообщение с {len(image_tokens)} фото отправлено в группу {group_id}")
+                    return True, "Успешно"
                 else:
+                    logger.error(f"❌ Ошибка отправки сообщения с фото в группу {group_id}")
                     return False, "Ошибка отправки"
+            else:
+                # Если нет фото — отправляем только текст
+                if post_number and total_posts:
+                    full_text = f"📌 **Пост {post_number}/{total_posts}**\n\n{info_text}"
+                else:
+                    full_text = info_text
+                
+                result = self.api.send_message_to_chat(group_id, full_text)
+                if result:
+                    logger.info(f"✅ Текст отправлен в группу {group_id}")
+                    return True, "Успешно (только текст)"
+                else:
+                    logger.error(f"❌ Ошибка отправки текста в группу {group_id}")
+                    return False, "Ошибка отправки текста"
             
         except Exception as e:
             logger.error(f"❌ Ошибка публикации: {e}")
