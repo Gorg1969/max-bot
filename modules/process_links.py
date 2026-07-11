@@ -21,6 +21,18 @@ def extract_file_id_from_url(url):
     
     return None
 
+def convert_to_direct_link(url):
+    """
+    Конвертирует ссылку Google Drive в прямую ссылку для скачивания
+    Возвращает прямую ссылку и ID файла
+    """
+    file_id = extract_file_id_from_url(url)
+    if not file_id:
+        return None, None
+    
+    direct_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    return direct_url, file_id
+
 def download_large_file_from_drive(file_id, destination_path, chunk_size=8192):
     """
     Скачивает большой файл с Google Drive с обработкой подтверждения
@@ -132,7 +144,6 @@ def process_google_drive_link(link, download_dir="downloads"):
     # Скачиваем файл
     return download_large_file_from_drive(file_id, destination)
 
-# Сохраняем совместимость со старым кодом
 def download_file_from_drive(url, destination_path):
     """
     Устаревшая функция для обратной совместимости
@@ -146,3 +157,12 @@ def download_file_from_drive(url, destination_path):
     except Exception as e:
         print(f"❌ Ошибка скачивания: {e}")
         return False
+
+# Экспортируем все необходимые функции
+__all__ = [
+    'extract_file_id_from_url',
+    'convert_to_direct_link',
+    'download_large_file_from_drive',
+    'process_google_drive_link',
+    'download_file_from_drive'
+]
