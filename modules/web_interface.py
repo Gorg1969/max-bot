@@ -38,6 +38,18 @@ UPLOAD_HTML = """
             font-size: 14px;
         }
         .info code { background: #d0e4ed; padding: 2px 6px; border-radius: 3px; }
+        .section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background: #f9f9f9;
+        }
+        .section-title {
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: #333;
+        }
         .file-input-wrapper {
             margin: 20px 0;
             padding: 30px;
@@ -85,6 +97,32 @@ UPLOAD_HTML = """
         .status-msg.error { display: block; background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
         .status-msg.info { display: block; background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
         .footer { text-align: center; margin-top: 20px; font-size: 12px; color: #999; }
+        .link-input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+            margin: 10px 0;
+            box-sizing: border-box;
+        }
+        .or-divider {
+            text-align: center;
+            margin: 15px 0;
+            color: #999;
+            font-size: 14px;
+        }
+        .or-divider::before,
+        .or-divider::after {
+            content: "";
+            display: inline-block;
+            width: 40%;
+            height: 1px;
+            background: #ddd;
+            vertical-align: middle;
+        }
+        .or-divider::before { margin-right: 10px; }
+        .or-divider::after { margin-left: 10px; }
     </style>
 </head>
 <body>
@@ -99,22 +137,77 @@ UPLOAD_HTML = """
             • <strong>Ограничений на размер нет</strong>
         </div>
         
-        <div class="file-input-wrapper" onclick="document.getElementById('fileInput').click()">
-            <input type="file" id="fileInput" name="file" accept=".zip">
-            <label for="fileInput">📂 <strong>Выберите ZIP-архив</strong><br>
-            <span style="font-size: 14px; color: #999;">(просто нажмите и выберите файл)</span></label>
+        <!-- Секция 1: Ссылка на Google Drive -->
+        <div class="section">
+            <div class="section-title">📎 Способ 1: Ссылка на Google Drive</div>
+            <p style="font-size: 14px; color: #666; margin-bottom: 10px;">
+                Вставьте ссылку на ZIP-архив, загруженный на Google Drive.
+            </p>
+            <input type="text" id="driveLink" class="link-input" placeholder="https://drive.google.com/file/d/.../view?usp=sharing">
+            <button class="btn-upload" id="processDriveLinkBtn" style="background: #4285F4; margin-top: 0;">📥 Загрузить по ссылке</button>
         </div>
         
-        <div id="progressBar" class="progress-bar">
-            <div id="progress" class="progress">0%</div>
+        <div class="or-divider">ИЛИ</div>
+        
+        <!-- Секция 2: Загрузка файла -->
+        <div class="section">
+            <div class="section-title">📂 Способ 2: Загрузка с компьютера</div>
+            <div class="file-input-wrapper" onclick="document.getElementById('fileInput').click()">
+                <input type="file" id="fileInput" name="file" accept=".zip">
+                <label for="fileInput">📂 <strong>Выберите ZIP-архив</strong><br>
+                <span style="font-size: 14px; color: #999;">(просто нажмите и выберите файл)</span></label>
+            </div>
+            
+            <div id="progressBar" class="progress-bar">
+                <div id="progress" class="progress">0%</div>
+            </div>
+            
+            <button class="btn-upload" id="submitBtn" disabled>📤 Загрузить и опубликовать</button>
         </div>
         
-        <button class="btn-upload" id="submitBtn" disabled>📤 Загрузить и опубликовать</button>
         <div id="statusMsg" class="status-msg"></div>
         <div class="footer">Бот автоматически начнёт публикацию после загрузки</div>
     </div>
 
     <script>
+        // ========== ЗАГРУЗКА ПО ССЫЛКЕ ==========
+        document.getElementById('processDriveLinkBtn').addEventListener('click', async function() {
+            const linkInput = document.getElementById('driveLink');
+            const statusDiv = document.getElementById('statusMsg');
+            const link = linkInput.value.trim();
+            
+            if (!link) {
+                showStatus('❌ Введите ссылку на архив', 'error');
+                return;
+            }
+            
+            if (!link.includes('drive.google.com')) {
+                showStatus('❌ Ссылка должна быть на Google Drive', 'error');
+                return;
+            }
+            
+            showStatus('⏳ Обработка ссылки...', 'info');
+            
+            try {
+                const response = await fetch('/process_drive_link', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url: link, user_id: '151296248' })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    showStatus('✅ ' + result.message, 'success');
+                } else {
+                    showStatus('❌ ' + result.message, 'error');
+                }
+            } catch (error) {
+                showStatus('❌ Ошибка: ' + error.message, 'error');
+            }
+        });
+        
+        // ========== ЗАГРУЗКА ФАЙЛА ==========
         document.getElementById('fileInput').addEventListener('change', function() {
             const file = this.files[0];
             const submitBtn = document.getElementById('submitBtn');
@@ -264,7 +357,6 @@ class WebInterface:
                 return match.group(1) if match else None
             
             with zipfile.ZipFile(zip_data, 'r') as zip_ref:
-                # Находим все папки с ID групп
                 folders = {}
                 for name in zip_ref.namelist():
                     if name.endswith('/'):
@@ -287,7 +379,6 @@ class WebInterface:
                     if not publisher.is_running.get(user_id, True):
                         break
                     
-                    # Извлекаем info.txt
                     info_content = None
                     images = []
                     
@@ -302,7 +393,6 @@ class WebInterface:
                         errors.append(f"{folder_name}: нет info.txt")
                         continue
                     
-                    # ========== ЗАГРУЖАЕМ ИЗОБРАЖЕНИЯ В MAX ==========
                     image_tokens = []
                     
                     for image_name in images[:10]:
@@ -323,13 +413,9 @@ class WebInterface:
                         except Exception as e:
                             logger.error(f"❌ Ошибка загрузки {image_name}: {e}")
                     
-                    # ========== ОТПРАВЛЯЕМ ОДНО СООБЩЕНИЕ ==========
                     if image_tokens:
                         attachments = [{"type": "image", "payload": {"token": t}} for t in image_tokens]
-                        
-                        # Добавляем номер поста
                         full_text = f"📌 **Пост {i}/{total}**\n\n{info_content}"
-                        
                         result = publisher.api.send_message_to_chat_with_attachments(
                             chat_id=data['group_id'],
                             text=full_text,
@@ -341,7 +427,6 @@ class WebInterface:
                         else:
                             errors.append(f"{folder_name}: ошибка отправки")
                     else:
-                        # Отправляем только текст
                         full_text = f"📌 **Пост {i}/{total}**\n\n{info_content}"
                         result = publisher.api.send_message_to_chat(data['group_id'], full_text)
                         if result:
