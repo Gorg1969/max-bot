@@ -60,6 +60,26 @@ class APIClient:
             logger.error(f"❌ Ошибка отправки в чат: {e}")
             return False
 
+    def send_message_to_chat_with_attachments(self, chat_id, text, attachments):
+        try:
+            payload = {
+                "text": text,
+                "format": "markdown",
+                "attachments": attachments
+            }
+            response = requests.post(
+                f"{BASE_URL}/messages",
+                headers={"Authorization": self.token, "Content-Type": "application/json"},
+                params={"chat_id": chat_id},
+                json=payload,
+                timeout=30,
+                verify=False
+            )
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки с вложениями: {e}")
+            return False
+
 api = APIClient()
 publisher = Publisher(api, fm, db)
 web = WebInterface(fm, publisher)
@@ -100,6 +120,34 @@ def upload_zip_stream():
         import traceback
         logger.error(traceback.format_exc())
         return jsonify({'success': False, 'message': f'Ошибка: {str(e)}'}), 500
+
+# ========== ЗАГРУЗКА ЧАСТЯМИ (для больших файлов) ==========
+
+@app.route('/upload_chunk', methods=['POST'])
+def upload_chunk():
+    try:
+        user_id = int(request.form.get('user_id', 151296248))
+        result = web.upload_chunk(request, user_id)
+        if result['success']:
+            return jsonify(result)
+        else:
+            return jsonify(result), 500
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки части: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/assemble_file', methods=['POST'])
+def assemble_file():
+    try:
+        user_id = 151296248
+        result = web.assemble_file(request, user_id)
+        if result['success']:
+            return jsonify(result)
+        else:
+            return jsonify(result), 500
+    except Exception as e:
+        logger.error(f"❌ Ошибка сборки: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 # ========== ОСТАЛЬНЫЕ МАРШРУТЫ ==========
 
