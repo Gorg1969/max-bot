@@ -50,17 +50,6 @@ UPLOAD_HTML = """
             margin-bottom: 10px;
             color: #333;
         }
-        .file-input-wrapper {
-            margin: 20px 0;
-            padding: 30px;
-            border: 2px dashed #ccc;
-            border-radius: 10px;
-            text-align: center;
-            cursor: pointer;
-        }
-        .file-input-wrapper:hover { border-color: #4CAF50; }
-        .file-input-wrapper input[type="file"] { display: none; }
-        .file-input-wrapper label { cursor: pointer; font-size: 16px; color: #666; }
         .btn-upload {
             display: block;
             width: 100%;
@@ -106,23 +95,6 @@ UPLOAD_HTML = """
             margin: 10px 0;
             box-sizing: border-box;
         }
-        .or-divider {
-            text-align: center;
-            margin: 15px 0;
-            color: #999;
-            font-size: 14px;
-        }
-        .or-divider::before,
-        .or-divider::after {
-            content: "";
-            display: inline-block;
-            width: 40%;
-            height: 1px;
-            background: #ddd;
-            vertical-align: middle;
-        }
-        .or-divider::before { margin-right: 10px; }
-        .or-divider::after { margin-left: 10px; }
     </style>
 </head>
 <body>
@@ -137,32 +109,14 @@ UPLOAD_HTML = """
             • <strong>Ограничений на размер нет</strong>
         </div>
         
-        <!-- Секция 1: Ссылка на Google Drive -->
+        <!-- ТОЛЬКО ССЫЛКА НА GOOGLE DRIVE -->
         <div class="section">
-            <div class="section-title">📎 Способ 1: Ссылка на Google Drive</div>
+            <div class="section-title">📎 Ссылка на Google Drive</div>
             <p style="font-size: 14px; color: #666; margin-bottom: 10px;">
                 Вставьте ссылку на ZIP-архив, загруженный на Google Drive.
             </p>
             <input type="text" id="driveLink" class="link-input" placeholder="https://drive.google.com/file/d/.../view?usp=sharing">
-            <button class="btn-upload" id="processDriveLinkBtn" style="background: #4285F4; margin-top: 0;">📥 Загрузить по ссылке</button>
-        </div>
-        
-        <div class="or-divider">ИЛИ</div>
-        
-        <!-- Секция 2: Загрузка файла -->
-        <div class="section">
-            <div class="section-title">📂 Способ 2: Загрузка с компьютера</div>
-            <div class="file-input-wrapper" onclick="document.getElementById('fileInput').click()">
-                <input type="file" id="fileInput" name="file" accept=".zip">
-                <label for="fileInput">📂 <strong>Выберите ZIP-архив</strong><br>
-                <span style="font-size: 14px; color: #999;">(просто нажмите и выберите файл)</span></label>
-            </div>
-            
-            <div id="progressBar" class="progress-bar">
-                <div id="progress" class="progress">0%</div>
-            </div>
-            
-            <button class="btn-upload" id="submitBtn" disabled>📤 Загрузить и опубликовать</button>
+            <button class="btn-upload" id="processDriveLinkBtn" style="background: #4285F4; margin-top: 0;">📥 Загрузить и опубликовать</button>
         </div>
         
         <div id="statusMsg" class="status-msg"></div>
@@ -170,7 +124,6 @@ UPLOAD_HTML = """
     </div>
 
     <script>
-        // ========== ЗАГРУЗКА ПО ССЫЛКЕ ==========
         document.getElementById('processDriveLinkBtn').addEventListener('click', async function() {
             const linkInput = document.getElementById('driveLink');
             const statusDiv = document.getElementById('statusMsg');
@@ -207,68 +160,6 @@ UPLOAD_HTML = """
             }
         });
         
-        // ========== ЗАГРУЗКА ФАЙЛА ==========
-        document.getElementById('fileInput').addEventListener('change', function() {
-            const file = this.files[0];
-            const submitBtn = document.getElementById('submitBtn');
-            if (file) {
-                submitBtn.disabled = false;
-                showStatus('✅ Выбран файл: ' + file.name + ' (' + (file.size / 1024 / 1024).toFixed(1) + ' МБ)', 'info');
-            } else {
-                submitBtn.disabled = true;
-                showStatus('', '');
-            }
-        });
-        
-        document.getElementById('submitBtn').addEventListener('click', async function() {
-            const fileInput = document.getElementById('fileInput');
-            const submitBtn = this;
-            const progressBar = document.getElementById('progressBar');
-            const progress = document.getElementById('progress');
-            
-            if (!fileInput.files.length) {
-                showStatus('❌ Выберите файл для загрузки', 'error');
-                return;
-            }
-            
-            const file = fileInput.files[0];
-            if (!file.name.endsWith('.zip')) {
-                showStatus('❌ Файл должен быть в формате .zip', 'error');
-                return;
-            }
-            
-            submitBtn.disabled = true;
-            submitBtn.textContent = '⏳ Загрузка...';
-            progressBar.style.display = 'block';
-            showStatus('⏳ Загрузка файла...', 'info');
-            
-            try {
-                const formData = new FormData();
-                formData.append('file', file);
-                formData.append('user_id', '151296248');
-                
-                const response = await fetch('/upload_zip_stream', {
-                    method: 'POST',
-                    body: formData
-                });
-                
-                const result = await response.json();
-                
-                if (result.success) {
-                    progress.style.width = '100%';
-                    progress.textContent = '100%';
-                    showStatus('✅ ' + result.message, 'success');
-                } else {
-                    showStatus('❌ ' + result.message, 'error');
-                }
-            } catch (error) {
-                showStatus('❌ Ошибка загрузки: ' + error.message, 'error');
-            } finally {
-                submitBtn.disabled = false;
-                submitBtn.textContent = '📤 Загрузить и опубликовать';
-            }
-        });
-        
         function showStatus(message, type) {
             const statusDiv = document.getElementById('statusMsg');
             statusDiv.textContent = message;
@@ -286,157 +177,3 @@ class WebInterface:
     
     def upload_page(self):
         return render_template_string(UPLOAD_HTML)
-    
-    def upload_chunk(self, request, user_id):
-        if 'chunk' not in request.files:
-            return {'success': False, 'message': 'Нет части файла'}
-        
-        chunk = request.files['chunk']
-        chunk_index = int(request.form.get('chunkIndex', 0))
-        total_chunks = int(request.form.get('totalChunks', 0))
-        filename = request.form.get('filename', 'temp.zip')
-        
-        user_folder = self.fm.get_user_folder(user_id)
-        chunk_dir = os.path.join(user_folder, 'chunks')
-        os.makedirs(chunk_dir, exist_ok=True)
-        
-        chunk_path = os.path.join(chunk_dir, f'chunk_{chunk_index}')
-        chunk.save(chunk_path)
-        
-        logger.info(f"📥 Часть {chunk_index+1}/{total_chunks} сохранена")
-        return {'success': True}
-    
-    def assemble_file(self, request, user_id):
-        data = request.get_json()
-        filename = data.get('filename', 'temp.zip')
-        total_chunks = data.get('totalChunks', 0)
-        
-        user_folder = self.fm.get_user_folder(user_id)
-        chunk_dir = os.path.join(user_folder, 'chunks')
-        output_path = os.path.join(user_folder, filename)
-        
-        try:
-            with open(output_path, 'wb') as outfile:
-                for i in range(total_chunks):
-                    chunk_path = os.path.join(chunk_dir, f'chunk_{i}')
-                    if not os.path.exists(chunk_path):
-                        return {'success': False, 'message': f'Часть {i+1} не найдена'}
-                    
-                    with open(chunk_path, 'rb') as infile:
-                        outfile.write(infile.read())
-                    os.remove(chunk_path)
-            
-            os.rmdir(chunk_dir)
-            
-            logger.info(f"✅ Файл собран: {output_path} ({os.path.getsize(output_path)} байт)")
-            
-            if self.fm.extract_zip(user_id, output_path):
-                os.remove(output_path)
-                self.publisher.start(user_id)
-                return {'success': True, 'message': 'Архив распакован. Публикация началась!'}
-            else:
-                self.fm.clear_user_data(user_id)
-                return {'success': False, 'message': 'Ошибка распаковки архива'}
-        except Exception as e:
-            logger.error(f"❌ Ошибка сборки: {e}")
-            return {'success': False, 'message': f'Ошибка: {str(e)}'}
-    
-    def process_zip_stream(self, file, user_id, publisher):
-        """Потоковая обработка ZIP-архива с загрузкой фото в MAX"""
-        try:
-            zip_data = io.BytesIO(file.read())
-            published = 0
-            errors = []
-            bot_token = publisher.api.token
-            
-            if not bot_token:
-                return {'success': False, 'message': 'Токен бота не найден'}
-            
-            def extract_group_id(folder_name):
-                match = re.search(r'-(\d+)', folder_name)
-                return match.group(1) if match else None
-            
-            with zipfile.ZipFile(zip_data, 'r') as zip_ref:
-                folders = {}
-                for name in zip_ref.namelist():
-                    if name.endswith('/'):
-                        folder_name = name.rstrip('/')
-                        group_id = extract_group_id(folder_name)
-                        if group_id:
-                            folders[folder_name] = {
-                                'group_id': group_id,
-                                'files': []
-                            }
-                    else:
-                        for folder in folders:
-                            if name.startswith(folder + '/'):
-                                folders[folder]['files'].append(name)
-                                break
-                
-                total = len(folders)
-                
-                for i, (folder_name, data) in enumerate(folders.items(), 1):
-                    if not publisher.is_running.get(user_id, True):
-                        break
-                    
-                    info_content = None
-                    images = []
-                    
-                    for file_name in data['files']:
-                        if file_name.lower().endswith(('info.txt', 'info.md')):
-                            with zip_ref.open(file_name) as f:
-                                info_content = f.read().decode('utf-8', errors='ignore')
-                        elif file_name.lower().endswith(('.jpg', '.jpeg', '.png', '.gif')):
-                            images.append(file_name)
-                    
-                    if not info_content:
-                        errors.append(f"{folder_name}: нет info.txt")
-                        continue
-                    
-                    image_tokens = []
-                    
-                    for image_name in images[:10]:
-                        try:
-                            with zip_ref.open(image_name) as f:
-                                image_data = f.read()
-                            
-                            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
-                                tmp.write(image_data)
-                                tmp_path = tmp.name
-                            
-                            token = publisher.upload_image_to_max(tmp_path, bot_token)
-                            os.unlink(tmp_path)
-                            
-                            if token:
-                                image_tokens.append(token)
-                                logger.info(f"✅ Изображение загружено: {image_name}")
-                        except Exception as e:
-                            logger.error(f"❌ Ошибка загрузки {image_name}: {e}")
-                    
-                    if image_tokens:
-                        attachments = [{"type": "image", "payload": {"token": t}} for t in image_tokens]
-                        full_text = f"📌 **Пост {i}/{total}**\n\n{info_content}"
-                        result = publisher.api.send_message_to_chat_with_attachments(
-                            chat_id=data['group_id'],
-                            text=full_text,
-                            attachments=attachments
-                        )
-                        if result:
-                            published += 1
-                            logger.info(f"✅ Опубликовано: {folder_name}")
-                        else:
-                            errors.append(f"{folder_name}: ошибка отправки")
-                    else:
-                        full_text = f"📌 **Пост {i}/{total}**\n\n{info_content}"
-                        result = publisher.api.send_message_to_chat(data['group_id'], full_text)
-                        if result:
-                            published += 1
-                            logger.info(f"✅ Опубликовано (только текст): {folder_name}")
-                        else:
-                            errors.append(f"{folder_name}: ошибка отправки")
-            
-            return {'success': True, 'published': published, 'errors': errors}
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка обработки ZIP: {e}")
-            return {'success': False, 'message': str(e)}
