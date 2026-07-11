@@ -3,6 +3,7 @@ import requests
 import logging
 import os
 import urllib3
+import re
 from modules import Database, FileManager, Publisher, WebInterface
 
 # ОТКЛЮЧАЕМ ПРЕДУПРЕЖДЕНИЯ SSL
@@ -120,6 +121,62 @@ def upload_zip_stream():
         import traceback
         logger.error(traceback.format_exc())
         return jsonify({'success': False, 'message': f'Ошибка: {str(e)}'}), 500
+
+# ========== ОБРАБОТКА ССЫЛКИ НА GOOGLE DRIVE ==========
+
+@app.route('/process_drive_link', methods=['POST'])
+def process_drive_link():
+    """Обработка ссылки на Google Drive"""
+    try:
+        data = request.get_json()
+        url = data.get('url')
+        user_id = int(data.get('user_id', 151296248))
+        
+        if not url:
+            return jsonify({'success': False, 'message': 'Ссылка не передана'}), 400
+        
+        # Извлекаем ID файла
+        match = re.search(r'/file/d/([a-zA-Z0-9_-]+)', url)
+        if not match:
+            return jsonify({'success': False, 'message': 'Не удалось извлечь ID файла'}), 400
+        
+        file_id = match.group(1)
+        download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        
+        # Скачиваем файл
+        logger.info(f"📥 Скачивание файла с Google Drive: {file_id}")
+        response = requests.get(download_url, stream=True, timeout=300, verify=False)
+        
+        if response.status_code != 200:
+            logger.error(f"❌ Не удалось скачать файл: {response.status_code}")
+            return jsonify({'success': False, 'message': 'Не удалось скачать файл'}), 500
+        
+        # Сохраняем и обрабатываем
+        user_folder = fm.get_user_folder(user_id)
+        zip_path = os.path.join(user_folder, 'temp.zip')
+        
+        total_size = 0
+        with open(zip_path, 'wb') as f:
+            for chunk in response.iter_content(8192):
+                f.write(chunk)
+                total_size += len(chunk)
+        
+        logger.info(f"✅ Файл скачан: {total_size // 1024 // 1024} МБ")
+        
+        # Распаковываем и запускаем публикацию
+        if fm.extract_zip(user_id, zip_path):
+            os.remove(zip_path)
+            publisher.start(user_id)
+            return jsonify({'success': True, 'message': 'Архив загружен и обработан. Публикация началась!'})
+        else:
+            fm.clear_user_data(user_id)
+            return jsonify({'success': False, 'message': 'Ошибка распаковки архива'}), 500
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка обработки ссылки: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 # ========== ОСТАЛЬНЫЕ МАРШРУТЫ ==========
 
