@@ -1,169 +1,244 @@
-from flask import render_template_string, request, jsonify
 import os
 import logging
-import zipfile
-import io
-import re
-import tempfile
+from flask import render_template_string, request, jsonify
 
 logger = logging.getLogger(__name__)
 
-UPLOAD_HTML = """
+# HTML шаблон для загрузки папок (упрощённая версия)
+UPLOAD_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="ru">
+<html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Загрузка архива</title>
+    <title>Загрузка объявлений</title>
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 600px;
-            margin: 50px auto;
-            padding: 20px;
-            background: #f5f5f5;
-        }
-        .container {
-            background: white;
-            padding: 30px;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        h1 { color: #333; text-align: center; }
-        .info {
-            background: #e8f4f8;
-            padding: 15px;
-            border-radius: 5px;
-            margin: 20px 0;
-            font-size: 14px;
-        }
-        .info code { background: #d0e4ed; padding: 2px 6px; border-radius: 3px; }
-        .section {
-            margin: 20px 0;
-            padding: 15px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            background: #f9f9f9;
-        }
-        .section-title {
-            font-weight: bold;
-            margin-bottom: 10px;
-            color: #333;
-        }
-        .btn-upload {
-            display: block;
-            width: 100%;
-            padding: 12px;
-            background: #4CAF50;
-            color: white;
-            border: none;
-            border-radius: 5px;
-            font-size: 16px;
-            cursor: pointer;
-            margin-top: 10px;
-        }
-        .btn-upload:hover { background: #45a049; }
-        .btn-upload:disabled { background: #ccc; cursor: not-allowed; }
-        .progress-bar {
-            width: 100%;
-            background: #f0f0f0;
-            border-radius: 5px;
-            margin: 10px 0;
-            display: none;
-        }
-        .progress-bar .progress {
-            width: 0%;
-            height: 20px;
-            background: #4CAF50;
-            border-radius: 5px;
-            text-align: center;
-            line-height: 20px;
-            color: white;
-            font-size: 12px;
-        }
-        .status-msg { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
-        .status-msg.success { display: block; background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-        .status-msg.error { display: block; background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
-        .status-msg.info { display: block; background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
-        .footer { text-align: center; margin-top: 20px; font-size: 12px; color: #999; }
-        .link-input {
-            width: 100%;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            font-size: 14px;
-            margin: 10px 0;
-            box-sizing: border-box;
-        }
+        body { font-family: Arial; max-width: 800px; margin: 50px auto; padding: 20px; }
+        .container { border: 2px dashed #ccc; padding: 40px; text-align: center; border-radius: 10px; }
+        .drop-zone { border: 2px dashed #007bff; padding: 40px; margin: 20px 0; border-radius: 10px; background: #f8f9fa; }
+        .drop-zone.dragover { background: #e3f2fd; border-color: #0056b3; }
+        input[type="file"] { display: none; }
+        .btn { background: #007bff; color: white; padding: 12px 30px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
+        .btn:hover { background: #0056b3; }
+        .btn-success { background: #28a745; }
+        .btn-success:hover { background: #218838; }
+        .status { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
+        .status.success { background: #d4edda; color: #155724; display: block; }
+        .status.error { background: #f8d7da; color: #721c24; display: block; }
+        .status.info { background: #d1ecf1; color: #0c5460; display: block; }
+        .file-list { text-align: left; margin: 20px 0; padding: 0; list-style: none; }
+        .file-list li { background: #f8f9fa; padding: 10px; margin: 5px 0; border-radius: 5px; border-left: 3px solid #007bff; }
+        .progress-bar { width: 100%; height: 20px; background: #e9ecef; border-radius: 10px; overflow: hidden; margin: 10px 0; display: none; }
+        .progress-bar .progress { height: 100%; background: #28a745; transition: width 0.3s; width: 0%; }
+        .instructions { background: #fff3cd; padding: 15px; border-radius: 5px; margin: 20px 0; text-align: left; border-left: 4px solid #ffc107; }
+        .instructions code { background: #f8f9fa; padding: 2px 6px; border-radius: 3px; font-size: 14px; }
+        #log { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; font-family: monospace; font-size: 12px; max-height: 300px; overflow-y: auto; margin: 20px 0; display: none; white-space: pre-wrap; }
     </style>
 </head>
 <body>
+    <h1>📤 Загрузка объявлений</h1>
+    
+    <div class="instructions">
+        <strong>📌 Инструкция:</strong><br>
+        1. Подготовьте папку с объявлениями<br>
+        2. Внутри папки должны быть подпапки с названиями типа: <code>Название -123456789</code><br>
+        3. В каждой подпапке: <code>info.txt</code> (текст объявления) и изображения<br>
+        4. Выберите папку и нажмите "Загрузить"
+    </div>
+    
     <div class="container">
-        <h1>📤 Загрузка архива</h1>
-        
-        <div class="info">
-            <strong>📌 Требования к архиву:</strong><br>
-            • Формат: <code>.zip</code><br>
-            • Внутри папки с названиями: <code>Название -123456789</code><br>
-            • В каждой папке: <code>info.txt</code> и изображения<br>
-            • <strong>Ограничений на размер нет</strong>
+        <div class="drop-zone" id="dropZone">
+            <p>📂 Перетащите папку сюда</p>
+            <p>или</p>
+            <button class="btn" onclick="document.getElementById('folderInput').click()">Выбрать папку</button>
+            <input type="file" id="folderInput" webkitdirectory multiple>
         </div>
         
-        <!-- ТОЛЬКО ССЫЛКА НА GOOGLE DRIVE -->
-        <div class="section">
-            <div class="section-title">📎 Ссылка на Google Drive</div>
-            <p style="font-size: 14px; color: #666; margin-bottom: 10px;">
-                Вставьте ссылку на ZIP-архив, загруженный на Google Drive.
-            </p>
-            <input type="text" id="driveLink" class="link-input" placeholder="https://drive.google.com/file/d/.../view?usp=sharing">
-            <button class="btn-upload" id="processDriveLinkBtn" style="background: #4285F4; margin-top: 0;">📥 Загрузить и опубликовать</button>
+        <div id="fileList" style="display:none;">
+            <h4>📄 Выбранные файлы:</h4>
+            <ul class="file-list" id="fileListContent"></ul>
+            <button class="btn btn-success" onclick="uploadFolder()">🚀 Загрузить</button>
+            <button class="btn" onclick="clearFiles()" style="background: #dc3545;">Очистить</button>
         </div>
         
-        <div id="statusMsg" class="status-msg"></div>
-        <div class="footer">Бот автоматически начнёт публикацию после загрузки</div>
+        <div class="progress-bar" id="progressBar">
+            <div class="progress" id="progress"></div>
+        </div>
+        
+        <div id="status" class="status"></div>
+        <div id="log"></div>
     </div>
 
     <script>
-        document.getElementById('processDriveLinkBtn').addEventListener('click', async function() {
-            const linkInput = document.getElementById('driveLink');
-            const statusDiv = document.getElementById('statusMsg');
-            const link = linkInput.value.trim();
-            
-            if (!link) {
-                showStatus('❌ Введите ссылку на архив', 'error');
-                return;
-            }
-            
-            if (!link.includes('drive.google.com')) {
-                showStatus('❌ Ссылка должна быть на Google Drive', 'error');
-                return;
-            }
-            
-            showStatus('⏳ Обработка ссылки...', 'info');
-            
-            try {
-                const response = await fetch('/process_drive_link', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url: link, user_id: '151296248' })
-                });
-                
-                const result = await response.json();
-                
-                if (result.success) {
-                    showStatus('✅ ' + result.message, 'success');
-                } else {
-                    showStatus('❌ ' + result.message, 'error');
+        let selectedFiles = [];
+        let userId = 151296248;
+
+        const dropZone = document.getElementById('dropZone');
+        const folderInput = document.getElementById('folderInput');
+        const fileList = document.getElementById('fileList');
+        const fileListContent = document.getElementById('fileListContent');
+        const statusDiv = document.getElementById('status');
+        const logDiv = document.getElementById('log');
+        const progressBar = document.getElementById('progressBar');
+        const progress = document.getElementById('progress');
+
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            const items = e.dataTransfer.items;
+            const files = [];
+            for (let item of items) {
+                if (item.kind === 'file') {
+                    const entry = item.webkitGetAsEntry();
+                    if (entry && entry.isDirectory) {
+                        readDirectory(entry, files, '');
+                    }
                 }
-            } catch (error) {
-                showStatus('❌ Ошибка: ' + error.message, 'error');
+            }
+            if (files.length > 0) {
+                selectedFiles = files;
+                displayFiles(selectedFiles);
             }
         });
-        
-        function showStatus(message, type) {
-            const statusDiv = document.getElementById('statusMsg');
+
+        folderInput.addEventListener('change', (e) => {
+            const files = Array.from(e.target.files);
+            if (files.length > 0) {
+                selectedFiles = files;
+                displayFiles(selectedFiles);
+            }
+        });
+
+        function readDirectory(entry, files, path) {
+            const reader = entry.createReader();
+            reader.readEntries((entries) => {
+                for (let e of entries) {
+                    if (e.isDirectory) {
+                        readDirectory(e, files, path + e.name + '/');
+                    } else {
+                        e.file((file) => {
+                            file.webkitRelativePath = path + file.name;
+                            files.push(file);
+                        });
+                    }
+                }
+            });
+        }
+
+        function displayFiles(files) {
+            fileListContent.innerHTML = '';
+            const folders = new Set();
+            files.forEach(f => {
+                const parts = f.webkitRelativePath.split('/');
+                if (parts.length > 1) {
+                    folders.add(parts[0]);
+                }
+            });
+            
+            folders.forEach(folder => {
+                const li = document.createElement('li');
+                const count = files.filter(f => f.webkitRelativePath.startsWith(folder + '/')).length;
+                li.textContent = `📁 ${folder} (${count} файлов)`;
+                fileListContent.appendChild(li);
+            });
+            
+            fileList.style.display = 'block';
+            showStatus('info', `✅ Выбрано ${folders.size} папок, ${files.length} файлов`);
+        }
+
+        function clearFiles() {
+            selectedFiles = [];
+            fileList.style.display = 'none';
+            statusDiv.style.display = 'none';
+            progressBar.style.display = 'none';
+            logDiv.style.display = 'none';
+            folderInput.value = '';
+        }
+
+        function addLog(message) {
+            logDiv.style.display = 'block';
+            logDiv.textContent += message + '\\n';
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        async function uploadFolder() {
+            if (selectedFiles.length === 0) {
+                showStatus('error', '❌ Выберите папку для загрузки');
+                return;
+            }
+
+            const formData = new FormData();
+            selectedFiles.forEach(file => {
+                formData.append('files[]', file, file.webkitRelativePath);
+            });
+            formData.append('user_id', userId);
+
+            showStatus('info', '⏳ Загрузка началась...');
+            progressBar.style.display = 'block';
+            progress.style.width = '0%';
+            logDiv.textContent = '';
+            addLog('🚀 Начинаем загрузку...');
+            addLog(`📁 Файлов: ${selectedFiles.length}`);
+
+            try {
+                const xhr = new XMLHttpRequest();
+                
+                xhr.upload.addEventListener('progress', (e) => {
+                    if (e.lengthComputable) {
+                        const percent = (e.loaded / e.total) * 100;
+                        progress.style.width = percent + '%';
+                        addLog(`📥 Загружено: ${(e.loaded / 1024 / 1024).toFixed(1)} МБ из ${(e.total / 1024 / 1024).toFixed(1)} МБ (${Math.round(percent)}%)`);
+                    }
+                });
+
+                xhr.onload = function() {
+                    if (xhr.status === 200) {
+                        try {
+                            const response = JSON.parse(xhr.responseText);
+                            if (response.success) {
+                                showStatus('success', '✅ Загрузка завершена!');
+                                addLog('✅ ' + response.message);
+                                progress.style.width = '100%';
+                            } else {
+                                showStatus('error', '❌ ' + response.message);
+                                addLog('❌ Ошибка: ' + response.message);
+                            }
+                        } catch (e) {
+                            showStatus('error', '❌ Ошибка обработки ответа');
+                            addLog('❌ Ошибка: ' + e.message);
+                        }
+                    } else {
+                        showStatus('error', '❌ Ошибка загрузки: ' + xhr.status);
+                        addLog('❌ Ошибка сервера: ' + xhr.status);
+                    }
+                };
+
+                xhr.onerror = function() {
+                    showStatus('error', '❌ Ошибка соединения');
+                    addLog('❌ Ошибка соединения с сервером');
+                };
+
+                xhr.open('POST', '/upload_folder');
+                xhr.send(formData);
+                
+            } catch (error) {
+                showStatus('error', '❌ Ошибка: ' + error.message);
+                addLog('❌ Ошибка: ' + error.message);
+            }
+        }
+
+        function showStatus(type, message) {
+            statusDiv.className = 'status ' + type;
             statusDiv.textContent = message;
-            statusDiv.className = 'status-msg ' + (type || '');
+            statusDiv.style.display = 'block';
         }
     </script>
 </body>
@@ -176,4 +251,23 @@ class WebInterface:
         self.publisher = publisher
     
     def upload_page(self):
-        return render_template_string(UPLOAD_HTML)
+        """Возвращает HTML страницу для загрузки папок"""
+        return render_template_string(UPLOAD_TEMPLATE)
+    
+    def upload_file(self, request, user_id):
+        """Обработка загрузки папки (для обратной совместимости)"""
+        try:
+            files = request.files.getlist('files[]')
+            if not files:
+                return {'success': False, 'message': 'Файлы не выбраны'}
+            
+            result = self.fm.save_uploaded_files(files, user_id)
+            if result['success']:
+                # Запускаем публикацию
+                self.publisher.start(user_id)
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки: {e}")
+            return {'success': False, 'message': str(e)}
