@@ -1,252 +1,264 @@
-import requests
-import re
+import logging
 import os
 import time
-from urllib.parse import urlparse, parse_qs
+import re
+import base64
+from enum import Enum
+from PIL import Image, ExifTags
+import io
 
-def extract_file_id_from_url(url):
-    """
-    Извлекает file_id из ссылки Google Drive
-    """
-    # Пробуем найти ID в пути
-    match = re.search(r'/d/([a-zA-Z0-9_-]+)', url)
-    if match:
-        return match.group(1)
-    
-    # Пробуем найти ID в параметрах
-    parsed = urlparse(url)
-    params = parse_qs(parsed.query)
-    if 'id' in params:
-        return params['id'][0]
-    
-    return None
+logger = logging.getLogger(__name__)
 
-def convert_to_direct_link(url):
-    """
-    Конвертирует ссылку Google Drive в прямую ссылку для скачивания
-    """
-    file_id = extract_file_id_from_url(url)
-    if not file_id:
-        return None, None
-    
-    direct_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-    return direct_url, file_id
+class UserState(Enum):
+    IDLE = "idle"
+    PUBLISHING = "publishing"
+    STOPPED = "stopped"
 
-def download_file_from_drive(url, destination_path):
-    """
-    Скачивает файл с Google Drive (альтернативный метод с cookies)
-    """
-    try:
-        # Извлекаем ID файла
-        file_id = extract_file_id_from_url(url)
-        if not file_id:
-            print(f"❌ Не удалось извлечь ID из ссылки: {url}")
-            return False
-        
-        print(f"🔑 ID файла: {file_id}")
-        
-        # Создаём сессию с cookies
-        session = requests.Session()
-        
-        # Заголовки для имитации браузера
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0',
-        }
-        
-        # ШАГ 1: Получаем страницу с подтверждением
-        initial_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-        print(f"🔄 Шаг 1: Запрос к {initial_url}")
-        
-        response = session.get(initial_url, headers=headers, allow_redirects=True, timeout=30)
-        response.raise_for_status()
-        
-        print(f"📊 Статус: {response.status_code}")
-        print(f"📊 URL после редиректа: {response.url}")
-        
-        # ШАГ 2: Ищем параметр confirm
-        confirm_param = None
-        
-        # Проверяем URL на наличие confirm
-        if 'confirm=' in response.url:
-            match = re.search(r'confirm=([^&]+)', response.url)
-            if match:
-                confirm_param = match.group(1)
-                print(f"✅ Найден confirm в URL: {confirm_param}")
-        
-        # Если не нашли в URL, ищем в HTML
-        if not confirm_param:
-            html_content = response.text
-            # Ищем confirm в разных форматах
-            patterns = [
-                r'confirm=([^&"\']+)',
-                r'"confirm":"([^"]+)"',
-                r'confirm=([a-zA-Z0-9_-]+)',
-                r'confirm=([^&]+)',
-                r'uc\?export=download&amp;confirm=([^&]+)',
-                r'confirm=([a-z0-9]+)',
-            ]
-            for pattern in patterns:
-                match = re.search(pattern, html_content)
-                if match:
-                    confirm_param = match.group(1)
-                    print(f"✅ Найден confirm в HTML: {confirm_param}")
+class Publisher:
+    def __init__(self, api, file_manager, db):
+        self.api = api
+        self.fm = file_manager
+        self.db = db
+        self.user_states = {}  # user_id -> UserState
+    
+    def extract_chat_id(self, folder_name):
+        match = re.search(r'-\s*(\d+)', folder_name)
+        if match:
+            return f"-{match.group(1)}"
+        return None
+    
+    def fix_image_orientation(self, img):
+        """Исправляет ориентацию изображения на основе EXIF-данных"""
+        try:
+            for orientation in ExifTags.TAGS.keys():
+                if ExifTags.TAGS[orientation] == 'Orientation':
                     break
-        
-        # ШАГ 3: Формируем ссылку для скачивания
-        if confirm_param:
-            download_url = f"https://drive.google.com/uc?export=download&confirm={confirm_param}&id={file_id}"
-        else:
-            # Если confirm не найден, пробуем стандартные варианты
-            print("⚠️ Confirm не найден, пробуем стандартные варианты...")
-            download_url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t"
-        
-        print(f"🔄 Шаг 2: Скачивание по {download_url}")
-        
-        # ШАГ 4: Скачиваем файл с правильными cookies
-        response = session.get(
-            download_url,
-            headers=headers,
-            stream=True,
-            allow_redirects=True,
-            timeout=60
-        )
-        response.raise_for_status()
-        
-        # Проверяем, что это файл
-        content_type = response.headers.get('content-type', '').lower()
-        content_disposition = response.headers.get('content-disposition', '')
-        
-        print(f"📊 Content-Type: {content_type}")
-        print(f"📊 Content-Disposition: {content_disposition}")
-        
-        # Если получили HTML - пробуем другой метод
-        if 'text/html' in content_type and 'filename' not in content_disposition:
-            print("⚠️ Получен HTML вместо файла, пробуем альтернативный метод...")
             
-            # Пробуем с confirm=1
-            alt_url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm=1"
-            print(f"🔄 Альтернативный запрос: {alt_url}")
-            
-            response = session.get(alt_url, headers=headers, stream=True, allow_redirects=True, timeout=60)
-            response.raise_for_status()
-            
-            content_type = response.headers.get('content-type', '').lower()
-            content_disposition = response.headers.get('content-disposition', '')
-            
-            if 'text/html' in content_type and 'filename' not in content_disposition:
-                # Если всё равно HTML, пытаемся скачать через другой метод
-                print("⚠️ Всё ещё HTML, пробуем через drive.google.com...")
+            exif = img._getexif()
+            if exif and orientation in exif:
+                orientation_value = exif[orientation]
+                if orientation_value == 3:
+                    img = img.rotate(180, expand=True)
+                elif orientation_value == 6:
+                    img = img.rotate(270, expand=True)
+                elif orientation_value == 8:
+                    img = img.rotate(90, expand=True)
+        except Exception as e:
+            logger.debug(f"⚠️ Ошибка исправления ориентации: {e}")
+        return img
+    
+    def compress_image(self, image_path, max_size_mb=0.8, quality=75):
+        """Сжимает изображение с исправлением ориентации и очисткой EXIF"""
+        try:
+            with Image.open(image_path) as img:
+                img = self.fix_image_orientation(img)
                 
-                # Пробуем через страницу просмотра
-                view_url = f"https://drive.google.com/file/d/{file_id}/view"
-                response = session.get(view_url, headers=headers, allow_redirects=True, timeout=30)
+                if img.mode in ('RGBA', 'P'):
+                    img = img.convert('RGB')
                 
-                # Ищем ссылку на скачивание в HTML
-                html_content = response.text
-                download_patterns = [
-                    r'https://drive\.google\.com/uc\?export=download[^"\']+',
-                    r'https://drive\.google\.com/u/0/uc\?export=download[^"\']+',
-                ]
+                max_dimension = 1280
+                if img.width > max_dimension or img.height > max_dimension:
+                    ratio = min(max_dimension / img.width, max_dimension / img.height)
+                    new_size = (int(img.width * ratio), int(img.height * ratio))
+                    img = img.resize(new_size, Image.Resampling.LANCZOS)
                 
-                for pattern in download_patterns:
-                    match = re.search(pattern, html_content)
-                    if match:
-                        download_link = match.group(0)
-                        print(f"✅ Найдена ссылка на скачивание: {download_link}")
-                        
-                        # Добавляем confirm если нужно
-                        if 'confirm' not in download_link:
-                            download_link += '&confirm=t'
-                        
-                        response = session.get(download_link, headers=headers, stream=True, allow_redirects=True, timeout=60)
-                        response.raise_for_status()
-                        break
+                buffer = io.BytesIO()
+                img.save(buffer, format='JPEG', quality=quality, optimize=True, progressive=True)
+                compressed_data = buffer.getvalue()
+                
+                if len(compressed_data) > max_size_mb * 1024 * 1024:
+                    buffer = io.BytesIO()
+                    img.save(buffer, format='JPEG', quality=50, optimize=True, progressive=True)
+                    compressed_data = buffer.getvalue()
+                
+                return compressed_data
+        except Exception as e:
+            logger.error(f"❌ Ошибка сжатия: {e}")
+            with open(image_path, 'rb') as f:
+                return f.read()
+    
+    def get_sorted_images(self, folder_path, max_count=3):
+        """Возвращает отсортированный список изображений"""
+        images = []
+        if not os.path.exists(folder_path):
+            return images
+            
+        for file in os.listdir(folder_path):
+            if file.lower().endswith(('.jpg', '.jpeg', '.png')):
+                if file.startswith('.'):
+                    continue
+                images.append(file)
         
-        # Проверяем финальный результат
-        content_type = response.headers.get('content-type', '').lower()
-        content_disposition = response.headers.get('content-disposition', '')
-        
-        if 'text/html' in content_type and 'filename' not in content_disposition:
-            raise Exception("Не удалось получить файл. Возможно, файл приватный или требует входа в аккаунт.")
-        
-        # ШАГ 5: Сохраняем файл
-        total_size = int(response.headers.get('content-length', 0))
-        if total_size > 0:
-            print(f"📦 Размер файла: {total_size / (1024*1024):.2f} МБ")
-        else:
-            print("📦 Размер файла неизвестен")
-        
-        downloaded = 0
-        with open(destination_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
+        images.sort()
+        return images[:max_count]
+    
+    def start(self, user_id):
+        """Запускает публикацию для пользователя"""
+        try:
+            # Проверяем, не запущена ли уже публикация
+            if self.user_states.get(user_id) == UserState.PUBLISHING:
+                logger.warning(f"⚠️ Публикация уже запущена для пользователя {user_id}")
+                self.api.send_message(user_id, "⚠️ Публикация уже запущена. Дождитесь завершения.")
+                return False
+            
+            logger.info(f"🚀 Запуск публикации для пользователя {user_id}")
+            
+            # Устанавливаем состояние PUBLISHING
+            self.user_states[user_id] = UserState.PUBLISHING
+            
+            user_folder = self.fm.get_user_folder(user_id)
+            samosvaly_path = os.path.join(user_folder, "Самосвалы")
+            
+            if os.path.exists(samosvaly_path) and os.path.isdir(samosvaly_path):
+                subfolders = []
+                for item in os.listdir(samosvaly_path):
+                    item_path = os.path.join(samosvaly_path, item)
+                    if os.path.isdir(item_path):
+                        info_path = os.path.join(item_path, 'info.txt')
+                        if os.path.exists(info_path):
+                            subfolders.append(item)
+            else:
+                subfolders = []
+                for item in os.listdir(user_folder):
+                    item_path = os.path.join(user_folder, item)
+                    if os.path.isdir(item_path):
+                        info_path = os.path.join(item_path, 'info.txt')
+                        if os.path.exists(info_path):
+                            subfolders.append(item)
+            
+            if not subfolders:
+                self.api.send_message(user_id, "❌ Нет папок с объявлениями для публикации.")
+                self.user_states[user_id] = UserState.IDLE
+                return False
+            
+            self.api.send_message(user_id, f"📢 Начинаю публикацию {len(subfolders)} объявлений...")
+            published = 0
+            
+            for folder_name in subfolders:
+                # Проверяем состояние
+                if self.user_states.get(user_id) == UserState.STOPPED:
+                    logger.info(f"⏹️ Публикация остановлена пользователем {user_id}")
+                    break
+                
+                try:
+                    if os.path.exists(samosvaly_path):
+                        folder_path = os.path.join(samosvaly_path, folder_name)
+                    else:
+                        folder_path = os.path.join(user_folder, folder_name)
                     
-                    # Показываем прогресс каждые 5 МБ
-                    if downloaded % (5 * 1024 * 1024) < 8192:
-                        if total_size > 0:
-                            progress = (downloaded / total_size) * 100
-                            print(f"📥 Скачано: {downloaded / (1024*1024):.1f} МБ ({progress:.1f}%)")
-                        else:
-                            print(f"📥 Скачано: {downloaded / (1024*1024):.1f} МБ")
+                    info_path = os.path.join(folder_path, 'info.txt')
+                    if not os.path.exists(info_path):
+                        continue
+                    
+                    with open(info_path, 'r', encoding='utf-8') as f:
+                        text = f.read()
+                    
+                    chat_id = self.extract_chat_id(folder_name)
+                    if not chat_id:
+                        logger.warning(f"⚠️ Не удалось извлечь ID чата из {folder_name}")
+                        continue
+                    
+                    images = self.get_sorted_images(folder_path, max_count=3)
+                    
+                    logger.info(f"📤 Публикация в чат {chat_id}: {folder_name}")
+                    logger.info(f"🖼️ Найдено {len(images)} изображений")
+                    
+                    # Проверяем состояние перед отправкой
+                    if self.user_states.get(user_id) == UserState.STOPPED:
+                        logger.info(f"⏹️ Публикация остановлена пользователем {user_id}")
+                        break
+                    
+                                    try:
+                    # Определяем путь к папке
+                    if os.path.exists(samosvaly_path):
+                        folder_path = os.path.join(samosvaly_path, folder_name)
+                    else:
+                        folder_path = os.path.join(user_folder, folder_name)
+                    
+                    info_path = os.path.join(folder_path, 'info.txt')
+                    if not os.path.exists(info_path):
+                        continue
+                    
+                    with open(info_path, 'r', encoding='utf-8') as f:
+                        text = f.read()
+                    
+                    chat_id = self.extract_chat_id(folder_name)
+                    if not chat_id:
+                        logger.warning(f"⚠️ Не удалось извлечь ID чата из {folder_name}")
+                        continue
+                    
+                    images = self.get_sorted_images(folder_path, max_count=3)
+                    logger.info(f"📤 Публикация в чат {chat_id}: {folder_name}, фото: {len(images)}")
+                    
+                    # Проверяем состояние
+                    if self.user_states.get(user_id) == UserState.STOPPED:
+                        break
+                    
+                    # Подготавливаем фото
+                    photo_files = []
+                    for img_name in images:
+                        img_path = os.path.join(folder_path, img_name)
+                        if not os.path.exists(img_path):
+                            continue
+                        try:
+                            compressed = self.compress_image(img_path)
+                            photo_files.append((img_name, compressed))
+                        except Exception as e:
+                            logger.error(f"❌ Ошибка сжатия {img_name}: {e}")
+                    
+                    # Отправляем ОДНО сообщение с текстом и фото
+                    if photo_files:
+                        success = self.api.send_photos_to_chat(
+                            chat_id=chat_id,
+                            photo_files=photo_files,
+                            text=text        # ← текст объявления передаётся здесь
+                        )
+                    else:
+                        # Если фото нет, шлём хотя бы текст
+                        success = self.api.send_message_to_chat(chat_id, text)
+                    
+                    if not success:
+                        logger.error(f"❌ Не удалось отправить объявление в {chat_id}")
+                        continue
+                    
+                    # Запись в БД и задержка
+                    self.db.add_publication(user_id, folder_name, chat_id)
+                    published += 1
+                    logger.info(f"✅ Опубликовано: {folder_name}")
+                    time.sleep(2)   # задержка между постами (регулируйте)
+            
+            # Завершаем публикацию
+            self.user_states[user_id] = UserState.IDLE
+            
+            if published > 0:
+                self.api.send_message(user_id, f"✅ Публикация завершена! Опубликовано {published} объявлений.")
+            else:
+                self.api.send_message(user_id, "❌ Не удалось опубликовать ни одного объявления.")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка публикации: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            self.user_states[user_id] = UserState.IDLE
+            self.api.send_message(user_id, f"❌ Ошибка публикации: {str(e)}")
+            return False
+    
+    def stop(self, user_id):
+        """Останавливает публикацию"""
+        current_state = self.user_states.get(user_id, UserState.IDLE)
         
-        print(f"✅ Файл успешно скачан: {destination_path}")
-        return True
-        
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Ошибка сети: {e}")
-        return False
-    except Exception as e:
-        print(f"❌ Ошибка скачивания: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-def process_google_drive_link(link, download_dir="downloads"):
-    """
-    Основная функция для обработки ссылки Google Drive
-    """
-    # Создаём папку для загрузок
-    os.makedirs(download_dir, exist_ok=True)
-    
-    # Извлекаем ID файла
-    file_id = extract_file_id_from_url(link)
-    if not file_id:
-        raise ValueError("❌ Не удалось извлечь ID файла из ссылки")
-    
-    print(f"🔑 ID файла: {file_id}")
-    
-    # Формируем имя для сохранения
-    filename = f"file_{file_id}.zip"
-    destination = os.path.join(download_dir, filename)
-    
-    # Удаляем старый файл, если есть
-    if os.path.exists(destination):
-        os.remove(destination)
-    
-    # Скачиваем файл
-    success = download_file_from_drive(link, destination)
-    
-    if success and os.path.exists(destination):
-        return destination
-    else:
-        raise Exception("❌ Не удалось скачать файл")
-
-# Экспортируем все необходимые функции
-__all__ = [
-    'extract_file_id_from_url',
-    'convert_to_direct_link',
-    'download_file_from_drive',
-    'process_google_drive_link'
-]
+        if current_state == UserState.PUBLISHING:
+            self.user_states[user_id] = UserState.STOPPED
+            logger.info(f"⏹️ Публикация остановлена для пользователя {user_id}")
+            self.api.send_message(user_id, "⏹️ Публикация остановлена.")
+            return True
+        elif current_state == UserState.STOPPED:
+            logger.info(f"ℹ️ Публикация уже остановлена для пользователя {user_id}")
+            self.api.send_message(user_id, "ℹ️ Публикация уже остановлена.")
+            return False
+        else:
+            logger.info(f"ℹ️ Публикация не активна для пользователя {user_id}")
+            self.api.send_message(user_id, "ℹ️ Нет активной публикации для остановки.")
+            return False
