@@ -73,8 +73,53 @@ class APIClient:
             logger.error(f"❌ Ошибка отправки в чат: {e}")
             return False
 
+    def send_photo_to_chat(self, chat_id, photo_path, caption=None):
+        """
+        Отправляет фото в чат через multipart/form-data
+        """
+        try:
+            # Проверяем, что файл существует
+            if not os.path.exists(photo_path):
+                logger.error(f"❌ Файл не найден: {photo_path}")
+                return False
+
+            # Проверяем размер файла
+            file_size = os.path.getsize(photo_path) / (1024 * 1024)
+            if file_size > 10:
+                logger.warning(f"⚠️ Файл слишком большой ({file_size:.1f} МБ), пропускаем")
+                return False
+
+            # Формируем параметры
+            params = {"chat_id": chat_id}
+            if caption:
+                params["caption"] = caption
+
+            # Открываем файл и отправляем через multipart
+            with open(photo_path, 'rb') as f:
+                files = {'file': (os.path.basename(photo_path), f, 'image/jpeg')}
+                response = requests.post(
+                    f"{self.base_url}/messages",
+                    headers={"Authorization": self.token},
+                    params=params,
+                    files=files,
+                    timeout=60,
+                    verify=False
+                )
+
+            logger.info(f"📤 Отправка фото в чат {chat_id}, статус: {response.status_code}")
+            if response.status_code != 200:
+                logger.error(f"❌ Ошибка отправки фото: {response.text}")
+            return response.status_code == 200
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки фото: {e}")
+            return False
+
     def send_message_to_chat_with_attachments(self, chat_id, text, attachments):
-        """Отправляет сообщение в чат с вложениями (фото)"""
+        """
+        Устаревший метод — оставлен для совместимости
+        Теперь используйте send_photo_to_chat для фото
+        """
         try:
             payload = {
                 "text": text,
@@ -477,7 +522,7 @@ def upload_folder():
             logger.info(f"🗑️ Папка пользователя {user_id} очищена")
         os.makedirs(user_folder, exist_ok=True)
         
-        # Сохраняем файлы с полной структурой
+        # Сохраняем файлы с полной структура
         saved_count = 0
         root_folder_name = None
         
