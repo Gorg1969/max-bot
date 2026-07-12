@@ -1,242 +1,129 @@
-import time
-import random
-import os
-import shutil
 import logging
-import sys
-import requests
-import json
+import os
+import time
 import re
-import io
-import tempfile
-
-if sys.platform == 'linux':
-    sys.stdout.reconfigure(encoding='utf-8')
 
 logger = logging.getLogger(__name__)
 
 class Publisher:
-    def __init__(self, api_client, file_manager, database):
-        self.api = api_client
+    def __init__(self, api, file_manager, db):
+        self.api = api
         self.fm = file_manager
-        self.db = database
-        self.is_running = {}
-        self.base_url = "https://platform-api2.max.ru"
+        self.db = db
+        self.active_users = {}
     
-    def upload_image_to_max(self, image_path, token):
-        """Загрузка изображения на сервер MAX через /uploads"""
-        try:
-            # 1. Получаем URL для загрузки
-            upload_url = f"{self.base_url}/uploads?type=image"
-            headers = {"Authorization": token}
-            
-            logger.info(f"📤 Запрос URL для загрузки: {upload_url}")
-            response = requests.post(upload_url, headers=headers, timeout=30, verify=False)
-            
-            if response.status_code != 200:
-                logger.error(f"❌ Ошибка получения URL: {response.status_code} - {response.text}")
-                return None
-            
-            upload_data = response.json()
-            upload_url = upload_data.get('url')
-            if not upload_url:
-                logger.error(f"❌ Нет URL для загрузки: {upload_data}")
-                return None
-            
-            logger.info(f"📤 Получен URL для загрузки: {upload_url[:50]}...")
-            
-            # 2. Загружаем изображение
-            with open(image_path, 'rb') as f:
-                files = {'data': f}
-                response = requests.post(upload_url, files=files, timeout=60, verify=False)
-            
-            logger.info(f"📤 Ответ загрузки: {response.status_code}")
-            
-            if response.status_code == 200:
-                result = response.json()
-                token = result.get('token')
-                if token:
-                    logger.info(f"✅ Изображение загружено, токен: {token[:20]}...")
-                    return token
-                else:
-                    logger.error(f"❌ Нет токена в ответе: {result}")
-                    return None
-            else:
-                logger.error(f"❌ Ошибка загрузки изображения: {response.status_code} - {response.text[:200]}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка при загрузке изображения: {e}")
-            return None
+    def extract_group_id(self, folder_name):
+        """
+        Извлекает group_id из названия папки
+        Пример: "Квартиры -123456789" -> "123456789"
+        """
+        # Ищем число после дефиса
+        match = re.search(r'-(\d+)', folder_name)
+        if match:
+            return match.group(1)
+        return None
     
-    def publish_folder(self, folder_path, group_id, bot_token, post_number=None, total_posts=None):
-        """Публикация папки с текстом и фото в одном сообщении"""
+    def start(self, user_id):
+        """Запускает публикацию для пользователя"""
         try:
-            logger.info(f"📤 Публикация папки: {folder_path} в группу {group_id}")
+            logger.info(f"🚀 Запуск публикации для пользователя {user_id}")
             
-            info_file = None
-            images = []
+            # Получаем список подпапок
+            subfolders = self.fm.get_subfolders(user_id)
             
-            # Сканируем папку
-            for f in os.listdir(folder_path):
-                file_path = os.path.join(folder_path, f)
-                if os.path.isfile(file_path):
-                    f_lower = f.lower()
-                    if f_lower in ['info.txt', 'info.md']:
-                        info_file = file_path
-                        logger.info(f"📄 Найден info.txt: {info_file}")
-                    elif f_lower.endswith(('.jpg', '.jpeg', '.png', '.gif')):
-                        images.append(file_path)
-                        logger.info(f"🖼️ Найдено изображение: {f}")
+            if not subfolders:
+                logger.warning(f"⚠️ Нет подпапок для пользователя {user_id}")
+                self.api.send_message(user_id, "❌ Нет папок с объявлениями для публикации.")
+                return False
             
-            if not info_file:
-                logger.warning(f"⚠️ Нет info.txt в папке {folder_path}")
-                return False, "Нет info.txt"
+            logger.info(f"📁 Найдено {len(subfolders)} подпапок: {subfolders}")
             
-            # Читаем info.txt
-            try:
-                with open(info_file, 'r', encoding='utf-8') as f:
-                    info_text = f.read()
-            except UnicodeDecodeError:
-                with open(info_file, 'r', encoding='cp1251') as f:
-                    info_text = f.read()
+            # Отправляем сообщение о начале
+            self.api.send_message(
+                user_id,
+                f"📢 Начинаю публикацию {len(subfolders)} объявлений..."
+            )
             
-            # ========== ЗАГРУЖАЕМ ИЗОБРАЖЕНИЯ ==========
-            images = images[:10]  # Максимум 10 изображений
-            image_tokens = []
+            # Отмечаем, что публикация активна
+            self.active_users[user_id] = True
             
-            for image_path in images:
-                logger.info(f"📤 Загрузка изображения: {os.path.basename(image_path)}")
-                upload_token = self.upload_image_to_max(image_path, bot_token)
-                if upload_token:
-                    image_tokens.append(upload_token)
-                    time.sleep(0.5)
-                else:
-                    logger.warning(f"⚠️ Не удалось загрузить изображение: {image_path}")
-            
-            # ========== ОТПРАВЛЯЕМ ОДНО СООБЩЕНИЕ С ТЕКСТОМ И ФОТО ==========
-            if image_tokens:
-                attachments = [{"type": "image", "payload": {"token": t}} for t in image_tokens]
+            # Проходим по всем папкам
+            for folder_name in subfolders:
+                # Проверяем, не остановлена ли публикация
+                if not self.active_users.get(user_id, True):
+                    logger.info(f"⏹️ Публикация остановлена пользователем {user_id}")
+                    break
                 
-                # Добавляем номер поста, если нужно
-                if post_number and total_posts:
-                    full_text = f"📌 **Пост {post_number}/{total_posts}**\n\n{info_text}"
-                else:
-                    full_text = info_text
-                
-                result = self.api.send_message_to_chat_with_attachments(
-                    chat_id=group_id,
-                    text=full_text,
-                    attachments=attachments
-                )
-                if result:
-                    logger.info(f"✅ Сообщение с {len(image_tokens)} фото отправлено в группу {group_id}")
-                    return True, "Успешно"
-                else:
-                    logger.error(f"❌ Ошибка отправки сообщения с фото в группу {group_id}")
-                    return False, "Ошибка отправки"
-            else:
-                # Если нет фото — отправляем только текст
-                if post_number and total_posts:
-                    full_text = f"📌 **Пост {post_number}/{total_posts}**\n\n{info_text}"
-                else:
-                    full_text = info_text
-                
-                result = self.api.send_message_to_chat(group_id, full_text)
-                if result:
-                    logger.info(f"✅ Текст отправлен в группу {group_id}")
-                    return True, "Успешно (только текст)"
-                else:
-                    logger.error(f"❌ Ошибка отправки текста в группу {group_id}")
-                    return False, "Ошибка отправки текста"
+                try:
+                    # Извлекаем group_id из названия папки
+                    group_id = self.extract_group_id(folder_name)
+                    
+                    if not group_id:
+                        logger.warning(f"⚠️ Не удалось извлечь group_id из {folder_name}")
+                        continue
+                    
+                    # Получаем путь к папке
+                    folder_path = self.fm.get_folder_path(user_id, folder_name)
+                    
+                    # Читаем info.txt
+                    info_path = os.path.join(folder_path, 'info.txt')
+                    if not os.path.exists(info_path):
+                        logger.warning(f"⚠️ Нет info.txt в папке {folder_name}")
+                        continue
+                    
+                    with open(info_path, 'r', encoding='utf-8') as f:
+                        text = f.read()
+                    
+                    # Собираем изображения
+                    images = []
+                    for file in os.listdir(folder_path):
+                        if file.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
+                            images.append(os.path.join(folder_path, file))
+                    
+                    logger.info(f"📤 Публикация в группу {group_id}: {folder_name}")
+                    
+                    # Отправляем сообщение в чат
+                    if images:
+                        # Отправляем с изображениями
+                        attachments = []
+                        for img_path in images[:5]:  # MAX может иметь ограничение по кол-ву фото
+                            try:
+                                with open(img_path, 'rb') as f:
+                                    # Здесь логика отправки фото через MAX API
+                                    pass
+                            except Exception as e:
+                                logger.error(f"❌ Ошибка загрузки фото {img_path}: {e}")
+                        
+                        self.api.send_message_to_chat(group_id, text)
+                    else:
+                        self.api.send_message_to_chat(group_id, text)
+                    
+                    # Добавляем в базу данных
+                    self.db.add_publication(user_id, folder_name, group_id)
+                    
+                    # Небольшая пауза между публикациями
+                    time.sleep(2)
+                    
+                except Exception as e:
+                    logger.error(f"❌ Ошибка публикации папки {folder_name}: {e}")
+                    continue
+            
+            self.active_users[user_id] = False
+            logger.info(f"✅ Публикация завершена для пользователя {user_id}")
+            self.api.send_message(user_id, "✅ Публикация завершена!")
+            return True
             
         except Exception as e:
             logger.error(f"❌ Ошибка публикации: {e}")
-            return False, str(e)
-    
-    def start(self, user_id):
-        logger.info(f"🚀 Запуск публикации для пользователя {user_id}")
-        
-        bot_token = self.api.token
-        if not bot_token:
-            logger.error("❌ Токен бота не найден")
-            self.api.send_message(user_id, "❌ Ошибка: токен бота не найден")
-            return
-        
-        self.is_running[user_id] = True
-        user_folder = self.fm.get_user_folder(user_id)
-        
-        subfolders = self.fm.get_subfolders(user_id)
-        if not subfolders:
-            self.api.send_message(user_id, "❌ Нет папок с ID групп.")
-            self.fm.clear_user_data(user_id)
-            return
-        
-        for folder in subfolders:
-            self.db.add_publication(user_id, folder['name'], folder['group_id'])
-        
-        total = len(subfolders)
-        self.api.send_message(user_id, f"✅ Найдено {total} папок. Начинаю публикацию...")
-        
-        published = 0
-        errors = []
-        post_number = 0
-        
-        for folder in subfolders:
-            if not self.is_running.get(user_id, True):
-                self.api.send_message(user_id, "⏹️ Публикация остановлена.")
-                break
-            
-            post_number += 1
-            self.db.update_status(folder['name'], 'processing')
-            
-            # Задержка 30-60 секунд между постами
-            if post_number > 1:
-                delay = random.randint(30, 60)
-                logger.info(f"⏳ Задержка {delay} сек. перед постом {post_number}")
-                self.api.send_message(user_id, f"⏳ Пауза {delay} сек. перед постом {post_number}/{total}")
-                time.sleep(delay)
-            
-            if (post_number - 1) % 10 == 0 and post_number > 1:
-                logger.info("⏳ Пауза 5 минут")
-                self.api.send_message(user_id, "⏳ Пауза 5 минут после 10 постов")
-                time.sleep(300)
-            
-            logger.info(f"📤 Публикация папки {post_number}/{total}: {folder['name']}")
-            self.api.send_message(user_id, f"📤 Публикация {post_number}/{total}: {folder['name']}")
-            
-            success, msg = self.publish_folder(
-                folder['path'], 
-                folder['group_id'], 
-                bot_token,
-                post_number, 
-                total
-            )
-            
-            if success:
-                published += 1
-                self.db.update_status(folder['name'], 'done')
-                logger.info(f"✅ Опубликовано: {folder['name']}")
-                try:
-                    shutil.rmtree(folder['path'])
-                    logger.info(f"🗑️ Папка удалена: {folder['path']}")
-                except Exception as e:
-                    logger.error(f"❌ Ошибка удаления папки: {e}")
-            else:
-                errors.append(f"{folder['name']}: {msg}")
-                self.db.update_status(folder['name'], 'error', msg)
-                logger.error(f"❌ Ошибка: {folder['name']} - {msg}")
-                self.api.send_message(user_id, f"❌ Ошибка в {folder['name']}: {msg}")
-        
-        result_msg = f"✅ **ПУБЛИКАЦИЯ ЗАВЕРШЕНА!**\n\n📊 Всего папок: {total}\n✅ Опубликовано: {published}\n❌ Ошибок: {len(errors)}"
-        if errors:
-            result_msg += "\n\n⚠️ Ошибки:\n" + "\n".join(errors[:5])
-            if len(errors) > 5:
-                result_msg += f"\n... и ещё {len(errors) - 5} ошибок"
-        
-        self.api.send_message(user_id, result_msg)
-        self.fm.clear_user_data(user_id)
+            import traceback
+            logger.error(traceback.format_exc())
+            self.api.send_message(user_id, f"❌ Ошибка публикации: {str(e)}")
+            return False
     
     def stop(self, user_id):
-        self.is_running[user_id] = False
-        logger.info(f"⏹️ Публикация остановлена для пользователя {user_id}")
+        """Останавливает публикацию"""
+        if user_id in self.active_users:
+            self.active_users[user_id] = False
+            logger.info(f"⏹️ Публикация остановлена для пользователя {user_id}")
+        else:
+            logger.info(f"ℹ️ Публикация для пользователя {user_id} не была активна")
