@@ -34,7 +34,7 @@ def convert_to_direct_link(url):
 
 def download_file_from_drive(url, destination_path):
     """
-    Скачивает файл с Google Drive (работает для больших файлов)
+    Скачивает файл с Google Drive (альтернативный метод с cookies)
     """
     try:
         # Извлекаем ID файла
@@ -45,18 +45,23 @@ def download_file_from_drive(url, destination_path):
         
         print(f"🔑 ID файла: {file_id}")
         
+        # Создаём сессию с cookies
+        session = requests.Session()
+        
         # Заголовки для имитации браузера
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
             'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
             'Cache-Control': 'max-age=0',
         }
-        
-        session = requests.Session()
         
         # ШАГ 1: Получаем страницу с подтверждением
         initial_url = f"https://drive.google.com/uc?export=download&id={file_id}"
@@ -65,24 +70,30 @@ def download_file_from_drive(url, destination_path):
         response = session.get(initial_url, headers=headers, allow_redirects=True, timeout=30)
         response.raise_for_status()
         
+        print(f"📊 Статус: {response.status_code}")
+        print(f"📊 URL после редиректа: {response.url}")
+        
         # ШАГ 2: Ищем параметр confirm
         confirm_param = None
         
-        # Сначала проверяем URL
+        # Проверяем URL на наличие confirm
         if 'confirm=' in response.url:
             match = re.search(r'confirm=([^&]+)', response.url)
             if match:
                 confirm_param = match.group(1)
                 print(f"✅ Найден confirm в URL: {confirm_param}")
         
-        # Если не нашли, ищем в HTML
+        # Если не нашли в URL, ищем в HTML
         if not confirm_param:
             html_content = response.text
+            # Ищем confirm в разных форматах
             patterns = [
                 r'confirm=([^&"\']+)',
                 r'"confirm":"([^"]+)"',
                 r'confirm=([a-zA-Z0-9_-]+)',
-                r'confirm=([^&]+)'
+                r'confirm=([^&]+)',
+                r'uc\?export=download&amp;confirm=([^&]+)',
+                r'confirm=([a-z0-9]+)',
             ]
             for pattern in patterns:
                 match = re.search(pattern, html_content)
@@ -95,13 +106,13 @@ def download_file_from_drive(url, destination_path):
         if confirm_param:
             download_url = f"https://drive.google.com/uc?export=download&confirm={confirm_param}&id={file_id}"
         else:
-            # Пробуем стандартные варианты
+            # Если confirm не найден, пробуем стандартные варианты
             print("⚠️ Confirm не найден, пробуем стандартные варианты...")
             download_url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t"
         
         print(f"🔄 Шаг 2: Скачивание по {download_url}")
         
-        # ШАГ 4: Скачиваем файл
+        # ШАГ 4: Скачиваем файл с правильными cookies
         response = session.get(
             download_url,
             headers=headers,
@@ -118,10 +129,14 @@ def download_file_from_drive(url, destination_path):
         print(f"📊 Content-Type: {content_type}")
         print(f"📊 Content-Disposition: {content_disposition}")
         
-        # Если получили HTML - пробуем другой confirm
+        # Если получили HTML - пробуем другой метод
         if 'text/html' in content_type and 'filename' not in content_disposition:
-            print("⚠️ Получен HTML, пробуем с confirm=1...")
+            print("⚠️ Получен HTML вместо файла, пробуем альтернативный метод...")
+            
+            # Пробуем с confirm=1
             alt_url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm=1"
+            print(f"🔄 Альтернативный запрос: {alt_url}")
+            
             response = session.get(alt_url, headers=headers, stream=True, allow_redirects=True, timeout=60)
             response.raise_for_status()
             
@@ -129,12 +144,47 @@ def download_file_from_drive(url, destination_path):
             content_disposition = response.headers.get('content-disposition', '')
             
             if 'text/html' in content_type and 'filename' not in content_disposition:
-                raise Exception("Не удалось получить файл. Возможно, он приватный.")
+                # Если всё равно HTML, пытаемся скачать через другой метод
+                print("⚠️ Всё ещё HTML, пробуем через drive.google.com...")
+                
+                # Пробуем через страницу просмотра
+                view_url = f"https://drive.google.com/file/d/{file_id}/view"
+                response = session.get(view_url, headers=headers, allow_redirects=True, timeout=30)
+                
+                # Ищем ссылку на скачивание в HTML
+                html_content = response.text
+                download_patterns = [
+                    r'https://drive\.google\.com/uc\?export=download[^"\']+',
+                    r'https://drive\.google\.com/u/0/uc\?export=download[^"\']+',
+                ]
+                
+                for pattern in download_patterns:
+                    match = re.search(pattern, html_content)
+                    if match:
+                        download_link = match.group(0)
+                        print(f"✅ Найдена ссылка на скачивание: {download_link}")
+                        
+                        # Добавляем confirm если нужно
+                        if 'confirm' not in download_link:
+                            download_link += '&confirm=t'
+                        
+                        response = session.get(download_link, headers=headers, stream=True, allow_redirects=True, timeout=60)
+                        response.raise_for_status()
+                        break
+        
+        # Проверяем финальный результат
+        content_type = response.headers.get('content-type', '').lower()
+        content_disposition = response.headers.get('content-disposition', '')
+        
+        if 'text/html' in content_type and 'filename' not in content_disposition:
+            raise Exception("Не удалось получить файл. Возможно, файл приватный или требует входа в аккаунт.")
         
         # ШАГ 5: Сохраняем файл
         total_size = int(response.headers.get('content-length', 0))
         if total_size > 0:
             print(f"📦 Размер файла: {total_size / (1024*1024):.2f} МБ")
+        else:
+            print("📦 Размер файла неизвестен")
         
         downloaded = 0
         with open(destination_path, 'wb') as f:
