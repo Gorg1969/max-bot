@@ -73,42 +73,42 @@ class APIClient:
             logger.error(f"❌ Ошибка отправки в чат: {e}")
             return False
 
-    def send_photo_to_chat(self, chat_id, photo_path, caption=None):
+    def send_photo_to_chat(self, chat_id, photo_path, caption=None, compressed_data=None):
         """
         Отправляет фото в чат через multipart/form-data
         """
         try:
-            # Проверяем, что файл существует
-            if not os.path.exists(photo_path):
-                logger.error(f"❌ Файл не найден: {photo_path}")
-                return False
+            # Если данные уже сжаты, используем их
+            if compressed_data:
+                files = {
+                    'file': (os.path.basename(photo_path), compressed_data, 'image/jpeg')
+                }
+            else:
+                # Проверяем, что файл существует
+                if not os.path.exists(photo_path):
+                    logger.error(f"❌ Файл не найден: {photo_path}")
+                    return False
+                
+                # Читаем файл
+                with open(photo_path, 'rb') as f:
+                    files = {'file': (os.path.basename(photo_path), f, 'image/jpeg')}
 
-            # Проверяем размер файла
-            file_size = os.path.getsize(photo_path) / (1024 * 1024)
-            if file_size > 10:
-                logger.warning(f"⚠️ Файл слишком большой ({file_size:.1f} МБ), пропускаем")
-                return False
-
-            # Формируем параметры
             params = {"chat_id": chat_id}
             if caption:
                 params["caption"] = caption
 
-            # Открываем файл и отправляем через multipart
-            with open(photo_path, 'rb') as f:
-                files = {'file': (os.path.basename(photo_path), f, 'image/jpeg')}
-                response = requests.post(
-                    f"{self.base_url}/messages",
-                    headers={"Authorization": self.token},
-                    params=params,
-                    files=files,
-                    timeout=60,
-                    verify=False
-                )
+            response = requests.post(
+                f"{self.base_url}/messages",
+                headers={"Authorization": self.token},
+                params=params,
+                files=files,
+                timeout=120,
+                verify=False
+            )
 
             logger.info(f"📤 Отправка фото в чат {chat_id}, статус: {response.status_code}")
             if response.status_code != 200:
-                logger.error(f"❌ Ошибка отправки фото: {response.text}")
+                logger.error(f"❌ Ошибка отправки фото: {response.text[:200]}")
             return response.status_code == 200
 
         except Exception as e:
@@ -118,7 +118,6 @@ class APIClient:
     def send_message_to_chat_with_attachments(self, chat_id, text, attachments):
         """
         Устаревший метод — оставлен для совместимости
-        Теперь используйте send_photo_to_chat для фото
         """
         try:
             payload = {
@@ -522,7 +521,7 @@ def upload_folder():
             logger.info(f"🗑️ Папка пользователя {user_id} очищена")
         os.makedirs(user_folder, exist_ok=True)
         
-        # Сохраняем файлы с полной структура
+        # Сохраняем файлы с полной структурой
         saved_count = 0
         root_folder_name = None
         
