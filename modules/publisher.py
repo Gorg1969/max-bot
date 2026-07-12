@@ -3,6 +3,7 @@ import os
 import time
 import re
 import requests
+import base64
 
 logger = logging.getLogger(__name__)
 
@@ -13,16 +14,52 @@ class Publisher:
         self.db = db
         self.active_users = {}
     
-    def extract_group_id(self, folder_name):
+    def extract_chat_id(self, folder_name):
         """
         Извлекает ID чата из названия папки
         Пример: "Название -123456789" -> "-123456789"
         """
-        # Ищем число после дефиса с пробелом
         match = re.search(r'-\s*(\d+)', folder_name)
         if match:
-            return f"-{match.group(1)}"  # Возвращаем с дефисом
+            return f"-{match.group(1)}"
         return None
+    
+    def upload_photo_to_max(self, photo_path):
+        """
+        Загружает фото в MAX и возвращает attachment объект
+        """
+        try:
+            # Читаем файл
+            with open(photo_path, 'rb') as f:
+                photo_data = f.read()
+            
+            # Кодируем в base64
+            photo_base64 = base64.b64encode(photo_data).decode('utf-8')
+            
+            # Определяем тип файла
+            ext = os.path.splitext(photo_path)[1].lower()
+            mime_type = {
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.png': 'image/png',
+                '.gif': 'image/gif',
+                '.webp': 'image/webp'
+            }.get(ext, 'image/jpeg')
+            
+            # Формируем attachment для MAX API
+            attachment = {
+                "type": "image",
+                "payload": {
+                    "content": photo_base64,
+                    "mime_type": mime_type,
+                    "filename": os.path.basename(photo_path)
+                }
+            }
+            
+            return attachment
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки фото {photo_path}: {e}")
+            return None
     
     def start(self, user_id):
         """Запускает публикацию для пользователя"""
@@ -96,7 +133,7 @@ class Publisher:
                         text = f.read()
                     
                     # Извлекаем ID чата из названия папки (с дефисом)
-                    chat_id = self.extract_group_id(folder_name)
+                    chat_id = self.extract_chat_id(folder_name)
                     if not chat_id:
                         logger.warning(f"⚠️ Не удалось извлечь ID чата из {folder_name}")
                         continue
@@ -111,18 +148,29 @@ class Publisher:
                     logger.info(f"📄 Текст: {text[:100]}...")
                     logger.info(f"🖼️ Найдено {len(images)} изображений")
                     
-                    # 🔥 ОТПРАВЛЯЕМ В ЧАТ С ID (с дефисом)
-                    if images:
-                        # Отправляем с фото
-                        # TODO: Добавить загрузку фото через MAX API
-                        self.api.send_message_to_chat(chat_id, text)
+                    # Загружаем фото в MAX и создаём attachments
+                    attachments = []
+                    for img_path in images[:5]:  # MAX может иметь ограничение по кол-ву фото
+                        attachment = self.upload_photo_to_max(img_path)
+                        if attachment:
+                            attachments.append(attachment)
+                            logger.info(f"✅ Загружено фото: {os.path.basename(img_path)}")
+                    
+                    # Отправляем сообщение с фото
+                    if attachments:
+                        success = self.api.send_message_to_chat_with_attachments(chat_id, text, attachments)
                     else:
-                        self.api.send_message_to_chat(chat_id, text)
+                        logger.warning(f"⚠️ Нет фото для публикации, отправляю только текст")
+                        success = self.api.send_message_to_chat(chat_id, text)
                     
-                    # Добавляем в базу данных
-                    self.db.add_publication(user_id, folder_name, chat_id)
+                    if success:
+                        # Добавляем в базу данных
+                        self.db.add_publication(user_id, folder_name, chat_id)
+                        published += 1
+                        logger.info(f"✅ Опубликовано: {folder_name}")
+                    else:
+                        logger.error(f"❌ Не удалось опубликовать: {folder_name}")
                     
-                    published += 1
                     time.sleep(1)  # Пауза между публикациями
                     
                 except Exception as e:
