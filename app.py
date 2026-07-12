@@ -63,26 +63,6 @@ class APIClient:
             logger.error(f"❌ Ошибка отправки в чат: {e}")
             return False
 
-    def send_message_to_chat_with_attachments(self, chat_id, text, attachments):
-        try:
-            payload = {
-                "text": text,
-                "format": "markdown",
-                "attachments": attachments
-            }
-            response = requests.post(
-                f"{BASE_URL}/messages",
-                headers={"Authorization": self.token, "Content-Type": "application/json"},
-                params={"chat_id": chat_id},
-                json=payload,
-                timeout=30,
-                verify=False
-            )
-            return response.status_code == 200
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки с вложениями: {e}")
-            return False
-
 api = APIClient()
 publisher = Publisher(api, fm, db)
 web = WebInterface(fm, publisher)
@@ -114,8 +94,6 @@ UPLOAD_PAGE = """
         .btn-success:hover { background: #218838; }
         .btn-danger { background: #dc3545; color: white; }
         .btn-danger:hover { background: #c82333; }
-        .btn-secondary { background: #6c757d; color: white; }
-        .btn-secondary:hover { background: #5a6268; }
         .status { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
         .status.success { background: #d4edda; color: #155724; display: block; border-left: 4px solid #28a745; }
         .status.error { background: #f8d7da; color: #721c24; display: block; border-left: 4px solid #dc3545; }
@@ -124,8 +102,6 @@ UPLOAD_PAGE = """
         .file-list { text-align: left; margin: 20px 0; padding: 0; list-style: none; }
         .file-list li { background: #f8f9fa; padding: 10px 15px; margin: 5px 0; border-radius: 5px; border-left: 3px solid #007bff; display: flex; justify-content: space-between; align-items: center; }
         .file-list li .count { background: #007bff; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
-        .file-list li .invalid { background: #dc3545; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
-        .file-list li .valid { background: #28a745; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
         .progress-bar { width: 100%; height: 25px; background: #e9ecef; border-radius: 10px; overflow: hidden; margin: 10px 0; display: none; }
         .progress-bar .progress { height: 100%; background: linear-gradient(90deg, #28a745, #20c997); transition: width 0.3s; width: 0%; display: flex; align-items: center; justify-content: center; color: white; font-size: 12px; font-weight: bold; }
         .instructions { background: #fff3cd; padding: 15px 20px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107; }
@@ -334,7 +310,6 @@ UPLOAD_PAGE = """
                                 progress.style.width = '100%';
                                 progress.textContent = '100%';
                                 if (response.result) {
-                                    // Показываем результаты проверки
                                     if (response.result.valid_folders && response.result.valid_folders.length > 0) {
                                         addLog(`✅ Готовы к публикации: ${response.result.valid_folders.join(', ')}`);
                                     }
@@ -393,7 +368,7 @@ def upload_page():
 
 @app.route('/upload_folder', methods=['POST'])
 def upload_folder():
-    """Обработка загрузки папки с проверкой"""
+    """Обработка загрузки папки с проверкой подпапок"""
     try:
         user_id = int(request.form.get('user_id', 151296248))
         files = request.files.getlist('files[]')
@@ -403,74 +378,91 @@ def upload_folder():
         
         logger.info(f"📥 Получено {len(files)} файлов от пользователя {user_id}")
         
-        # Сохраняем файлы во временную папку
-        temp_folder = fm.get_temp_folder(user_id)
-        if os.path.exists(temp_folder):
-            shutil.rmtree(temp_folder)
-        os.makedirs(temp_folder)
+        # Получаем путь к папке пользователя
+        user_folder = fm.get_user_folder(user_id)
         
+        # Проверяем, есть ли уже папки с объявлениями
+        existing_folders = []
+        if os.path.exists(user_folder):
+            existing_folders = [f for f in os.listdir(user_folder) 
+                              if os.path.isdir(os.path.join(user_folder, f))]
+        
+        # Сохраняем файлы напрямую в папку пользователя (не во временную)
         saved_count = 0
+        saved_folders = set()
+        
         for file in files:
             rel_path = getattr(file, 'filename', file.name)
             if not rel_path:
                 rel_path = file.name
-            full_path = os.path.join(temp_folder, rel_path)
-            os.makedirs(os.path.dirname(full_path), exist_ok=True)
-            file.save(full_path)
-            saved_count += 1
+            
+            # Извлекаем имя папки из пути (первая часть пути)
+            parts = rel_path.split('/')
+            if len(parts) >= 2:
+                folder_name = parts[0]  # Это имя подпапки
+                saved_folders.add(folder_name)
+                
+                # Формируем полный путь для сохранения
+                full_path = os.path.join(user_folder, rel_path)
+                os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                file.save(full_path)
+                saved_count += 1
         
-        logger.info(f"✅ Сохранено {saved_count} файлов во временную папку")
+        logger.info(f"✅ Сохранено {saved_count} файлов, найдено папок: {len(saved_folders)}")
         
-        # Анализируем структуру папок
+        # Проверяем каждую папку на наличие info.txt
         valid_folders = []
         invalid_folders = []
         folder_errors = {}
         
-        for item in os.listdir(temp_folder):
-            item_path = os.path.join(temp_folder, item)
-            if os.path.isdir(item_path):
-                info_path = os.path.join(item_path, 'info.txt')
+        for folder in saved_folders:
+            folder_path = os.path.join(user_folder, folder)
+            if os.path.isdir(folder_path):
+                info_path = os.path.join(folder_path, 'info.txt')
                 if os.path.exists(info_path):
-                    valid_folders.append(item)
-                    logger.info(f"✅ Папка {item} - валидна")
+                    valid_folders.append(folder)
+                    logger.info(f"✅ Папка {folder} - валидна (есть info.txt)")
                 else:
-                    invalid_folders.append(item)
-                    folder_errors[item] = "отсутствует info.txt"
-                    logger.warning(f"⚠️ В папке {item} нет info.txt")
+                    invalid_folders.append(folder)
+                    folder_errors[folder] = "отсутствует info.txt"
+                    logger.warning(f"⚠️ В папке {folder} нет info.txt")
         
-        # Переносим валидные папки в основную структуру
-        user_folder = fm.get_user_folder(user_id)
-        moved_folders = []
-        for folder in valid_folders:
-            src = os.path.join(temp_folder, folder)
-            dst = os.path.join(user_folder, folder)
-            if os.path.exists(dst):
-                shutil.rmtree(dst)
-            shutil.move(src, dst)
-            moved_folders.append(folder)
-            logger.info(f"📦 Перенесена папка {folder}")
+        # Если нет ни одной папки с info.txt
+        if not valid_folders and not invalid_folders:
+            # Проверяем, может файлы загружены прямо в корень
+            root_files = [f for f in os.listdir(user_folder) if os.path.isfile(os.path.join(user_folder, f))]
+            if root_files:
+                invalid_folders.append("Корневая папка")
+                folder_errors["Корневая папка"] = "файлы загружены в корень, а не в подпапки"
+                logger.warning("⚠️ Файлы загружены в корень папки пользователя")
         
-        # Удаляем временную папку
-        shutil.rmtree(temp_folder)
+        # Удаляем временную папку если она есть
+        temp_folder = fm.get_temp_folder(user_id)
+        if os.path.exists(temp_folder):
+            shutil.rmtree(temp_folder)
         
         # Сохраняем результат для пользователя
         user_temp_data[user_id] = {
-            'valid_folders': moved_folders,
+            'valid_folders': valid_folders,
             'invalid_folders': invalid_folders,
             'folder_errors': folder_errors
         }
         
         # Формируем сообщение для пользователя
         message = ""
-        if moved_folders:
-            message += f"✅ Найдено {len(moved_folders)} валидных объявлений: {', '.join(moved_folders)}\n\n"
+        if valid_folders:
+            message += f"✅ **Найдено {len(valid_folders)} валидных объявлений:**\n"
+            for folder in valid_folders:
+                message += f"  • {folder}\n"
+            message += "\n"
+        
         if invalid_folders:
-            message += f"❌ Пропущено {len(invalid_folders)} папок:\n"
+            message += f"❌ **Пропущено {len(invalid_folders)} папок:**\n"
             for folder, error in folder_errors.items():
                 message += f"  • {folder} - {error}\n"
         
         # Отправляем сообщение пользователю
-        if invalid_folders and moved_folders:
+        if invalid_folders and valid_folders:
             # Есть и валидные, и невалидные
             api.send_message(
                 user_id,
@@ -485,23 +477,23 @@ def upload_folder():
                 'success': True,
                 'message': 'Загрузка завершена. Проверьте сообщение в боте.',
                 'result': {
-                    'valid_folders': moved_folders,
+                    'valid_folders': valid_folders,
                     'invalid_folders': invalid_folders
                 }
             })
-        elif moved_folders:
+        elif valid_folders:
             # Только валидные
             api.send_message(
                 user_id,
                 f"✅ **Все папки валидны!**\n\n"
-                f"Найдено {len(moved_folders)} объявлений:\n"
-                f"{', '.join(moved_folders)}\n\n"
+                f"Найдено {len(valid_folders)} объявлений:\n"
+                f"{', '.join(valid_folders)}\n\n"
                 f"🚀 Начинаем публикацию..."
             )
             publisher.start(user_id)
             return jsonify({
                 'success': True,
-                'message': f'✅ Загружено {len(moved_folders)} объявлений. Публикация началась!'
+                'message': f'✅ Загружено {len(valid_folders)} объявлений. Публикация началась!'
             })
         else:
             # Только невалидные
@@ -509,7 +501,16 @@ def upload_folder():
                 user_id,
                 f"❌ **Нет валидных папок!**\n\n"
                 f"{message}\n"
-                f"Проверьте структуру папок и попробуйте снова."
+                f"Проверьте структуру папок и попробуйте снова.\n\n"
+                f"📌 **Правильная структура:**\n"
+                f"  Мои объявления/\n"
+                f"  ├── Квартиры -123456789/\n"
+                f"  │   ├── info.txt\n"
+                f"  │   └── photo1.jpg\n"
+                f"  ├── Машины -987654321/\n"
+                f"  │   ├── info.txt\n"
+                f"  │   └── photo1.jpg\n"
+                f"  └── ..."
             )
             return jsonify({
                 'success': False,
