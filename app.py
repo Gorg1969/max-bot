@@ -412,7 +412,7 @@ def upload_page():
 
 @app.route('/upload_folder', methods=['POST'])
 def upload_folder():
-    """Обработка загрузки папки с правильным определением структуры"""
+    """Обработка загрузки папки с поиском info.txt в подпапках"""
     try:
         user_id = int(request.form.get('user_id', 151296248))
         files = request.files.getlist('files[]')
@@ -422,14 +422,10 @@ def upload_folder():
         
         logger.info(f"📥 Получено {len(files)} файлов от пользователя {user_id}")
         
-        # Логируем первые несколько файлов для отладки
-        for i, file in enumerate(files[:5]):
-            logger.info(f"📄 Файл {i+1}: {file.filename}")
-        
         # Получаем папку пользователя
         user_folder = fm.get_user_folder(user_id)
         
-        # 🔥 Очищаем папку пользователя перед загрузкой
+        # Очищаем папку пользователя перед загрузкой
         if os.path.exists(user_folder):
             shutil.rmtree(user_folder)
             logger.info(f"🗑️ Папка пользователя {user_id} очищена")
@@ -437,7 +433,7 @@ def upload_folder():
         
         # Сохраняем файлы с полной структурой
         saved_count = 0
-        folder_names = set()
+        root_folder_name = None
         
         for file in files:
             # Получаем путь (webkitRelativePath)
@@ -448,67 +444,75 @@ def upload_folder():
             # Разбиваем путь на части
             parts = rel_path.split('/')
             
-            # Если есть хотя бы одна подпапка
-            if len(parts) >= 2:
-                folder_name = parts[0]  # Это имя подпапки
-                folder_names.add(folder_name)
-                
-                # Сохраняем файл с полным путём
-                full_path = os.path.join(user_folder, rel_path)
-                os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                file.save(full_path)
-                saved_count += 1
-            else:
-                # Файл в корне - сохраняем, но отмечаем
-                logger.warning(f"⚠️ Файл в корне: {rel_path}")
-                full_path = os.path.join(user_folder, rel_path)
-                file.save(full_path)
-                saved_count += 1
+            # Запоминаем имя корневой папки
+            if len(parts) >= 1 and not root_folder_name:
+                root_folder_name = parts[0]
+            
+            # Сохраняем файл с полным путём
+            full_path = os.path.join(user_folder, rel_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            file.save(full_path)
+            saved_count += 1
         
         logger.info(f"✅ Сохранено {saved_count} файлов")
-        logger.info(f"📁 Найдены папки: {folder_names}")
+        logger.info(f"📁 Корневая папка: {root_folder_name}")
         
-        # АНАЛИЗИРУЕМ СТРУКТУРУ - ИЩЕМ info.txt В ПОДПАПКАХ
+        # 🔥 ТЕПЕРЬ ИЩЕМ ПОДПАПКИ ВНУТРИ КОРНЕВОЙ ПАПКИ
         valid_folders = []
         invalid_folders = []
         folder_errors = {}
         
-        # Проходим по всем элементам в папке пользователя
-        for item in os.listdir(user_folder):
-            item_path = os.path.join(user_folder, item)
-            
-            # Проверяем, является ли элемент папкой
-            if os.path.isdir(item_path):
-                # Проверяем наличие info.txt в этой подпапке
-                info_path = os.path.join(item_path, 'info.txt')
-                if os.path.exists(info_path):
-                    valid_folders.append(item)
-                    logger.info(f"✅ Папка {item} - валидна (есть info.txt)")
-                else:
-                    invalid_folders.append(item)
-                    folder_errors[item] = "отсутствует info.txt"
-                    logger.warning(f"⚠️ В папке {item} нет info.txt")
+        # Проверяем, есть ли папка с именем root_folder_name
+        if root_folder_name:
+            root_folder_path = os.path.join(user_folder, root_folder_name)
+            if os.path.isdir(root_folder_path):
+                # Проходим по всем элементам внутри корневой папки
+                for item in os.listdir(root_folder_path):
+                    item_path = os.path.join(root_folder_path, item)
                     
-                    # Логируем содержимое папки для отладки
-                    try:
-                        contents = os.listdir(item_path)
-                        logger.warning(f"📂 Содержимое папки {item}: {contents[:10]}")
-                    except:
-                        pass
+                    if os.path.isdir(item_path):
+                        # Проверяем наличие info.txt в этой подпапке
+                        info_path = os.path.join(item_path, 'info.txt')
+                        if os.path.exists(info_path):
+                            valid_folders.append(item)
+                            logger.info(f"✅ Папка {item} - валидна (есть info.txt)")
+                        else:
+                            invalid_folders.append(item)
+                            folder_errors[item] = "отсутствует info.txt"
+                            logger.warning(f"⚠️ В папке {item} нет info.txt")
+                            
+                            # Логируем содержимое папки для отладки
+                            try:
+                                contents = os.listdir(item_path)
+                                logger.warning(f"📂 Содержимое папки {item}: {contents[:10]}")
+                            except:
+                                pass
+            else:
+                logger.error(f"❌ Папка {root_folder_name} не найдена в {user_folder}")
         
-        # Проверяем, есть ли файлы в корне папки пользователя
-        root_files = [f for f in os.listdir(user_folder) if os.path.isfile(os.path.join(user_folder, f))]
-        if root_files:
-            invalid_folders.append("Корневая папка")
-            folder_errors["Корневая папка"] = f"загружены файлы в корень ({len(root_files)} шт.)"
-            logger.warning(f"⚠️ Файлы в корне: {root_files[:5]}")
-        
-        # Если нет папок, но есть файлы - возможно, структура другая
+        # Если не найдено подпапок с info.txt, проверяем корневую папку
         if not valid_folders and not invalid_folders:
-            # Проверяем, есть ли info.txt в корне
-            if os.path.exists(os.path.join(user_folder, 'info.txt')):
-                valid_folders.append("Корневая папка")
-                logger.info("✅ Найден info.txt в корне")
+            # Проверяем, есть ли info.txt в корневой папке
+            if root_folder_name:
+                root_info_path = os.path.join(user_folder, root_folder_name, 'info.txt')
+                if os.path.exists(root_info_path):
+                    valid_folders.append(root_folder_name)
+                    logger.info(f"✅ Найден info.txt в корневой папке {root_folder_name}")
+        
+        # Если всё ещё нет, проверяем саму папку пользователя
+        if not valid_folders and not invalid_folders:
+            # Проверяем, есть ли папки напрямую в user_folder
+            for item in os.listdir(user_folder):
+                item_path = os.path.join(user_folder, item)
+                if os.path.isdir(item_path):
+                    info_path = os.path.join(item_path, 'info.txt')
+                    if os.path.exists(info_path):
+                        valid_folders.append(item)
+                        logger.info(f"✅ Папка {item} - валидна (есть info.txt)")
+                    else:
+                        invalid_folders.append(item)
+                        folder_errors[item] = "отсутствует info.txt"
+                        logger.warning(f"⚠️ В папке {item} нет info.txt")
         
         # Сохраняем результат для пользователя
         user_temp_data[user_id] = {
@@ -568,14 +572,13 @@ def upload_folder():
                 f"{message}\n"
                 f"Проверьте структуру папок и попробуйте снова.\n\n"
                 f"📌 **Правильная структура:**\n"
-                f"  Мои объявления/\n"
-                f"  ├── Квартиры -123456789/\n"
-                f"  │   ├── info.txt\n"
+                f"  Самосвалы/              ← Корневая папка\n"
+                f"  ├── 1-76555855219217/   ← Подпапка с объявлением\n"
+                f"  │   ├── info.txt        ← ✅ ДОЛЖЕН БЫТЬ!\n"
                 f"  │   └── photo1.jpg\n"
-                f"  ├── Машины -987654321/\n"
-                f"  │   ├── info.txt\n"
-                f"  │   └── photo1.jpg\n"
-                f"  └── ...\n\n"
+                f"  └── 1-76576474415864/   ← Подпапка с объявлением\n"
+                f"      ├── info.txt        ← ✅ ДОЛЖЕН БЫТЬ!\n"
+                f"      └── photo1.jpg\n\n"
                 f"💡 **Важно:** файл info.txt должен лежать ВНУТРИ каждой подпапки с объявлением!"
             )
             return jsonify({
