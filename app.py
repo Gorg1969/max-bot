@@ -1,10 +1,9 @@
-from flask import Flask, request, jsonify, render_template_string, send_from_directory
+from flask import Flask, request, jsonify, render_template_string
 import requests
 import logging
 import os
 import shutil
 import urllib3
-import zipfile
 from modules import Database, FileManager, Publisher, WebInterface
 
 # ОТКЛЮЧАЕМ ПРЕДУПРЕЖДЕНИЯ SSL
@@ -84,8 +83,9 @@ class APIClient:
 
 api = APIClient()
 publisher = Publisher(api, fm, db)
+web = WebInterface(fm, publisher)
 
-# ========== HTML СТРАНИЦА ДЛЯ ЗАГРУЗКИ ==========
+# ========== HTML СТРАНИЦА ДЛЯ ЗАГРУЗКИ ПАПКИ ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -93,80 +93,91 @@ UPLOAD_PAGE = """
     <meta charset="UTF-8">
     <title>Загрузка объявлений</title>
     <style>
-        body { font-family: Arial; max-width: 800px; margin: 50px auto; padding: 20px; }
-        .container { border: 2px dashed #ccc; padding: 40px; text-align: center; border-radius: 10px; }
-        .drop-zone { border: 2px dashed #007bff; padding: 40px; margin: 20px 0; border-radius: 10px; background: #f8f9fa; }
-        .drop-zone.dragover { background: #e3f2fd; border-color: #0056b3; }
+        body { font-family: Arial; max-width: 800px; margin: 50px auto; padding: 20px; background: #f5f5f5; }
+        .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #333; margin-top: 0; }
+        .drop-zone { border: 2px dashed #007bff; padding: 40px; margin: 20px 0; border-radius: 10px; background: #f8f9fa; text-align: center; cursor: pointer; transition: all 0.3s; }
+        .drop-zone:hover { background: #e3f2fd; }
+        .drop-zone.dragover { background: #d4edda; border-color: #28a745; }
+        .drop-zone p { margin: 0; color: #666; }
+        .drop-zone .icon { font-size: 48px; display: block; margin-bottom: 10px; }
         input[type="file"] { display: none; }
-        .btn { background: #007bff; color: white; padding: 12px 30px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
-        .btn:hover { background: #0056b3; }
+        .btn { padding: 12px 30px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; font-weight: bold; transition: all 0.3s; }
+        .btn-primary { background: #007bff; color: white; }
+        .btn-primary:hover { background: #0056b3; }
+        .btn-success { background: #28a745; color: white; }
+        .btn-success:hover { background: #218838; }
+        .btn-danger { background: #dc3545; color: white; }
+        .btn-danger:hover { background: #c82333; }
+        .btn-secondary { background: #6c757d; color: white; }
+        .btn-secondary:hover { background: #5a6268; }
         .status { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
-        .status.success { background: #d4edda; color: #155724; display: block; }
-        .status.error { background: #f8d7da; color: #721c24; display: block; }
-        .status.info { background: #d1ecf1; color: #0c5460; display: block; }
+        .status.success { background: #d4edda; color: #155724; display: block; border-left: 4px solid #28a745; }
+        .status.error { background: #f8d7da; color: #721c24; display: block; border-left: 4px solid #dc3545; }
+        .status.info { background: #d1ecf1; color: #0c5460; display: block; border-left: 4px solid #17a2b8; }
         .file-list { text-align: left; margin: 20px 0; padding: 0; list-style: none; }
-        .file-list li { background: #f8f9fa; padding: 10px; margin: 5px 0; border-radius: 5px; border-left: 3px solid #007bff; }
-        .progress-bar { width: 100%; height: 20px; background: #e9ecef; border-radius: 10px; overflow: hidden; margin: 10px 0; display: none; }
-        .progress-bar .progress { height: 100%; background: #28a745; transition: width 0.3s; width: 0%; }
-        #log { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; font-family: monospace; font-size: 12px; max-height: 300px; overflow-y: auto; margin: 20px 0; display: none; white-space: pre-wrap; }
-        .instructions {
-            background: #fff3cd;
-            padding: 15px;
-            border-radius: 5px;
-            margin: 20px 0;
-            text-align: left;
-            border-left: 4px solid #ffc107;
-        }
-        .instructions code {
-            background: #f8f9fa;
-            padding: 2px 6px;
-            border-radius: 3px;
-            font-size: 14px;
-        }
+        .file-list li { background: #f8f9fa; padding: 10px 15px; margin: 5px 0; border-radius: 5px; border-left: 3px solid #007bff; display: flex; justify-content: space-between; align-items: center; }
+        .file-list li .count { background: #007bff; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
+        .progress-bar { width: 100%; height: 25px; background: #e9ecef; border-radius: 10px; overflow: hidden; margin: 10px 0; display: none; }
+        .progress-bar .progress { height: 100%; background: linear-gradient(90deg, #28a745, #20c997); transition: width 0.3s; width: 0%; display: flex; align-items: center; justify-content: center; color: white; font-size: 12px; font-weight: bold; }
+        .instructions { background: #fff3cd; padding: 15px 20px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107; }
+        .instructions code { background: #f8f9fa; padding: 2px 8px; border-radius: 3px; font-size: 14px; color: #d63384; }
+        #log { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; font-family: 'Courier New', monospace; font-size: 12px; max-height: 300px; overflow-y: auto; margin: 20px 0; display: none; white-space: pre-wrap; line-height: 1.5; }
+        .button-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px; }
+        .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
+        .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; }
     </style>
 </head>
 <body>
-    <h1>📤 Загрузка объявлений</h1>
-    
-    <div class="instructions">
-        <strong>📌 Инструкция:</strong><br>
-        1. Подготовьте папку с объявлениями<br>
-        2. Внутри папки должны быть подпапки с названиями типа: <code>Название -123456789</code><br>
-        3. В каждой подпапке: <code>info.txt</code> (текст объявления) и изображения<br>
-        4. Выберите папку и нажмите "Загрузить"
-    </div>
-    
     <div class="container">
+        <h1>📤 Загрузка объявлений</h1>
+        
+        <div class="instructions">
+            <strong>📌 Как подготовить папку:</strong><br>
+            1️⃣ Создайте папку с названием, например: <code>Мои объявления</code><br>
+            2️⃣ Внутри создайте подпапки: <code>Квартиры -123456789</code>, <code>Машины -987654321</code><br>
+            3️⃣ В каждой подпапке положите: <code>info.txt</code> (текст объявления) и фото<br>
+            4️⃣ Перетащите папку в поле ниже или выберите через кнопку
+        </div>
+        
         <div class="drop-zone" id="dropZone">
-            <p>📂 Перетащите папку сюда</p>
-            <p>или</p>
-            <button class="btn" onclick="document.getElementById('folderInput').click()">Выбрать папку</button>
+            <span class="icon">📂</span>
+            <p><strong>Перетащите папку сюда</strong></p>
+            <p style="color: #999; font-size: 14px;">или нажмите кнопку ниже</p>
+            <button class="btn btn-primary" onclick="document.getElementById('folderInput').click()">Выбрать папку</button>
             <input type="file" id="folderInput" webkitdirectory multiple>
         </div>
         
         <div id="fileList" style="display:none;">
-            <h4>📄 Выбранные файлы:</h4>
+            <div class="selected-info" id="selectedInfo"></div>
             <ul class="file-list" id="fileListContent"></ul>
-            <button class="btn" onclick="uploadFolder()" style="background: #28a745;">🚀 Загрузить</button>
-            <button class="btn" onclick="clearFiles()" style="background: #dc3545;">Очистить</button>
+            <div class="button-group">
+                <button class="btn btn-success" onclick="uploadFolder()">🚀 Загрузить</button>
+                <button class="btn btn-danger" onclick="clearFiles()">🗑️ Очистить</button>
+            </div>
         </div>
         
         <div class="progress-bar" id="progressBar">
-            <div class="progress" id="progress"></div>
+            <div class="progress" id="progress">0%</div>
         </div>
         
         <div id="status" class="status"></div>
         <div id="log"></div>
+        
+        <div class="footer">
+            ⚡ MAX Bot | Загрузка объявлений
+        </div>
     </div>
 
     <script>
         let selectedFiles = [];
-        let userId = 151296248; // ID пользователя в MAX
+        let userId = 151296248;
 
         const dropZone = document.getElementById('dropZone');
         const folderInput = document.getElementById('folderInput');
         const fileList = document.getElementById('fileList');
         const fileListContent = document.getElementById('fileListContent');
+        const selectedInfo = document.getElementById('selectedInfo');
         const statusDiv = document.getElementById('status');
         const logDiv = document.getElementById('log');
         const progressBar = document.getElementById('progressBar');
@@ -227,24 +238,30 @@ UPLOAD_PAGE = """
         function displayFiles(files) {
             fileListContent.innerHTML = '';
             const folders = new Set();
+            const fileCount = {};
+            
             files.forEach(f => {
                 const parts = f.webkitRelativePath.split('/');
                 if (parts.length > 1) {
-                    folders.add(parts[0]);
+                    const folder = parts[0];
+                    folders.add(folder);
+                    if (!fileCount[folder]) fileCount[folder] = 0;
+                    fileCount[folder]++;
                 }
             });
             
             folders.forEach(folder => {
                 const li = document.createElement('li');
-                const count = files.filter(f => f.webkitRelativePath.startsWith(folder + '/')).length;
-                li.textContent = `📁 ${folder} (${count} файлов)`;
+                li.innerHTML = `
+                    <span>📁 <strong>${folder}</strong></span>
+                    <span class="count">${fileCount[folder]} файлов</span>
+                `;
                 fileListContent.appendChild(li);
             });
             
+            selectedInfo.textContent = `✅ Выбрано ${folders.size} папок, всего ${files.length} файлов`;
             fileList.style.display = 'block';
-            statusDiv.className = 'status info';
-            statusDiv.textContent = `✅ Выбрано ${folders.size} папок, ${files.length} файлов`;
-            statusDiv.style.display = 'block';
+            showStatus('info', '📦 Готово к загрузке! Нажмите "Загрузить"');
         }
 
         function clearFiles() {
@@ -253,6 +270,8 @@ UPLOAD_PAGE = """
             statusDiv.style.display = 'none';
             progressBar.style.display = 'none';
             logDiv.style.display = 'none';
+            progress.style.width = '0%';
+            progress.textContent = '0%';
             folderInput.value = '';
         }
 
@@ -262,7 +281,7 @@ UPLOAD_PAGE = """
             logDiv.scrollTop = logDiv.scrollHeight;
         }
 
-        async function uploadFolder() {
+        function uploadFolder() {
             if (selectedFiles.length === 0) {
                 showStatus('error', '❌ Выберите папку для загрузки');
                 return;
@@ -277,6 +296,7 @@ UPLOAD_PAGE = """
             showStatus('info', '⏳ Загрузка началась...');
             progressBar.style.display = 'block';
             progress.style.width = '0%';
+            progress.textContent = '0%';
             logDiv.textContent = '';
             addLog('🚀 Начинаем загрузку...');
             addLog(`📁 Файлов: ${selectedFiles.length}`);
@@ -286,9 +306,12 @@ UPLOAD_PAGE = """
                 
                 xhr.upload.addEventListener('progress', (e) => {
                     if (e.lengthComputable) {
-                        const percent = (e.loaded / e.total) * 100;
+                        const percent = Math.round((e.loaded / e.total) * 100);
                         progress.style.width = percent + '%';
-                        addLog(`📥 Загружено: ${(e.loaded / 1024 / 1024).toFixed(1)} МБ из ${(e.total / 1024 / 1024).toFixed(1)} МБ (${Math.round(percent)}%)`);
+                        progress.textContent = percent + '%';
+                        if (percent % 10 === 0) {
+                            addLog(`📥 Загружено: ${(e.loaded / 1024 / 1024).toFixed(1)} МБ из ${(e.total / 1024 / 1024).toFixed(1)} МБ (${percent}%)`);
+                        }
                     }
                 });
 
@@ -300,6 +323,10 @@ UPLOAD_PAGE = """
                                 showStatus('success', '✅ Загрузка завершена!');
                                 addLog('✅ ' + response.message);
                                 progress.style.width = '100%';
+                                progress.textContent = '100%';
+                                setTimeout(() => {
+                                    window.location.reload();
+                                }, 3000);
                             } else {
                                 showStatus('error', '❌ ' + response.message);
                                 addLog('❌ Ошибка: ' + response.message);
@@ -361,69 +388,18 @@ def upload_folder():
         
         logger.info(f"📥 Получено {len(files)} файлов от пользователя {user_id}")
         
-        # Получаем папку пользователя
-        user_folder = fm.get_user_folder(user_id)
-        temp_folder = os.path.join(user_folder, 'temp_upload')
+        # Сохраняем файлы через FileManager
+        result = fm.save_uploaded_files(files, user_id)
         
-        # Создаём временную папку
-        if os.path.exists(temp_folder):
-            shutil.rmtree(temp_folder)
-        os.makedirs(temp_folder)
-        
-        # Сохраняем файлы с сохранением структуры папок
-        saved_count = 0
-        for file in files:
-            # Получаем путь из webkitRelativePath
-            rel_path = file.filename  # для браузера это webkitRelativePath
-            if not rel_path:
-                rel_path = file.name
-            
-            # Сохраняем с сохранением структуры
-            full_path = os.path.join(temp_folder, rel_path)
-            os.makedirs(os.path.dirname(full_path), exist_ok=True)
-            file.save(full_path)
-            saved_count += 1
-            
-            if saved_count % 10 == 0:
-                logger.info(f"📄 Сохранено {saved_count} файлов")
-        
-        logger.info(f"✅ Сохранено {saved_count} файлов в {temp_folder}")
-        
-        # Анализируем структуру папок
-        folders = []
-        for item in os.listdir(temp_folder):
-            item_path = os.path.join(temp_folder, item)
-            if os.path.isdir(item_path):
-                # Проверяем наличие info.txt
-                info_path = os.path.join(item_path, 'info.txt')
-                if os.path.exists(info_path):
-                    folders.append(item)
-                    logger.info(f"📁 Найдена папка объявления: {item}")
-                else:
-                    logger.warning(f"⚠️ В папке {item} нет info.txt")
-        
-        if not folders:
-            return jsonify({'success': False, 'message': 'Не найдено папок с info.txt'}), 400
-        
-        # Переносим папки в основную структуру пользователя
-        for folder in folders:
-            src = os.path.join(temp_folder, folder)
-            dst = os.path.join(user_folder, folder)
-            if os.path.exists(dst):
-                shutil.rmtree(dst)
-            shutil.move(src, dst)
-            logger.info(f"📦 Перенесена папка {folder}")
-        
-        # Удаляем временную папку
-        shutil.rmtree(temp_folder)
-        
-        # Запускаем публикацию
-        publisher.start(user_id)
-        
-        return jsonify({
-            'success': True,
-            'message': f'✅ Загружено {len(folders)} объявлений. Начинаю публикацию!'
-        })
+        if result['success']:
+            # Запускаем публикацию
+            publisher.start(user_id)
+            return jsonify({
+                'success': True,
+                'message': f'✅ Загружено {len(result["folders"])} объявлений. Начинаю публикацию!'
+            })
+        else:
+            return jsonify({'success': False, 'message': result['message']}), 400
         
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки папки: {e}")
@@ -487,8 +463,9 @@ def webhook():
                 "🌐 **Загрузите папку с объявлениями через веб-интерфейс:**\n"
                 f"🔗 `https://maxbot.bothost.tech/upload`\n\n"
                 "📌 **Требования к папке:**\n"
-                "• Внутри папки подпапки с названиями: `Название -123456789`\n"
-                "• В каждой подпапке: `info.txt` и изображения\n\n"
+                "• Внутри папки должны быть подпапки с названиями: `Название -123456789`\n"
+                "• В каждой подпапке: `info.txt` (текст объявления) и изображения\n"
+                "• Можно загружать папку любого размера\n\n"
                 "⏹ Для остановки публикации отправьте `/stop`"
             )
             return jsonify({"ok": True}), 200
