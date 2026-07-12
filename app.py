@@ -31,6 +31,7 @@ class APIClient:
         self.token = TOKEN
 
     def send_message(self, user_id, text, attachments=None):
+        """Отправляет сообщение пользователю"""
         try:
             payload = {"text": text, "format": "markdown"}
             if attachments:
@@ -49,6 +50,28 @@ class APIClient:
             return response.status_code == 200
         except Exception as e:
             logger.error(f"❌ Ошибка отправки: {e}")
+            return False
+
+    def send_message_to_chat(self, chat_id, text):
+        """Отправляет сообщение в чат по ID группы"""
+        try:
+            # Проверяем, что chat_id - это число (группа в MAX)
+            # Если chat_id начинается с 7, это ID группы
+            payload = {"text": text, "format": "markdown"}
+            response = requests.post(
+                f"{BASE_URL}/messages",
+                headers={"Authorization": self.token, "Content-Type": "application/json"},
+                params={"chat_id": chat_id},
+                json=payload,
+                timeout=30,
+                verify=False
+            )
+            logger.info(f"📤 Отправка сообщения в чат {chat_id}, статус: {response.status_code}")
+            if response.status_code != 200:
+                logger.error(f"❌ Ошибка отправки в чат: {response.text}")
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки в чат: {e}")
             return False
 
 api = APIClient()
@@ -480,39 +503,16 @@ def upload_folder():
                             invalid_folders.append(item)
                             folder_errors[item] = "отсутствует info.txt"
                             logger.warning(f"⚠️ В папке {item} нет info.txt")
-                            
-                            # Логируем содержимое папки для отладки
-                            try:
-                                contents = os.listdir(item_path)
-                                logger.warning(f"📂 Содержимое папки {item}: {contents[:10]}")
-                            except:
-                                pass
             else:
                 logger.error(f"❌ Папка {root_folder_name} не найдена в {user_folder}")
         
         # Если не найдено подпапок с info.txt, проверяем корневую папку
         if not valid_folders and not invalid_folders:
-            # Проверяем, есть ли info.txt в корневой папке
             if root_folder_name:
                 root_info_path = os.path.join(user_folder, root_folder_name, 'info.txt')
                 if os.path.exists(root_info_path):
                     valid_folders.append(root_folder_name)
                     logger.info(f"✅ Найден info.txt в корневой папке {root_folder_name}")
-        
-        # Если всё ещё нет, проверяем саму папку пользователя
-        if not valid_folders and not invalid_folders:
-            # Проверяем, есть ли папки напрямую в user_folder
-            for item in os.listdir(user_folder):
-                item_path = os.path.join(user_folder, item)
-                if os.path.isdir(item_path):
-                    info_path = os.path.join(item_path, 'info.txt')
-                    if os.path.exists(info_path):
-                        valid_folders.append(item)
-                        logger.info(f"✅ Папка {item} - валидна (есть info.txt)")
-                    else:
-                        invalid_folders.append(item)
-                        folder_errors[item] = "отсутствует info.txt"
-                        logger.warning(f"⚠️ В папке {item} нет info.txt")
         
         # Сохраняем результат для пользователя
         user_temp_data[user_id] = {
@@ -560,26 +560,23 @@ def upload_folder():
                 f"{', '.join(valid_folders)}\n\n"
                 f"🚀 Начинаем публикацию..."
             )
-            publisher.start(user_id)
+            # Отправляем кнопки для подтверждения
+            send_confirmation_buttons(user_id)
+            
             return jsonify({
                 'success': True,
-                'message': f'✅ Загружено {len(valid_folders)} объявлений. Публикация началась!'
+                'message': f'✅ Загружено {len(valid_folders)} объявлений. Нажмите "Да" для публикации.',
+                'result': {
+                    'valid_folders': valid_folders,
+                    'invalid_folders': invalid_folders
+                }
             })
         else:
             api.send_message(
                 user_id,
                 f"❌ **Нет валидных папок!**\n\n"
                 f"{message}\n"
-                f"Проверьте структуру папок и попробуйте снова.\n\n"
-                f"📌 **Правильная структура:**\n"
-                f"  Самосвалы/              ← Корневая папка\n"
-                f"  ├── 1-76555855219217/   ← Подпапка с объявлением\n"
-                f"  │   ├── info.txt        ← ✅ ДОЛЖЕН БЫТЬ!\n"
-                f"  │   └── photo1.jpg\n"
-                f"  └── 1-76576474415864/   ← Подпапка с объявлением\n"
-                f"      ├── info.txt        ← ✅ ДОЛЖЕН БЫТЬ!\n"
-                f"      └── photo1.jpg\n\n"
-                f"💡 **Важно:** файл info.txt должен лежать ВНУТРИ каждой подпапки с объявлением!"
+                f"Проверьте структуру папок и попробуйте снова."
             )
             return jsonify({
                 'success': False,
