@@ -75,13 +75,26 @@ class APIClient:
 
     def send_photo_to_chat(self, chat_id, photo_path, caption=None, compressed_data=None):
         """
-        Отправляет фото в чат через multipart/form-data
+        Отправляет фото в чат через multipart/form-data с правильным MIME-типом
         """
         try:
+            # Определяем MIME-тип по расширению файла
+            ext = os.path.splitext(photo_path)[1].lower()
+            mime_types = {
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.png': 'image/png',
+                '.gif': 'image/gif',
+                '.webp': 'image/webp',
+                '.bmp': 'image/bmp',
+                '.tiff': 'image/tiff'
+            }
+            mime_type = mime_types.get(ext, 'application/octet-stream')
+            
             # Если данные уже сжаты, используем их
             if compressed_data:
                 files = {
-                    'file': (os.path.basename(photo_path), compressed_data, 'image/jpeg')
+                    'file': (os.path.basename(photo_path), compressed_data, mime_type)
                 }
             else:
                 # Проверяем, что файл существует
@@ -91,7 +104,7 @@ class APIClient:
                 
                 # Читаем файл
                 with open(photo_path, 'rb') as f:
-                    files = {'file': (os.path.basename(photo_path), f, 'image/jpeg')}
+                    files = {'file': (os.path.basename(photo_path), f, mime_type)}
 
             params = {"chat_id": chat_id}
             if caption:
