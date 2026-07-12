@@ -2,10 +2,7 @@ import logging
 import os
 import time
 import re
-import requests
 import base64
-from PIL import Image
-import io
 
 logger = logging.getLogger(__name__)
 
@@ -17,80 +14,12 @@ class Publisher:
         self.active_users = {}
     
     def extract_chat_id(self, folder_name):
-        """Извлекает ID чата из названия папки"""
         match = re.search(r'-\s*(\d+)', folder_name)
         if match:
             return f"-{match.group(1)}"
         return None
     
-    def compress_image(self, image_path, max_size_mb=0.5, quality=75):
-        """Сжимает изображение до указанного размера"""
-        try:
-            with Image.open(image_path) as img:
-                if img.mode in ('RGBA', 'P'):
-                    img = img.convert('RGB')
-                
-                # Уменьшаем размер
-                max_dimension = 1280
-                if img.width > max_dimension or img.height > max_dimension:
-                    ratio = min(max_dimension / img.width, max_dimension / img.height)
-                    new_size = (int(img.width * ratio), int(img.height * ratio))
-                    img = img.resize(new_size, Image.Resampling.LANCZOS)
-                
-                output = io.BytesIO()
-                img.save(output, format='JPEG', quality=quality, optimize=True)
-                compressed_data = output.getvalue()
-                
-                return compressed_data
-        except Exception as e:
-            logger.error(f"❌ Ошибка сжатия: {e}")
-            with open(image_path, 'rb') as f:
-                return f.read()
-    
-    def upload_photo_to_max(self, photo_path):
-        """Загружает одно фото в MAX"""
-        try:
-            compressed_data = self.compress_image(photo_path, max_size_mb=0.5, quality=75)
-            photo_base64 = base64.b64encode(compressed_data).decode('utf-8')
-            
-            attachment = {
-                "type": "image",
-                "payload": {
-                    "content": photo_base64,
-                    "mime_type": "image/jpeg",
-                    "filename": os.path.basename(photo_path).rsplit('.', 1)[0] + '.jpg'
-                }
-            }
-            return attachment
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки фото: {e}")
-            return None
-    
-    def send_photo_separately(self, chat_id, photo_path, caption=None):
-        """Отправляет одно фото отдельным сообщением"""
-        try:
-            attachment = self.upload_photo_to_max(photo_path)
-            if not attachment:
-                return False
-            
-            # Отправляем фото с подписью (если есть)
-            if caption:
-                success = self.api.send_message_to_chat_with_attachments(chat_id, caption, [attachment])
-            else:
-                success = self.api.send_message_to_chat_with_attachments(chat_id, "📸", [attachment])
-            
-            if success:
-                logger.info(f"✅ Отправлено фото: {os.path.basename(photo_path)}")
-            else:
-                logger.error(f"❌ Не удалось отправить фото: {os.path.basename(photo_path)}")
-            
-            return success
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки фото: {e}")
-            return False
-    
     def start(self, user_id):
-        """Запускает публикацию для пользователя"""
         try:
             logger.info(f"🚀 Запуск публикации для пользователя {user_id}")
             
@@ -143,19 +72,16 @@ class Publisher:
                     if not chat_id:
                         continue
                     
-                    # Собираем изображения (только первые 5)
+                    # Собираем изображения (только первые 3)
                     images = []
                     for file in os.listdir(folder_path):
                         if file.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
-                            images.append(os.path.join(folder_path, file))
-                            if len(images) >= 5:
+                            images.append(os.path.basename(file))
+                            if len(images) >= 3:
                                 break
                     
                     logger.info(f"📤 Публикация в чат {chat_id}: {folder_name}")
-                    logger.info(f"📄 Текст: {text[:100]}...")
                     logger.info(f"🖼️ Найдено {len(images)} изображений")
-                    
-                    # 🔥 НОВЫЙ ПОДХОД: отправляем текст, потом каждое фото отдельно
                     
                     # 1. Отправляем текст
                     success = self.api.send_message_to_chat(chat_id, text)
@@ -166,26 +92,43 @@ class Publisher:
                     logger.info(f"✅ Текст отправлен в {chat_id}")
                     time.sleep(1)
                     
-                    # 2. Отправляем каждое фото отдельно (с подписью)
-                    for i, img_path in enumerate(images):
+                    # 2. Отправляем каждое фото отдельно через attachments
+                    for i, img_name in enumerate(images):
                         if not self.active_users.get(user_id, True):
                             break
                         
-                        # Первое фото отправляем с пометкой "Фото 1", остальные без подписи
-                        if i == 0:
-                            caption = f"📸 Фото 1/{len(images)}"
-                        else:
-                            caption = None
+                        img_path = os.path.join(folder_path, img_name)
                         
-                        self.send_photo_separately(chat_id, img_path, caption)
-                        time.sleep(1)  # Пауза между фото
+                        # Читаем фото и кодируем в base64
+                        with open(img_path, 'rb') as f:
+                            img_data = base64.b64encode(f.read()).decode('utf-8')
+                        
+                        # Пробуем отправить как photo
+                        photo_attachment = {
+                            "type": "photo",
+                            "payload": {
+                                "content": img_data,
+                                "filename": img_name
+                            }
+                        }
+                        
+                        caption = f"📸 Фото {i+1}/{len(images)}" if i == 0 else None
+                        
+                        if caption:
+                            success = self.api.send_message_to_chat_with_attachments(chat_id, caption, [photo_attachment])
+                        else:
+                            success = self.api.send_message_to_chat_with_attachments(chat_id, "📸", [photo_attachment])
+                        
+                        if success:
+                            logger.info(f"✅ Отправлено фото: {img_name}")
+                        else:
+                            logger.error(f"❌ Не удалось отправить фото: {img_name}")
+                        
+                        time.sleep(1)
                     
-                    # Добавляем в базу данных
                     self.db.add_publication(user_id, folder_name, chat_id)
                     published += 1
                     logger.info(f"✅ Опубликовано: {folder_name}")
-                    
-                    # Пауза между объявлениями
                     time.sleep(2)
                     
                 except Exception as e:
