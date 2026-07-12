@@ -29,9 +29,11 @@ class APIClient:
     def __init__(self):
         self.token = TOKEN
 
-    def send_message(self, user_id, text):
+    def send_message(self, user_id, text, attachments=None):
         try:
             payload = {"text": text, "format": "markdown"}
+            if attachments:
+                payload["attachments"] = attachments
             response = requests.post(
                 f"{BASE_URL}/messages",
                 headers={"Authorization": self.token, "Content-Type": "application/json"},
@@ -85,6 +87,9 @@ api = APIClient()
 publisher = Publisher(api, fm, db)
 web = WebInterface(fm, publisher)
 
+# Хранилище для временных данных пользователей
+user_temp_data = {}
+
 # ========== HTML СТРАНИЦА ДЛЯ ЗАГРУЗКИ ПАПКИ ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
@@ -115,9 +120,12 @@ UPLOAD_PAGE = """
         .status.success { background: #d4edda; color: #155724; display: block; border-left: 4px solid #28a745; }
         .status.error { background: #f8d7da; color: #721c24; display: block; border-left: 4px solid #dc3545; }
         .status.info { background: #d1ecf1; color: #0c5460; display: block; border-left: 4px solid #17a2b8; }
+        .status.warning { background: #fff3cd; color: #856404; display: block; border-left: 4px solid #ffc107; }
         .file-list { text-align: left; margin: 20px 0; padding: 0; list-style: none; }
         .file-list li { background: #f8f9fa; padding: 10px 15px; margin: 5px 0; border-radius: 5px; border-left: 3px solid #007bff; display: flex; justify-content: space-between; align-items: center; }
         .file-list li .count { background: #007bff; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
+        .file-list li .invalid { background: #dc3545; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
+        .file-list li .valid { background: #28a745; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
         .progress-bar { width: 100%; height: 25px; background: #e9ecef; border-radius: 10px; overflow: hidden; margin: 10px 0; display: none; }
         .progress-bar .progress { height: 100%; background: linear-gradient(90deg, #28a745, #20c997); transition: width 0.3s; width: 0%; display: flex; align-items: center; justify-content: center; color: white; font-size: 12px; font-weight: bold; }
         .instructions { background: #fff3cd; padding: 15px 20px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107; }
@@ -252,9 +260,10 @@ UPLOAD_PAGE = """
             
             folders.forEach(folder => {
                 const li = document.createElement('li');
+                const count = fileCount[folder] || 0;
                 li.innerHTML = `
                     <span>📁 <strong>${folder}</strong></span>
-                    <span class="count">${fileCount[folder]} файлов</span>
+                    <span class="count">${count} файлов</span>
                 `;
                 fileListContent.appendChild(li);
             });
@@ -320,13 +329,19 @@ UPLOAD_PAGE = """
                         try {
                             const response = JSON.parse(xhr.responseText);
                             if (response.success) {
-                                showStatus('success', '✅ Загрузка завершена!');
+                                showStatus('success', '✅ ' + response.message);
                                 addLog('✅ ' + response.message);
                                 progress.style.width = '100%';
                                 progress.textContent = '100%';
-                                setTimeout(() => {
-                                    window.location.reload();
-                                }, 3000);
+                                if (response.result) {
+                                    // Показываем результаты проверки
+                                    if (response.result.valid_folders && response.result.valid_folders.length > 0) {
+                                        addLog(`✅ Готовы к публикации: ${response.result.valid_folders.join(', ')}`);
+                                    }
+                                    if (response.result.invalid_folders && response.result.invalid_folders.length > 0) {
+                                        addLog(`❌ Пропущены: ${response.result.invalid_folders.join(', ')}`);
+                                    }
+                                }
                             } else {
                                 showStatus('error', '❌ ' + response.message);
                                 addLog('❌ Ошибка: ' + response.message);
@@ -378,7 +393,7 @@ def upload_page():
 
 @app.route('/upload_folder', methods=['POST'])
 def upload_folder():
-    """Обработка загрузки папки с объявлениями"""
+    """Обработка загрузки папки с проверкой"""
     try:
         user_id = int(request.form.get('user_id', 151296248))
         files = request.files.getlist('files[]')
@@ -388,18 +403,119 @@ def upload_folder():
         
         logger.info(f"📥 Получено {len(files)} файлов от пользователя {user_id}")
         
-        # Сохраняем файлы через FileManager
-        result = fm.save_uploaded_files(files, user_id)
+        # Сохраняем файлы во временную папку
+        temp_folder = fm.get_temp_folder(user_id)
+        if os.path.exists(temp_folder):
+            shutil.rmtree(temp_folder)
+        os.makedirs(temp_folder)
         
-        if result['success']:
-            # Запускаем публикацию
+        saved_count = 0
+        for file in files:
+            rel_path = getattr(file, 'filename', file.name)
+            if not rel_path:
+                rel_path = file.name
+            full_path = os.path.join(temp_folder, rel_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            file.save(full_path)
+            saved_count += 1
+        
+        logger.info(f"✅ Сохранено {saved_count} файлов во временную папку")
+        
+        # Анализируем структуру папок
+        valid_folders = []
+        invalid_folders = []
+        folder_errors = {}
+        
+        for item in os.listdir(temp_folder):
+            item_path = os.path.join(temp_folder, item)
+            if os.path.isdir(item_path):
+                info_path = os.path.join(item_path, 'info.txt')
+                if os.path.exists(info_path):
+                    valid_folders.append(item)
+                    logger.info(f"✅ Папка {item} - валидна")
+                else:
+                    invalid_folders.append(item)
+                    folder_errors[item] = "отсутствует info.txt"
+                    logger.warning(f"⚠️ В папке {item} нет info.txt")
+        
+        # Переносим валидные папки в основную структуру
+        user_folder = fm.get_user_folder(user_id)
+        moved_folders = []
+        for folder in valid_folders:
+            src = os.path.join(temp_folder, folder)
+            dst = os.path.join(user_folder, folder)
+            if os.path.exists(dst):
+                shutil.rmtree(dst)
+            shutil.move(src, dst)
+            moved_folders.append(folder)
+            logger.info(f"📦 Перенесена папка {folder}")
+        
+        # Удаляем временную папку
+        shutil.rmtree(temp_folder)
+        
+        # Сохраняем результат для пользователя
+        user_temp_data[user_id] = {
+            'valid_folders': moved_folders,
+            'invalid_folders': invalid_folders,
+            'folder_errors': folder_errors
+        }
+        
+        # Формируем сообщение для пользователя
+        message = ""
+        if moved_folders:
+            message += f"✅ Найдено {len(moved_folders)} валидных объявлений: {', '.join(moved_folders)}\n\n"
+        if invalid_folders:
+            message += f"❌ Пропущено {len(invalid_folders)} папок:\n"
+            for folder, error in folder_errors.items():
+                message += f"  • {folder} - {error}\n"
+        
+        # Отправляем сообщение пользователю
+        if invalid_folders and moved_folders:
+            # Есть и валидные, и невалидные
+            api.send_message(
+                user_id,
+                f"📊 **Результат загрузки:**\n\n"
+                f"{message}\n"
+                f"Публиковать валидные объявления?"
+            )
+            # Отправляем кнопки
+            send_confirmation_buttons(user_id)
+            
+            return jsonify({
+                'success': True,
+                'message': 'Загрузка завершена. Проверьте сообщение в боте.',
+                'result': {
+                    'valid_folders': moved_folders,
+                    'invalid_folders': invalid_folders
+                }
+            })
+        elif moved_folders:
+            # Только валидные
+            api.send_message(
+                user_id,
+                f"✅ **Все папки валидны!**\n\n"
+                f"Найдено {len(moved_folders)} объявлений:\n"
+                f"{', '.join(moved_folders)}\n\n"
+                f"🚀 Начинаем публикацию..."
+            )
             publisher.start(user_id)
             return jsonify({
                 'success': True,
-                'message': f'✅ Загружено {len(result["folders"])} объявлений. Начинаю публикацию!'
+                'message': f'✅ Загружено {len(moved_folders)} объявлений. Публикация началась!'
             })
         else:
-            return jsonify({'success': False, 'message': result['message']}), 400
+            # Только невалидные
+            api.send_message(
+                user_id,
+                f"❌ **Нет валидных папок!**\n\n"
+                f"{message}\n"
+                f"Проверьте структуру папок и попробуйте снова."
+            )
+            return jsonify({
+                'success': False,
+                'message': 'Нет валидных папок',
+                'result': {'invalid_folders': invalid_folders}
+            }), 400
         
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки папки: {e}")
@@ -407,30 +523,30 @@ def upload_folder():
         logger.error(traceback.format_exc())
         return jsonify({'success': False, 'message': str(e)}), 500
 
-@app.route('/health')
-def health():
-    return {"status": "ok"}
-
-@app.route('/setup_webhook')
-def setup_webhook():
-    token = request.args.get('token') or TOKEN
-    if not token:
-        return "❌ Токен не найден", 400
-    
-    webhook_url = "https://maxbot.bothost.tech/webhook"
-    headers = {"Authorization": token, "Content-Type": "application/json"}
-    
+def send_confirmation_buttons(user_id):
+    """Отправляет кнопки подтверждения"""
     try:
-        r = requests.post(
-            "https://platform-api2.max.ru/subscriptions",
-            headers=headers,
-            json={"url": webhook_url},
-            timeout=10,
-            verify=False
-        )
-        return f"✅ Вебхук настроен: {r.status_code}"
+        attachments = [{
+            "type": "keyboard",
+            "buttons": [
+                [
+                    {
+                        "type": "text",
+                        "text": "✅ Да, публиковать",
+                        "payload": {"action": "confirm_publish", "user_id": user_id}
+                    },
+                    {
+                        "type": "text",
+                        "text": "❌ Нет, отменить",
+                        "payload": {"action": "cancel_publish", "user_id": user_id}
+                    }
+                ]
+            ]
+        }]
+        
+        api.send_message(user_id, "Выберите действие:", attachments)
     except Exception as e:
-        return f"❌ Ошибка: {e}"
+        logger.error(f"❌ Ошибка отправки кнопок: {e}")
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -443,6 +559,7 @@ def webhook():
 
         user_id = None
         text = None
+        payload = None
         
         if 'message' in data:
             msg = data['message']
@@ -450,11 +567,26 @@ def webhook():
                 user_id = msg['sender'].get('user_id')
             if 'body' in msg:
                 text = msg['body'].get('text')
+                payload = msg['body'].get('payload')
         
         if not user_id:
             return jsonify({"ok": True}), 200
 
-        logger.info(f"💬 user_id={user_id}, text={text}")
+        logger.info(f"💬 user_id={user_id}, text={text}, payload={payload}")
+
+        # Обработка кнопок
+        if payload:
+            action = payload.get('action')
+            if action == 'confirm_publish':
+                # Пользователь подтвердил публикацию
+                api.send_message(user_id, "🚀 Начинаю публикацию валидных объявлений...")
+                publisher.start(user_id)
+                return jsonify({"ok": True}), 200
+            elif action == 'cancel_publish':
+                # Пользователь отменил публикацию
+                api.send_message(user_id, "⏹️ Публикация отменена. Очищаю данные...")
+                fm.clear_user_data(user_id)
+                return jsonify({"ok": True}), 200
 
         if text and text.strip() == '/start':
             api.send_message(
@@ -480,6 +612,31 @@ def webhook():
     except Exception as e:
         logger.error(f"❌ ОШИБКА: {e}")
         return jsonify({"ok": False}), 500
+
+@app.route('/health')
+def health():
+    return {"status": "ok"}
+
+@app.route('/setup_webhook')
+def setup_webhook():
+    token = request.args.get('token') or TOKEN
+    if not token:
+        return "❌ Токен не найден", 400
+    
+    webhook_url = "https://maxbot.bothost.tech/webhook"
+    headers = {"Authorization": token, "Content-Type": "application/json"}
+    
+    try:
+        r = requests.post(
+            "https://platform-api2.max.ru/subscriptions",
+            headers=headers,
+            json={"url": webhook_url},
+            timeout=10,
+            verify=False
+        )
+        return f"✅ Вебхук настроен: {r.status_code}"
+    except Exception as e:
+        return f"❌ Ошибка: {e}"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
