@@ -29,6 +29,7 @@ fm = FileManager(DATA_DIR)
 class APIClient:
     def __init__(self):
         self.token = TOKEN
+        self.base_url = BASE_URL
 
     def send_message(self, user_id, text, attachments=None):
         """Отправляет сообщение пользователю"""
@@ -37,7 +38,7 @@ class APIClient:
             if attachments:
                 payload["attachments"] = attachments
             response = requests.post(
-                f"{BASE_URL}/messages",
+                f"{self.base_url}/messages",
                 headers={"Authorization": self.token, "Content-Type": "application/json"},
                 params={"user_id": user_id},
                 json=payload,
@@ -53,13 +54,11 @@ class APIClient:
             return False
 
     def send_message_to_chat(self, chat_id, text):
-        """Отправляет сообщение в чат по ID группы"""
+        """Отправляет сообщение в чат по ID группы (с дефисом)"""
         try:
-            # Проверяем, что chat_id - это число (группа в MAX)
-            # Если chat_id начинается с 7, это ID группы
             payload = {"text": text, "format": "markdown"}
             response = requests.post(
-                f"{BASE_URL}/messages",
+                f"{self.base_url}/messages",
                 headers={"Authorization": self.token, "Content-Type": "application/json"},
                 params={"chat_id": chat_id},
                 json=payload,
@@ -72,6 +71,30 @@ class APIClient:
             return response.status_code == 200
         except Exception as e:
             logger.error(f"❌ Ошибка отправки в чат: {e}")
+            return False
+
+    def send_message_to_chat_with_attachments(self, chat_id, text, attachments):
+        """Отправляет сообщение в чат с вложениями (фото)"""
+        try:
+            payload = {
+                "text": text,
+                "format": "markdown",
+                "attachments": attachments
+            }
+            response = requests.post(
+                f"{self.base_url}/messages",
+                headers={"Authorization": self.token, "Content-Type": "application/json"},
+                params={"chat_id": chat_id},
+                json=payload,
+                timeout=30,
+                verify=False
+            )
+            logger.info(f"📤 Отправка с вложениями в чат {chat_id}, статус: {response.status_code}")
+            if response.status_code != 200:
+                logger.error(f"❌ Ошибка отправки с вложениями: {response.text}")
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки с вложениями: {e}")
             return False
 
 api = APIClient()
@@ -375,11 +398,11 @@ def send_confirmation_buttons(user_id):
                 [
                     {
                         "text": "✅ Да, публиковать",
-                        "payload": {"action": "confirm_publish", "user_id": user_id}
+                        "payload": json.dumps({"action": "confirm_publish", "user_id": user_id})
                     },
                     {
                         "text": "❌ Нет, отменить",
-                        "payload": {"action": "cancel_publish", "user_id": user_id}
+                        "payload": json.dumps({"action": "cancel_publish", "user_id": user_id})
                     }
                 ]
             ]
@@ -480,21 +503,17 @@ def upload_folder():
         logger.info(f"✅ Сохранено {saved_count} файлов")
         logger.info(f"📁 Корневая папка: {root_folder_name}")
         
-        # 🔥 ТЕПЕРЬ ИЩЕМ ПОДПАПКИ ВНУТРИ КОРНЕВОЙ ПАПКИ
+        # Ищем подпапки внутри корневой папки
         valid_folders = []
         invalid_folders = []
         folder_errors = {}
         
-        # Проверяем, есть ли папка с именем root_folder_name
         if root_folder_name:
             root_folder_path = os.path.join(user_folder, root_folder_name)
             if os.path.isdir(root_folder_path):
-                # Проходим по всем элементам внутри корневой папки
                 for item in os.listdir(root_folder_path):
                     item_path = os.path.join(root_folder_path, item)
-                    
                     if os.path.isdir(item_path):
-                        # Проверяем наличие info.txt в этой подпапке
                         info_path = os.path.join(item_path, 'info.txt')
                         if os.path.exists(info_path):
                             valid_folders.append(item)
@@ -503,25 +522,15 @@ def upload_folder():
                             invalid_folders.append(item)
                             folder_errors[item] = "отсутствует info.txt"
                             logger.warning(f"⚠️ В папке {item} нет info.txt")
-            else:
-                logger.error(f"❌ Папка {root_folder_name} не найдена в {user_folder}")
         
-        # Если не найдено подпапок с info.txt, проверяем корневую папку
-        if not valid_folders and not invalid_folders:
-            if root_folder_name:
-                root_info_path = os.path.join(user_folder, root_folder_name, 'info.txt')
-                if os.path.exists(root_info_path):
-                    valid_folders.append(root_folder_name)
-                    logger.info(f"✅ Найден info.txt в корневой папке {root_folder_name}")
-        
-        # Сохраняем результат для пользователя
+        # Сохраняем результат
         user_temp_data[user_id] = {
             'valid_folders': valid_folders,
             'invalid_folders': invalid_folders,
             'folder_errors': folder_errors
         }
         
-        # Формируем сообщение для пользователя
+        # Формируем сообщение
         message = ""
         if valid_folders:
             message += f"✅ **Найдено {len(valid_folders)} валидных объявлений:**\n"
@@ -534,7 +543,7 @@ def upload_folder():
             for folder, error in folder_errors.items():
                 message += f"  • {folder} - {error}\n"
         
-        # Отправляем сообщение пользователю
+        # Отправляем результат
         if invalid_folders and valid_folders:
             api.send_message(
                 user_id,
@@ -560,7 +569,6 @@ def upload_folder():
                 f"{', '.join(valid_folders)}\n\n"
                 f"🚀 Начинаем публикацию..."
             )
-            # Отправляем кнопки для подтверждения
             send_confirmation_buttons(user_id)
             
             return jsonify({
@@ -610,13 +618,18 @@ def webhook():
             if 'body' in msg:
                 text = msg['body'].get('text')
                 payload = msg['body'].get('payload')
+                if payload and isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except:
+                        pass
         
         if not user_id:
             return jsonify({"ok": True}), 200
 
         logger.info(f"💬 user_id={user_id}, text={text}, payload={payload}")
 
-        # Обработка кнопок через payload
+        # Обработка кнопок
         if payload and isinstance(payload, dict):
             action = payload.get('action')
             if action == 'confirm_publish':
