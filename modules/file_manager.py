@@ -142,12 +142,10 @@ class FileManager:
         
         # Рекурсивно обходим все папки
         for root, dirs, files in os.walk(user_folder):
-            # Проверяем, есть ли в текущей папке info.txt
             if 'info.txt' in files:
-                # Получаем имя папки (последняя часть пути)
                 folder_name = os.path.basename(root)
                 subfolders.append(folder_name)
-                logger.info(f"📁 Найдена подпапка с info.txt: {folder_name} (путь: {root})")
+                logger.info(f"📁 Найдена подпапка с info.txt: {folder_name}")
         
         logger.info(f"📁 Всего найдено {len(subfolders)} подпапок для пользователя {user_id}")
         return subfolders
