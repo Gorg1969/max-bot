@@ -73,43 +73,25 @@ class APIClient:
             logger.error(f"❌ Ошибка отправки в чат: {e}")
             return False
 
-    def send_photo_to_chat(self, chat_id, photo_path, caption=None, compressed_data=None):
+    def send_photos_to_chat(self, chat_id, photo_files, caption=None):
         """
-        Отправляет фото в чат через multipart/form-data с правильным MIME-типом
+        Отправляет несколько фото в чат через multipart/form-data
+        photo_files: список кортежей (filename, binary_data)
         """
         try:
-            # Определяем MIME-тип по расширению файла
-            ext = os.path.splitext(photo_path)[1].lower()
-            mime_types = {
-                '.jpg': 'image/jpeg',
-                '.jpeg': 'image/jpeg',
-                '.png': 'image/png',
-                '.gif': 'image/gif',
-                '.webp': 'image/webp',
-                '.bmp': 'image/bmp',
-                '.tiff': 'image/tiff'
-            }
-            mime_type = mime_types.get(ext, 'application/octet-stream')
+            # Формируем файлы для multipart
+            files = []
+            for filename, data in photo_files:
+                files.append(
+                    ('file', (filename, data, 'image/jpeg'))
+                )
             
-            # Если данные уже сжаты, используем их
-            if compressed_data:
-                files = {
-                    'file': (os.path.basename(photo_path), compressed_data, mime_type)
-                }
-            else:
-                # Проверяем, что файл существует
-                if not os.path.exists(photo_path):
-                    logger.error(f"❌ Файл не найден: {photo_path}")
-                    return False
-                
-                # Читаем файл
-                with open(photo_path, 'rb') as f:
-                    files = {'file': (os.path.basename(photo_path), f, mime_type)}
-
+            # Формируем параметры
             params = {"chat_id": chat_id}
             if caption:
                 params["caption"] = caption
-
+            
+            # Отправляем через multipart
             response = requests.post(
                 f"{self.base_url}/messages",
                 headers={"Authorization": self.token},
@@ -118,12 +100,12 @@ class APIClient:
                 timeout=120,
                 verify=False
             )
-
-            logger.info(f"📤 Отправка фото в чат {chat_id}, статус: {response.status_code}")
+            
+            logger.info(f"📤 Отправка {len(photo_files)} фото в чат {chat_id}, статус: {response.status_code}")
             if response.status_code != 200:
                 logger.error(f"❌ Ошибка отправки фото: {response.text[:200]}")
             return response.status_code == 200
-
+            
         except Exception as e:
             logger.error(f"❌ Ошибка отправки фото: {e}")
             return False
@@ -157,9 +139,6 @@ class APIClient:
 api = APIClient()
 publisher = Publisher(api, fm, db)
 web = WebInterface(fm, publisher)
-
-# Хранилище для временных данных пользователей
-user_temp_data = {}
 
 # ========== HTML СТРАНИЦА ДЛЯ ЗАГРУЗКИ ПАПКИ ==========
 UPLOAD_PAGE = """
