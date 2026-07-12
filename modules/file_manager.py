@@ -25,31 +25,20 @@ class FileManager:
     def save_uploaded_files(self, files, user_id):
         """
         Сохраняет загруженные файлы с сохранением структуры папок
-        
-        Args:
-            files: список файлов из request.files.getlist('files[]')
-            user_id: ID пользователя
-        
-        Returns:
-            dict: {'success': bool, 'folders': list, 'message': str}
         """
         try:
             temp_folder = self.get_temp_folder(user_id)
             
-            # Очищаем временную папку
             if os.path.exists(temp_folder):
                 shutil.rmtree(temp_folder)
             os.makedirs(temp_folder)
             
-            # Сохраняем файлы
             saved_count = 0
             for file in files:
-                # Получаем путь (для браузера это webkitRelativePath)
                 rel_path = getattr(file, 'filename', file.name)
                 if not rel_path:
                     rel_path = file.name
                 
-                # Сохраняем с сохранением структуры
                 full_path = os.path.join(temp_folder, rel_path)
                 os.makedirs(os.path.dirname(full_path), exist_ok=True)
                 file.save(full_path)
@@ -57,7 +46,6 @@ class FileManager:
             
             logger.info(f"✅ Сохранено {saved_count} файлов во временную папку")
             
-            # Анализируем структуру папок
             folders = []
             for item in os.listdir(temp_folder):
                 item_path = os.path.join(temp_folder, item)
@@ -76,7 +64,6 @@ class FileManager:
                     'message': 'Не найдено папок с info.txt'
                 }
             
-            # Переносим папки в основную структуру пользователя
             user_folder = self.get_user_folder(user_id)
             moved_folders = []
             for folder in folders:
@@ -88,7 +75,6 @@ class FileManager:
                 moved_folders.append(folder)
                 logger.info(f"📦 Перенесена папка {folder}")
             
-            # Удаляем временную папку
             shutil.rmtree(temp_folder)
             
             return {
@@ -106,7 +92,7 @@ class FileManager:
             }
     
     def extract_zip(self, user_id, zip_path):
-        """Извлекает ZIP-архив в папку пользователя (для обратной совместимости)"""
+        """Извлекает ZIP-архив в папку пользователя"""
         try:
             user_folder = self.get_user_folder(user_id)
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
@@ -145,16 +131,23 @@ class FileManager:
     def get_subfolders(self, user_id):
         """
         Возвращает список подпапок в папке пользователя (для Publisher)
+        Рекурсивно обходит все папки и ищет info.txt
         """
         user_folder = self.get_user_folder(user_id)
         subfolders = []
-        if os.path.exists(user_folder):
-            for item in os.listdir(user_folder):
-                item_path = os.path.join(user_folder, item)
-                if os.path.isdir(item_path):
-                    # Проверяем наличие info.txt
-                    info_path = os.path.join(item_path, 'info.txt')
-                    if os.path.exists(info_path):
-                        subfolders.append(item)
-        logger.info(f"📁 Найдено {len(subfolders)} подпапок для пользователя {user_id}")
+        
+        if not os.path.exists(user_folder):
+            logger.warning(f"⚠️ Папка пользователя {user_id} не существует")
+            return subfolders
+        
+        # Рекурсивно обходим все папки
+        for root, dirs, files in os.walk(user_folder):
+            # Проверяем, есть ли в текущей папке info.txt
+            if 'info.txt' in files:
+                # Получаем имя папки (последняя часть пути)
+                folder_name = os.path.basename(root)
+                subfolders.append(folder_name)
+                logger.info(f"📁 Найдена подпапка с info.txt: {folder_name} (путь: {root})")
+        
+        logger.info(f"📁 Всего найдено {len(subfolders)} подпапок для пользователя {user_id}")
         return subfolders
