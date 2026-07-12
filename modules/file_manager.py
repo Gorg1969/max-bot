@@ -141,3 +141,20 @@ class FileManager:
     def get_folder_path(self, user_id, folder_name):
         """Возвращает путь к конкретной папке объявления"""
         return os.path.join(self.get_user_folder(user_id), folder_name)
+    
+    def get_subfolders(self, user_id):
+        """
+        Возвращает список подпапок в папке пользователя (для Publisher)
+        """
+        user_folder = self.get_user_folder(user_id)
+        subfolders = []
+        if os.path.exists(user_folder):
+            for item in os.listdir(user_folder):
+                item_path = os.path.join(user_folder, item)
+                if os.path.isdir(item_path):
+                    # Проверяем наличие info.txt
+                    info_path = os.path.join(item_path, 'info.txt')
+                    if os.path.exists(info_path):
+                        subfolders.append(item)
+        logger.info(f"📁 Найдено {len(subfolders)} подпапок для пользователя {user_id}")
+        return subfolders
