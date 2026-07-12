@@ -58,7 +58,7 @@ web = WebInterface(fm, publisher)
 # Хранилище для временных данных пользователей
 user_temp_data = {}
 
-# ========== HTML СТРАНИЦА (сокращена для экономии места) ==========
+# ========== HTML СТРАНИЦА ДЛЯ ЗАГРУЗКИ ПАПКИ ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -346,7 +346,6 @@ UPLOAD_PAGE = """
 def send_confirmation_buttons(user_id):
     """Отправляет кнопки подтверждения в MAX"""
     try:
-        # Правильный формат для MAX API
         attachments = [{
             "type": "keyboard",
             "buttons": [
@@ -363,7 +362,6 @@ def send_confirmation_buttons(user_id):
             ]
         }]
         
-        # Отправляем сообщение с кнопками
         payload = {
             "text": "Выберите действие:",
             "format": "markdown",
@@ -384,7 +382,6 @@ def send_confirmation_buttons(user_id):
             return True
         else:
             logger.error(f"❌ Ошибка отправки кнопок: {response.text}")
-            # Если кнопки не работают, отправляем текстовое сообщение
             send_text_fallback(user_id)
             return False
             
@@ -415,7 +412,7 @@ def upload_page():
 
 @app.route('/upload_folder', methods=['POST'])
 def upload_folder():
-    """Обработка загрузки папки с поиском info.txt в подпапках"""
+    """Обработка загрузки папки с очисткой старых данных"""
     try:
         user_id = int(request.form.get('user_id', 151296248))
         files = request.files.getlist('files[]')
@@ -428,19 +425,40 @@ def upload_folder():
         # Получаем папку пользователя
         user_folder = fm.get_user_folder(user_id)
         
+        # 🔥 ВАЖНО: Очищаем папку пользователя перед загрузкой
+        if os.path.exists(user_folder):
+            shutil.rmtree(user_folder)
+            logger.info(f"🗑️ Папка пользователя {user_id} очищена")
+        os.makedirs(user_folder, exist_ok=True)
+        
         # Сохраняем файлы с полной структурой
         saved_count = 0
+        folder_names = set()
+        
         for file in files:
+            # Получаем путь (webkitRelativePath)
             rel_path = getattr(file, 'filename', file.name)
             if not rel_path:
                 rel_path = file.name
             
+            # Извлекаем имя папки (первая часть пути)
+            parts = rel_path.split('/')
+            if len(parts) >= 2:
+                folder_name = parts[0]  # Это имя подпапки
+                folder_names.add(folder_name)
+            else:
+                # Если файл в корне - пропускаем
+                logger.warning(f"⚠️ Файл в корне: {rel_path}")
+                continue
+            
+            # Сохраняем файл
             full_path = os.path.join(user_folder, rel_path)
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
             file.save(full_path)
             saved_count += 1
         
         logger.info(f"✅ Сохранено {saved_count} файлов")
+        logger.info(f"📁 Найдены папки: {folder_names}")
         
         # АНАЛИЗИРУЕМ СТРУКТУРУ - ИЩЕМ info.txt В ПОДПАПКАХ
         valid_folders = []
@@ -468,7 +486,7 @@ def upload_folder():
         if root_files:
             invalid_folders.append("Корневая папка")
             folder_errors["Корневая папка"] = f"загружены файлы в корень ({len(root_files)} шт.)"
-            logger.warning(f"⚠️ Файлы загружены в корень папки пользователя: {root_files[:5]}")
+            logger.warning(f"⚠️ Файлы загружены в корень папки пользователя")
         
         # Сохраняем результат для пользователя
         user_temp_data[user_id] = {
@@ -499,7 +517,6 @@ def upload_folder():
                 f"{message}\n"
                 f"Публиковать валидные объявления?"
             )
-            # Отправляем кнопки
             send_confirmation_buttons(user_id)
             
             return jsonify({
@@ -584,17 +601,15 @@ def webhook():
         if payload and isinstance(payload, dict):
             action = payload.get('action')
             if action == 'confirm_publish':
-                # Пользователь подтвердил публикацию
                 api.send_message(user_id, "🚀 Начинаю публикацию валидных объявлений...")
                 publisher.start(user_id)
                 return jsonify({"ok": True}), 200
             elif action == 'cancel_publish':
-                # Пользователь отменил публикацию
                 api.send_message(user_id, "⏹️ Публикация отменена. Очищаю данные...")
                 fm.clear_user_data(user_id)
                 return jsonify({"ok": True}), 200
 
-        # Обработка текстовых команд (если кнопки не сработали)
+        # Обработка текстовых команд
         if text:
             text_lower = text.strip().lower()
             if text_lower == 'да' or text_lower == 'yes':
