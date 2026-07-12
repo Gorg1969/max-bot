@@ -79,19 +79,16 @@ class APIClient:
         photo_files: список кортежей (filename, binary_data)
         """
         try:
-            # Формируем файлы для multipart
             files = []
             for filename, data in photo_files:
                 files.append(
                     ('file', (filename, data, 'image/jpeg'))
                 )
             
-            # Формируем параметры
             params = {"chat_id": chat_id}
             if caption:
                 params["caption"] = caption
             
-            # Отправляем через multipart
             response = requests.post(
                 f"{self.base_url}/messages",
                 headers={"Authorization": self.token},
@@ -111,9 +108,7 @@ class APIClient:
             return False
 
     def send_message_to_chat_with_attachments(self, chat_id, text, attachments):
-        """
-        Устаревший метод — оставлен для совместимости
-        """
+        """Устаревший метод — оставлен для совместимости"""
         try:
             payload = {
                 "text": text,
@@ -139,6 +134,9 @@ class APIClient:
 api = APIClient()
 publisher = Publisher(api, fm, db)
 web = WebInterface(fm, publisher)
+
+# ========== ХРАНИЛИЩЕ ДЛЯ ВРЕМЕННЫХ ДАННЫХ ПОЛЬЗОВАТЕЛЕЙ ==========
+user_temp_data = {}
 
 # ========== HTML СТРАНИЦА ДЛЯ ЗАГРУЗКИ ПАПКИ ==========
 UPLOAD_PAGE = """
