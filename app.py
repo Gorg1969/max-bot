@@ -73,39 +73,46 @@ class APIClient:
             logger.error(f"❌ Ошибка отправки в чат: {e}")
             return False
 
-    def send_photos_to_chat(self, chat_id, photo_files, caption=None):
-        """
-        Отправляет несколько фото в чат через multipart/form-data
-        photo_files: список кортежей (filename, binary_data)
-        """
-        try:
-            files = []
-            for filename, data in photo_files:
-                files.append(
-                    ('file', (filename, data, 'image/jpeg'))
-                )
-            
-            params = {"chat_id": chat_id}
-            if caption:
-                params["caption"] = caption
-            
-            response = requests.post(
-                f"{self.base_url}/messages",
-                headers={"Authorization": self.token},
-                params=params,
-                files=files,
-                timeout=120,
-                verify=False
+    def send_photos_to_chat(self, chat_id, photo_files, text=None, caption=None):
+    """
+    Отправляет фото в чат вместе с текстом объявления одним сообщением.
+    photo_files: список кортежей (filename, binary_data)
+    """
+    try:
+        files = []
+        for filename, data in photo_files:
+            files.append(
+                ('file', (filename, data, 'image/jpeg'))
             )
-            
-            logger.info(f"📤 Отправка {len(photo_files)} фото в чат {chat_id}, статус: {response.status_code}")
-            if response.status_code != 200:
-                logger.error(f"❌ Ошибка отправки фото: {response.text[:200]}")
-            return response.status_code == 200
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки фото: {e}")
-            return False
+
+        # Все данные передаём через поле data, чтобы сервер Max их увидел
+        data = {"chat_id": chat_id}
+        if text:
+            data["text"] = text
+        if caption:
+            data["caption"] = caption
+
+        response = requests.post(
+            f"{self.base_url}/messages",
+            headers={"Authorization": self.token},
+            data=data,          # <-- chat_id и текст в теле формы
+            files=files,
+            timeout=120,
+            verify=False
+        )
+
+        logger.info(f"📤 Отправка {len(photo_files)} фото в чат {chat_id}, статус: {response.status_code}")
+        if response.status_code != 200:
+            # Выводим тело ответа для диагностики
+            logger.error(f"❌ Ошибка отправки фото: {response.status_code} {response.text[:300]}")
+        else:
+            resp_json = response.json()
+            logger.info(f"✅ Ответ API: {resp_json}")
+        return response.status_code == 200
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки фото: {e}")
+        return False
 
     def send_message_to_chat_with_attachments(self, chat_id, text, attachments):
         """Устаревший метод — оставлен для совместимости"""
