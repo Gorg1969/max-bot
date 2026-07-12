@@ -51,22 +51,6 @@ class APIClient:
             logger.error(f"❌ Ошибка отправки: {e}")
             return False
 
-    def send_message_to_chat(self, chat_id, text):
-        try:
-            payload = {"text": text, "format": "markdown"}
-            response = requests.post(
-                f"{BASE_URL}/messages",
-                headers={"Authorization": self.token, "Content-Type": "application/json"},
-                params={"chat_id": chat_id},
-                json=payload,
-                timeout=30,
-                verify=False
-            )
-            return response.status_code == 200
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки в чат: {e}")
-            return False
-
 api = APIClient()
 publisher = Publisher(api, fm, db)
 web = WebInterface(fm, publisher)
@@ -74,7 +58,7 @@ web = WebInterface(fm, publisher)
 # Хранилище для временных данных пользователей
 user_temp_data = {}
 
-# ========== HTML СТРАНИЦА ДЛЯ ЗАГРУЗКИ ПАПКИ ==========
+# ========== HTML СТРАНИЦА (сокращена для экономии места) ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -102,7 +86,6 @@ UPLOAD_PAGE = """
         .status.success { background: #d4edda; color: #155724; display: block; border-left: 4px solid #28a745; }
         .status.error { background: #f8d7da; color: #721c24; display: block; border-left: 4px solid #dc3545; }
         .status.info { background: #d1ecf1; color: #0c5460; display: block; border-left: 4px solid #17a2b8; }
-        .status.warning { background: #fff3cd; color: #856404; display: block; border-left: 4px solid #ffc107; }
         .file-list { text-align: left; margin: 20px 0; padding: 0; list-style: none; }
         .file-list li { background: #f8f9fa; padding: 10px 15px; margin: 5px 0; border-radius: 5px; border-left: 3px solid #007bff; display: flex; justify-content: space-between; align-items: center; }
         .file-list li .count { background: #007bff; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
@@ -363,41 +346,61 @@ UPLOAD_PAGE = """
 def send_confirmation_buttons(user_id):
     """Отправляет кнопки подтверждения в MAX"""
     try:
-        # Формат кнопок для MAX API
+        # Правильный формат для MAX API
         attachments = [{
             "type": "keyboard",
             "buttons": [
                 [
                     {
-                        "type": "text",
                         "text": "✅ Да, публиковать",
-                        "payload": json.dumps({"action": "confirm_publish", "user_id": user_id})
+                        "payload": {"action": "confirm_publish", "user_id": user_id}
                     },
                     {
-                        "type": "text",
                         "text": "❌ Нет, отменить",
-                        "payload": json.dumps({"action": "cancel_publish", "user_id": user_id})
+                        "payload": {"action": "cancel_publish", "user_id": user_id}
                     }
                 ]
             ]
         }]
         
         # Отправляем сообщение с кнопками
-        success = api.send_message(user_id, "Выберите действие:", attachments)
-        if success:
+        payload = {
+            "text": "Выберите действие:",
+            "format": "markdown",
+            "attachments": attachments
+        }
+        
+        response = requests.post(
+            f"{BASE_URL}/messages",
+            headers={"Authorization": TOKEN, "Content-Type": "application/json"},
+            params={"user_id": user_id},
+            json=payload,
+            timeout=30,
+            verify=False
+        )
+        
+        if response.status_code == 200:
             logger.info(f"✅ Кнопки отправлены пользователю {user_id}")
+            return True
         else:
-            logger.error(f"❌ Не удалось отправить кнопки пользователю {user_id}")
+            logger.error(f"❌ Ошибка отправки кнопок: {response.text}")
+            # Если кнопки не работают, отправляем текстовое сообщение
+            send_text_fallback(user_id)
+            return False
             
     except Exception as e:
         logger.error(f"❌ Ошибка отправки кнопок: {e}")
-        # Если кнопки не отправились, отправляем текстовое сообщение
-        api.send_message(
-            user_id,
-            "⚠️ Не удалось отправить кнопки. Пожалуйста, напишите:\n"
-            "• `Да` - чтобы начать публикацию\n"
-            "• `Нет` - чтобы отменить"
-        )
+        send_text_fallback(user_id)
+        return False
+
+def send_text_fallback(user_id):
+    """Отправляет текстовое сообщение вместо кнопок"""
+    api.send_message(
+        user_id,
+        "⚠️ Кнопки временно недоступны. Пожалуйста, напишите:\n"
+        "• `Да` - чтобы начать публикацию\n"
+        "• `Нет` - чтобы отменить"
+    )
 
 # ========== МАРШРУТЫ ==========
 
@@ -570,14 +573,7 @@ def webhook():
                 user_id = msg['sender'].get('user_id')
             if 'body' in msg:
                 text = msg['body'].get('text')
-                # Получаем payload (для кнопок)
                 payload = msg['body'].get('payload')
-                # Если payload пришёл как строка JSON, парсим его
-                if payload and isinstance(payload, str):
-                    try:
-                        payload = json.loads(payload)
-                    except:
-                        pass
         
         if not user_id:
             return jsonify({"ok": True}), 200
@@ -601,11 +597,11 @@ def webhook():
         # Обработка текстовых команд (если кнопки не сработали)
         if text:
             text_lower = text.strip().lower()
-            if text_lower == 'да' or text_lower == 'yes' or text_lower == 'да, публиковать':
+            if text_lower == 'да' or text_lower == 'yes':
                 api.send_message(user_id, "🚀 Начинаю публикацию валидных объявлений...")
                 publisher.start(user_id)
                 return jsonify({"ok": True}), 200
-            elif text_lower == 'нет' or text_lower == 'no' or text_lower == 'отменить':
+            elif text_lower == 'нет' or text_lower == 'no':
                 api.send_message(user_id, "⏹️ Публикация отменена. Очищаю данные...")
                 fm.clear_user_data(user_id)
                 return jsonify({"ok": True}), 200
