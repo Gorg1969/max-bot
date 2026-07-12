@@ -1,93 +1,143 @@
 import os
-import zipfile
 import shutil
-import re
+import zipfile
 import logging
 
 logger = logging.getLogger(__name__)
 
 class FileManager:
-    def __init__(self, data_dir='/app/data'):
+    def __init__(self, data_dir="/app/data"):
         self.data_dir = data_dir
         os.makedirs(data_dir, exist_ok=True)
     
     def get_user_folder(self, user_id):
-        folder = os.path.join(self.data_dir, str(user_id))
-        os.makedirs(folder, exist_ok=True)
-        return folder
+        """Возвращает путь к папке пользователя"""
+        user_folder = os.path.join(self.data_dir, f"user_{user_id}")
+        os.makedirs(user_folder, exist_ok=True)
+        return user_folder
     
-    def clear_user_data(self, user_id):
-        folder = self.get_user_folder(user_id)
-        shutil.rmtree(folder, ignore_errors=True)
+    def get_temp_folder(self, user_id):
+        """Возвращает путь к временной папке для загрузки"""
+        temp_folder = os.path.join(self.get_user_folder(user_id), "temp_upload")
+        os.makedirs(temp_folder, exist_ok=True)
+        return temp_folder
+    
+    def save_uploaded_files(self, files, user_id):
+        """
+        Сохраняет загруженные файлы с сохранением структуры папок
+        
+        Args:
+            files: список файлов из request.files.getlist('files[]')
+            user_id: ID пользователя
+        
+        Returns:
+            dict: {'success': bool, 'folders': list, 'message': str}
+        """
+        try:
+            temp_folder = self.get_temp_folder(user_id)
+            
+            # Очищаем временную папку
+            if os.path.exists(temp_folder):
+                shutil.rmtree(temp_folder)
+            os.makedirs(temp_folder)
+            
+            # Сохраняем файлы
+            saved_count = 0
+            for file in files:
+                # Получаем путь (для браузера это webkitRelativePath)
+                rel_path = getattr(file, 'filename', file.name)
+                if not rel_path:
+                    rel_path = file.name
+                
+                # Сохраняем с сохранением структуры
+                full_path = os.path.join(temp_folder, rel_path)
+                os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                file.save(full_path)
+                saved_count += 1
+            
+            logger.info(f"✅ Сохранено {saved_count} файлов во временную папку")
+            
+            # Анализируем структуру папок
+            folders = []
+            for item in os.listdir(temp_folder):
+                item_path = os.path.join(temp_folder, item)
+                if os.path.isdir(item_path):
+                    info_path = os.path.join(item_path, 'info.txt')
+                    if os.path.exists(info_path):
+                        folders.append(item)
+                        logger.info(f"📁 Найдена папка объявления: {item}")
+                    else:
+                        logger.warning(f"⚠️ В папке {item} нет info.txt")
+            
+            if not folders:
+                return {
+                    'success': False,
+                    'folders': [],
+                    'message': 'Не найдено папок с info.txt'
+                }
+            
+            # Переносим папки в основную структуру пользователя
+            user_folder = self.get_user_folder(user_id)
+            moved_folders = []
+            for folder in folders:
+                src = os.path.join(temp_folder, folder)
+                dst = os.path.join(user_folder, folder)
+                if os.path.exists(dst):
+                    shutil.rmtree(dst)
+                shutil.move(src, dst)
+                moved_folders.append(folder)
+                logger.info(f"📦 Перенесена папка {folder}")
+            
+            # Удаляем временную папку
+            shutil.rmtree(temp_folder)
+            
+            return {
+                'success': True,
+                'folders': moved_folders,
+                'message': f'✅ Загружено {len(moved_folders)} объявлений'
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения файлов: {e}")
+            return {
+                'success': False,
+                'folders': [],
+                'message': f'Ошибка: {str(e)}'
+            }
     
     def extract_zip(self, user_id, zip_path):
-        """Распаковка ZIP с правильной кодировкой для русских названий"""
-        user_folder = self.get_user_folder(user_id)
+        """Извлекает ZIP-архив в папку пользователя (для обратной совместимости)"""
         try:
+            user_folder = self.get_user_folder(user_id)
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                for file_info in zip_ref.infolist():
-                    # Пробуем разные кодировки для русского языка
-                    filename = None
-                    for encoding in ['utf-8', 'cp866', 'cp1251', 'koi8-r', 'cp437']:
-                        try:
-                            filename = file_info.filename.encode('cp437').decode(encoding)
-                            break
-                        except:
-                            continue
-                    
-                    # Если не удалось декодировать — оставляем как есть
-                    if filename is None:
-                        filename = file_info.filename
-                    
-                    # Извлекаем файл
-                    if filename.endswith('/'):
-                        os.makedirs(os.path.join(user_folder, filename), exist_ok=True)
-                    else:
-                        target_path = os.path.join(user_folder, filename)
-                        os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                        with open(target_path, 'wb') as f:
-                            f.write(zip_ref.read(file_info))
-                return True
+                zip_ref.extractall(user_folder)
+            logger.info(f"✅ ZIP распакован для пользователя {user_id}")
+            return True
         except Exception as e:
-            logger.error(f"❌ Ошибка распаковки: {e}")
+            logger.error(f"❌ Ошибка распаковки ZIP: {e}")
             return False
     
-    def get_subfolders(self, user_id):
+    def clear_user_data(self, user_id):
+        """Очищает данные пользователя"""
         user_folder = self.get_user_folder(user_id)
-        if not os.path.exists(user_folder):
-            return []
-        
-        items = os.listdir(user_folder)
-        subfolders = []
-        for item in items:
-            item_path = os.path.join(user_folder, item)
-            if os.path.isdir(item_path):
-                group_id = self.extract_group_id(item)
-                if group_id:
-                    subfolders.append({'name': item, 'group_id': group_id, 'path': item_path})
-        return subfolders
+        if os.path.exists(user_folder):
+            shutil.rmtree(user_folder)
+            os.makedirs(user_folder, exist_ok=True)
+            logger.info(f"🗑️ Данные пользователя {user_id} очищены")
     
-    def extract_group_id(self, folder_name):
-        """Извлечение ID группы из названия папки (с минусом!)"""
-        # Приводим к правильной кодировке, если нужно
-        try:
-            folder_name = folder_name.encode('latin1').decode('utf-8')
-        except:
-            pass
-        
-        match = re.search(r'-(\d+)', folder_name)
-        if match:
-            return f"-{match.group(1)}"
-        return None
+    def get_folders(self, user_id):
+        """Возвращает список папок с объявлениями пользователя"""
+        user_folder = self.get_user_folder(user_id)
+        folders = []
+        if os.path.exists(user_folder):
+            for item in os.listdir(user_folder):
+                item_path = os.path.join(user_folder, item)
+                if os.path.isdir(item_path):
+                    info_path = os.path.join(item_path, 'info.txt')
+                    if os.path.exists(info_path):
+                        folders.append(item)
+        return folders
     
-    def extract_folder_id_from_url(self, url):
-        patterns = [
-            r'folders/([a-zA-Z0-9_-]+)',
-            r'id=([a-zA-Z0-9_-]+)',
-            r'([a-zA-Z0-9_-]{28,})'
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, url)
-            if match:
-                return match.group(1)
-        return None
+    def get_folder_path(self, user_id, folder_name):
+        """Возвращает путь к конкретной папке объявления"""
+        return os.path.join(self.get_user_folder(user_id), folder_name)
