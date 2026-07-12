@@ -2,6 +2,7 @@ import logging
 import os
 import time
 import re
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -13,10 +14,14 @@ class Publisher:
         self.active_users = {}
     
     def extract_group_id(self, folder_name):
-        """Извлекает group_id из названия папки"""
-        match = re.search(r'-(\d+)', folder_name)
+        """
+        Извлекает ID чата из названия папки
+        Пример: "Название -123456789" -> "-123456789"
+        """
+        # Ищем число после дефиса с пробелом
+        match = re.search(r'-\s*(\d+)', folder_name)
         if match:
-            return match.group(1)
+            return f"-{match.group(1)}"  # Возвращаем с дефисом
         return None
     
     def start(self, user_id):
@@ -33,12 +38,10 @@ class Publisher:
             
             if os.path.exists(samosvaly_path) and os.path.isdir(samosvaly_path):
                 logger.info(f"📁 Найдена папка: {samosvaly_path}")
-                # Ищем подпапки внутри "Самосвалы"
                 subfolders = []
                 for item in os.listdir(samosvaly_path):
                     item_path = os.path.join(samosvaly_path, item)
                     if os.path.isdir(item_path):
-                        # Проверяем наличие info.txt
                         info_path = os.path.join(item_path, 'info.txt')
                         if os.path.exists(info_path):
                             subfolders.append(item)
@@ -46,8 +49,7 @@ class Publisher:
                         else:
                             logger.warning(f"⚠️ В папке {item} нет info.txt")
             else:
-                # Если нет папки "Самосвалы", ищем прямо в user_folder
-                logger.warning(f"⚠️ Папка 'Самосвалы' не найдена, ищем в {user_folder}")
+                logger.warning(f"⚠️ Папка 'Самосвалы' не найдена")
                 subfolders = []
                 for item in os.listdir(user_folder):
                     item_path = os.path.join(user_folder, item)
@@ -57,11 +59,11 @@ class Publisher:
                             subfolders.append(item)
             
             if not subfolders:
-                logger.warning(f"⚠️ Нет подпапок с info.txt для пользователя {user_id}")
+                logger.warning(f"⚠️ Нет подпапок с info.txt")
                 self.api.send_message(user_id, "❌ Нет папок с объявлениями для публикации.")
                 return False
             
-            logger.info(f"📁 Найдено {len(subfolders)} подпапок: {subfolders}")
+            logger.info(f"📁 Найдено {len(subfolders)} подпапок")
             
             self.api.send_message(
                 user_id,
@@ -77,7 +79,7 @@ class Publisher:
                     break
                 
                 try:
-                    # Путь к папке с объявлением (внутри Самосвалы)
+                    # Путь к папке с объявлением
                     if os.path.exists(samosvaly_path):
                         folder_path = os.path.join(samosvaly_path, folder_name)
                     else:
@@ -93,20 +95,32 @@ class Publisher:
                     with open(info_path, 'r', encoding='utf-8') as f:
                         text = f.read()
                     
-                    # Извлекаем group_id из названия папки
-                    group_id = self.extract_group_id(folder_name)
-                    if not group_id:
-                        logger.warning(f"⚠️ Не удалось извлечь group_id из {folder_name}")
+                    # Извлекаем ID чата из названия папки (с дефисом)
+                    chat_id = self.extract_group_id(folder_name)
+                    if not chat_id:
+                        logger.warning(f"⚠️ Не удалось извлечь ID чата из {folder_name}")
                         continue
                     
-                    logger.info(f"📤 Публикация в группу {group_id}: {folder_name}")
-                    logger.info(f"📄 Текст: {text[:100]}...")
+                    # Собираем изображения
+                    images = []
+                    for file in os.listdir(folder_path):
+                        if file.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
+                            images.append(os.path.join(folder_path, file))
                     
-                    # Отправляем сообщение в чат
-                    self.api.send_message_to_chat(group_id, text)
+                    logger.info(f"📤 Публикация в чат {chat_id}: {folder_name}")
+                    logger.info(f"📄 Текст: {text[:100]}...")
+                    logger.info(f"🖼️ Найдено {len(images)} изображений")
+                    
+                    # 🔥 ОТПРАВЛЯЕМ В ЧАТ С ID (с дефисом)
+                    if images:
+                        # Отправляем с фото
+                        # TODO: Добавить загрузку фото через MAX API
+                        self.api.send_message_to_chat(chat_id, text)
+                    else:
+                        self.api.send_message_to_chat(chat_id, text)
                     
                     # Добавляем в базу данных
-                    self.db.add_publication(user_id, folder_name, group_id)
+                    self.db.add_publication(user_id, folder_name, chat_id)
                     
                     published += 1
                     time.sleep(1)  # Пауза между публикациями
@@ -118,9 +132,15 @@ class Publisher:
             self.active_users[user_id] = False
             
             if published > 0:
-                self.api.send_message(user_id, f"✅ Публикация завершена! Опубликовано {published} объявлений.")
+                self.api.send_message(
+                    user_id, 
+                    f"✅ Публикация завершена! Опубликовано {published} объявлений."
+                )
             else:
-                self.api.send_message(user_id, "❌ Не удалось опубликовать ни одного объявления. Проверьте содержимое папок.")
+                self.api.send_message(
+                    user_id, 
+                    "❌ Не удалось опубликовать ни одного объявления. Проверьте содержимое папок."
+                )
             
             return True
             
