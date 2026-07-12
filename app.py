@@ -355,6 +355,32 @@ UPLOAD_PAGE = """
 </html>
 """
 
+# ========== ФУНКЦИЯ ДЛЯ ОТПРАВКИ КНОПОК ==========
+def send_confirmation_buttons(user_id):
+    """Отправляет кнопки подтверждения"""
+    try:
+        attachments = [{
+            "type": "keyboard",
+            "buttons": [
+                [
+                    {
+                        "type": "text",
+                        "text": "✅ Да, публиковать",
+                        "payload": {"action": "confirm_publish", "user_id": user_id}
+                    },
+                    {
+                        "type": "text",
+                        "text": "❌ Нет, отменить",
+                        "payload": {"action": "cancel_publish", "user_id": user_id}
+                    }
+                ]
+            ]
+        }]
+        
+        api.send_message(user_id, "Выберите действие:", attachments)
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки кнопок: {e}")
+
 # ========== МАРШРУТЫ ==========
 
 @app.route('/')
@@ -368,7 +394,7 @@ def upload_page():
 
 @app.route('/upload_folder', methods=['POST'])
 def upload_folder():
-    """Обработка загрузки папки с проверкой подпапок"""
+    """Обработка загрузки папки с поиском info.txt в подпапках"""
     try:
         user_id = int(request.form.get('user_id', 151296248))
         files = request.files.getlist('files[]')
@@ -378,68 +404,50 @@ def upload_folder():
         
         logger.info(f"📥 Получено {len(files)} файлов от пользователя {user_id}")
         
-        # Получаем путь к папке пользователя
+        # Получаем папку пользователя
         user_folder = fm.get_user_folder(user_id)
         
-        # Проверяем, есть ли уже папки с объявлениями
-        existing_folders = []
-        if os.path.exists(user_folder):
-            existing_folders = [f for f in os.listdir(user_folder) 
-                              if os.path.isdir(os.path.join(user_folder, f))]
-        
-        # Сохраняем файлы напрямую в папку пользователя (не во временную)
+        # Сохраняем файлы с полной структурой
         saved_count = 0
-        saved_folders = set()
-        
         for file in files:
             rel_path = getattr(file, 'filename', file.name)
             if not rel_path:
                 rel_path = file.name
             
-            # Извлекаем имя папки из пути (первая часть пути)
-            parts = rel_path.split('/')
-            if len(parts) >= 2:
-                folder_name = parts[0]  # Это имя подпапки
-                saved_folders.add(folder_name)
-                
-                # Формируем полный путь для сохранения
-                full_path = os.path.join(user_folder, rel_path)
-                os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                file.save(full_path)
-                saved_count += 1
+            full_path = os.path.join(user_folder, rel_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            file.save(full_path)
+            saved_count += 1
         
-        logger.info(f"✅ Сохранено {saved_count} файлов, найдено папок: {len(saved_folders)}")
+        logger.info(f"✅ Сохранено {saved_count} файлов")
         
-        # Проверяем каждую папку на наличие info.txt
+        # АНАЛИЗИРУЕМ СТРУКТУРУ - ИЩЕМ info.txt В ПОДПАПКАХ
         valid_folders = []
         invalid_folders = []
         folder_errors = {}
         
-        for folder in saved_folders:
-            folder_path = os.path.join(user_folder, folder)
-            if os.path.isdir(folder_path):
-                info_path = os.path.join(folder_path, 'info.txt')
+        # Проходим по всем элементам в папке пользователя
+        for item in os.listdir(user_folder):
+            item_path = os.path.join(user_folder, item)
+            
+            # Проверяем, является ли элемент папкой
+            if os.path.isdir(item_path):
+                # Проверяем наличие info.txt в этой подпапке
+                info_path = os.path.join(item_path, 'info.txt')
                 if os.path.exists(info_path):
-                    valid_folders.append(folder)
-                    logger.info(f"✅ Папка {folder} - валидна (есть info.txt)")
+                    valid_folders.append(item)
+                    logger.info(f"✅ Папка {item} - валидна (есть info.txt)")
                 else:
-                    invalid_folders.append(folder)
-                    folder_errors[folder] = "отсутствует info.txt"
-                    logger.warning(f"⚠️ В папке {folder} нет info.txt")
+                    invalid_folders.append(item)
+                    folder_errors[item] = "отсутствует info.txt"
+                    logger.warning(f"⚠️ В папке {item} нет info.txt")
         
-        # Если нет ни одной папки с info.txt
-        if not valid_folders and not invalid_folders:
-            # Проверяем, может файлы загружены прямо в корень
-            root_files = [f for f in os.listdir(user_folder) if os.path.isfile(os.path.join(user_folder, f))]
-            if root_files:
-                invalid_folders.append("Корневая папка")
-                folder_errors["Корневая папка"] = "файлы загружены в корень, а не в подпапки"
-                logger.warning("⚠️ Файлы загружены в корень папки пользователя")
-        
-        # Удаляем временную папку если она есть
-        temp_folder = fm.get_temp_folder(user_id)
-        if os.path.exists(temp_folder):
-            shutil.rmtree(temp_folder)
+        # Проверяем, есть ли файлы в корне папки пользователя
+        root_files = [f for f in os.listdir(user_folder) if os.path.isfile(os.path.join(user_folder, f))]
+        if root_files:
+            invalid_folders.append("Корневая папка")
+            folder_errors["Корневая папка"] = f"загружены файлы в корень ({len(root_files)} шт.)"
+            logger.warning(f"⚠️ Файлы загружены в корень папки пользователя: {root_files[:5]}")
         
         # Сохраняем результат для пользователя
         user_temp_data[user_id] = {
@@ -510,7 +518,8 @@ def upload_folder():
                 f"  ├── Машины -987654321/\n"
                 f"  │   ├── info.txt\n"
                 f"  │   └── photo1.jpg\n"
-                f"  └── ..."
+                f"  └── ...\n\n"
+                f"💡 **Важно:** файл info.txt должен лежать ВНУТРИ каждой подпапки с объявлением!"
             )
             return jsonify({
                 'success': False,
@@ -523,31 +532,6 @@ def upload_folder():
         import traceback
         logger.error(traceback.format_exc())
         return jsonify({'success': False, 'message': str(e)}), 500
-
-def send_confirmation_buttons(user_id):
-    """Отправляет кнопки подтверждения"""
-    try:
-        attachments = [{
-            "type": "keyboard",
-            "buttons": [
-                [
-                    {
-                        "type": "text",
-                        "text": "✅ Да, публиковать",
-                        "payload": {"action": "confirm_publish", "user_id": user_id}
-                    },
-                    {
-                        "type": "text",
-                        "text": "❌ Нет, отменить",
-                        "payload": {"action": "cancel_publish", "user_id": user_id}
-                    }
-                ]
-            ]
-        }]
-        
-        api.send_message(user_id, "Выберите действие:", attachments)
-    except Exception as e:
-        logger.error(f"❌ Ошибка отправки кнопок: {e}")
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
