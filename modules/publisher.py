@@ -2,6 +2,8 @@ import logging
 import os
 import time
 import re
+from PIL import Image
+import io
 
 logger = logging.getLogger(__name__)
 
@@ -11,6 +13,7 @@ class Publisher:
         self.fm = file_manager
         self.db = db
         self.active_users = {}
+        self.stop_flags = {}  # Флаги остановки для каждого пользователя
     
     def extract_chat_id(self, folder_name):
         """Извлекает ID чата из названия папки"""
@@ -19,24 +22,52 @@ class Publisher:
             return f"-{match.group(1)}"
         return None
     
+    def compress_image(self, image_path, max_size_mb=0.8, quality=75):
+        """
+        Сжимает изображение до указанного размера
+        """
+        try:
+            with Image.open(image_path) as img:
+                # Конвертируем в RGB
+                if img.mode in ('RGBA', 'P'):
+                    img = img.convert('RGB')
+                
+                # Уменьшаем размер
+                max_dimension = 1280
+                if img.width > max_dimension or img.height > max_dimension:
+                    ratio = min(max_dimension / img.width, max_dimension / img.height)
+                    new_size = (int(img.width * ratio), int(img.height * ratio))
+                    img = img.resize(new_size, Image.Resampling.LANCZOS)
+                
+                # Сжимаем
+                buffer = io.BytesIO()
+                img.save(buffer, format='JPEG', quality=quality, optimize=True)
+                compressed_data = buffer.getvalue()
+                
+                # Если всё ещё слишком большой, снижаем качество
+                if len(compressed_data) > max_size_mb * 1024 * 1024:
+                    buffer = io.BytesIO()
+                    img.save(buffer, format='JPEG', quality=50, optimize=True)
+                    compressed_data = buffer.getvalue()
+                
+                return compressed_data
+        except Exception as e:
+            logger.error(f"❌ Ошибка сжатия: {e}")
+            with open(image_path, 'rb') as f:
+                return f.read()
+    
     def get_sorted_images(self, folder_path, max_count=5):
-        """
-        Возвращает отсортированный список изображений в папке
-        Сортировка по имени файла (чтобы порядок был предсказуемым)
-        """
+        """Возвращает отсортированный список изображений"""
         images = []
         if not os.path.exists(folder_path):
-            logger.error(f"❌ Папка не найдена: {folder_path}")
             return images
             
         for file in os.listdir(folder_path):
             if file.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
-                # Пропускаем системные файлы
                 if file.startswith('.'):
                     continue
                 images.append(file)
         
-        # Сортируем по имени
         images.sort()
         return images[:max_count]
     
@@ -45,16 +76,15 @@ class Publisher:
         try:
             logger.info(f"🚀 Запуск публикации для пользователя {user_id}")
             
-            # Получаем папку пользователя через FileManager (ЕДИНЫЙ ИСТОЧНИК)
-            user_folder = self.fm.get_user_folder(user_id)
-            logger.info(f"📁 Папка пользователя: {user_folder}")
+            # Сбрасываем флаг остановки
+            self.stop_flags[user_id] = False
             
-            # Проверяем, есть ли папка "Самосвалы" внутри
+            # Получаем папку пользователя
+            user_folder = self.fm.get_user_folder(user_id)
             samosvaly_path = os.path.join(user_folder, "Самосвалы")
             
             # Определяем папки с объявлениями
             if os.path.exists(samosvaly_path) and os.path.isdir(samosvaly_path):
-                logger.info(f"📁 Найдена папка: {samosvaly_path}")
                 subfolders = []
                 for item in os.listdir(samosvaly_path):
                     item_path = os.path.join(samosvaly_path, item)
@@ -62,11 +92,7 @@ class Publisher:
                         info_path = os.path.join(item_path, 'info.txt')
                         if os.path.exists(info_path):
                             subfolders.append(item)
-                            logger.info(f"✅ Папка {item} - валидна (есть info.txt)")
-                        else:
-                            logger.warning(f"⚠️ В папке {item} нет info.txt")
             else:
-                logger.warning(f"⚠️ Папка 'Самосвалы' не найдена, ищем в {user_folder}")
                 subfolders = []
                 for item in os.listdir(user_folder):
                     item_path = os.path.join(user_folder, item)
@@ -74,7 +100,6 @@ class Publisher:
                         info_path = os.path.join(item_path, 'info.txt')
                         if os.path.exists(info_path):
                             subfolders.append(item)
-                            logger.info(f"✅ Папка {item} - валидна (есть info.txt)")
             
             if not subfolders:
                 self.api.send_message(user_id, "❌ Нет папок с объявлениями для публикации.")
@@ -85,22 +110,21 @@ class Publisher:
             published = 0
             
             for folder_name in subfolders:
-                if not self.active_users.get(user_id, True):
+                # 🔥 ПРОВЕРКА ОСТАНОВКИ
+                if self.stop_flags.get(user_id, False):
+                    logger.info(f"⏹️ Публикация остановлена пользователем {user_id}")
                     break
                 
                 try:
-                    # Путь к папке с объявлением (ЕДИНЫЙ ИСТОЧНИК)
+                    # Путь к папке с объявлением
                     if os.path.exists(samosvaly_path):
                         folder_path = os.path.join(samosvaly_path, folder_name)
                     else:
                         folder_path = os.path.join(user_folder, folder_name)
                     
-                    logger.info(f"📁 Путь к папке: {folder_path}")
-                    
                     # Читаем текст
                     info_path = os.path.join(folder_path, 'info.txt')
                     if not os.path.exists(info_path):
-                        logger.warning(f"⚠️ Нет info.txt в папке {folder_name}")
                         continue
                     
                     with open(info_path, 'r', encoding='utf-8') as f:
@@ -112,7 +136,7 @@ class Publisher:
                         logger.warning(f"⚠️ Не удалось извлечь ID чата из {folder_name}")
                         continue
                     
-                    # Получаем список изображений (отсортированный)
+                    # Получаем список изображений
                     images = self.get_sorted_images(folder_path, max_count=5)
                     
                     logger.info(f"📤 Публикация в чат {chat_id}: {folder_name}")
@@ -128,37 +152,42 @@ class Publisher:
                     logger.info(f"✅ Текст отправлен в {chat_id}")
                     time.sleep(1)
                     
-                    # 2. Отправляем каждое фото отдельно через send_photo_to_chat
+                    # 2. Отправляем каждое фото
                     for i, img_name in enumerate(images):
-                        if not self.active_users.get(user_id, True):
+                        # 🔥 ПРОВЕРКА ОСТАНОВКИ
+                        if self.stop_flags.get(user_id, False):
+                            logger.info(f"⏹️ Публикация остановлена пользователем {user_id}")
                             break
                         
                         img_path = os.path.join(folder_path, img_name)
                         
-                        # Проверяем, что файл существует
                         if not os.path.exists(img_path):
                             logger.warning(f"⚠️ Файл не найден: {img_path}")
                             continue
                         
-                        # Проверяем размер файла
-                        file_size = os.path.getsize(img_path) / (1024 * 1024)
-                        if file_size > 10:
-                            logger.warning(f"⚠️ Файл {img_name} слишком большой ({file_size:.1f} МБ), пропускаем")
-                            continue
-                        
-                        caption = f"📸 Фото {i+1}/{len(images)}" if i == 0 else None
-                        
-                        # 🔥 ИСПОЛЬЗУЕМ НОВЫЙ МЕТОД send_photo_to_chat
-                        success = self.api.send_photo_to_chat(chat_id, img_path, caption)
-                        
-                        if success:
-                            logger.info(f"✅ Отправлено фото: {img_name}")
-                        else:
-                            logger.error(f"❌ Не удалось отправить фото: {img_name}")
-                        
-                        time.sleep(1)
+                        # Сжимаем фото
+                        try:
+                            compressed_data = self.compress_image(img_path)
+                            caption = f"📸 Фото {i+1}/{len(images)}" if i == 0 else None
+                            
+                            success = self.api.send_photo_to_chat(
+                                chat_id, 
+                                img_path, 
+                                caption, 
+                                compressed_data=compressed_data
+                            )
+                            
+                            if success:
+                                logger.info(f"✅ Отправлено фото: {img_name}")
+                            else:
+                                logger.error(f"❌ Не удалось отправить фото: {img_name}")
+                            
+                            time.sleep(1)
+                        except Exception as e:
+                            logger.error(f"❌ Ошибка отправки фото {img_name}: {e}")
                     
-                    # Сохраняем в базу
+                    # 3. Сохраняем в базу (только если публикация успешна)
+                    # 🔥 НЕ ПРОВЕРЯЕМ СУЩЕСТВУЮЩИЕ ОБЪЯВЛЕНИЯ - просто добавляем
                     self.db.add_publication(user_id, folder_name, chat_id)
                     published += 1
                     logger.info(f"✅ Опубликовано: {folder_name}")
@@ -166,8 +195,6 @@ class Publisher:
                     
                 except Exception as e:
                     logger.error(f"❌ Ошибка публикации папки {folder_name}: {e}")
-                    import traceback
-                    logger.error(traceback.format_exc())
                     continue
             
             self.active_users[user_id] = False
@@ -187,8 +214,7 @@ class Publisher:
             return False
     
     def stop(self, user_id):
-        if user_id in self.active_users:
-            self.active_users[user_id] = False
-            logger.info(f"⏹️ Публикация остановлена для пользователя {user_id}")
-        else:
-            logger.info(f"ℹ️ Публикация для пользователя {user_id} не была активна")
+        """Останавливает публикацию"""
+        self.stop_flags[user_id] = True
+        self.active_users[user_id] = False
+        logger.info(f"⏹️ Публикация остановлена для пользователя {user_id}")
