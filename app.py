@@ -412,7 +412,7 @@ def upload_page():
 
 @app.route('/upload_folder', methods=['POST'])
 def upload_folder():
-    """Обработка загрузки папки с очисткой старых данных"""
+    """Обработка загрузки папки с правильным определением структуры"""
     try:
         user_id = int(request.form.get('user_id', 151296248))
         files = request.files.getlist('files[]')
@@ -422,10 +422,14 @@ def upload_folder():
         
         logger.info(f"📥 Получено {len(files)} файлов от пользователя {user_id}")
         
+        # Логируем первые несколько файлов для отладки
+        for i, file in enumerate(files[:5]):
+            logger.info(f"📄 Файл {i+1}: {file.filename}")
+        
         # Получаем папку пользователя
         user_folder = fm.get_user_folder(user_id)
         
-        # 🔥 ВАЖНО: Очищаем папку пользователя перед загрузкой
+        # 🔥 Очищаем папку пользователя перед загрузкой
         if os.path.exists(user_folder):
             shutil.rmtree(user_folder)
             logger.info(f"🗑️ Папка пользователя {user_id} очищена")
@@ -437,25 +441,29 @@ def upload_folder():
         
         for file in files:
             # Получаем путь (webkitRelativePath)
-            rel_path = getattr(file, 'filename', file.name)
+            rel_path = file.filename
             if not rel_path:
                 rel_path = file.name
             
-            # Извлекаем имя папки (первая часть пути)
+            # Разбиваем путь на части
             parts = rel_path.split('/')
+            
+            # Если есть хотя бы одна подпапка
             if len(parts) >= 2:
                 folder_name = parts[0]  # Это имя подпапки
                 folder_names.add(folder_name)
+                
+                # Сохраняем файл с полным путём
+                full_path = os.path.join(user_folder, rel_path)
+                os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                file.save(full_path)
+                saved_count += 1
             else:
-                # Если файл в корне - пропускаем
+                # Файл в корне - сохраняем, но отмечаем
                 logger.warning(f"⚠️ Файл в корне: {rel_path}")
-                continue
-            
-            # Сохраняем файл
-            full_path = os.path.join(user_folder, rel_path)
-            os.makedirs(os.path.dirname(full_path), exist_ok=True)
-            file.save(full_path)
-            saved_count += 1
+                full_path = os.path.join(user_folder, rel_path)
+                file.save(full_path)
+                saved_count += 1
         
         logger.info(f"✅ Сохранено {saved_count} файлов")
         logger.info(f"📁 Найдены папки: {folder_names}")
@@ -480,13 +488,27 @@ def upload_folder():
                     invalid_folders.append(item)
                     folder_errors[item] = "отсутствует info.txt"
                     logger.warning(f"⚠️ В папке {item} нет info.txt")
+                    
+                    # Логируем содержимое папки для отладки
+                    try:
+                        contents = os.listdir(item_path)
+                        logger.warning(f"📂 Содержимое папки {item}: {contents[:10]}")
+                    except:
+                        pass
         
         # Проверяем, есть ли файлы в корне папки пользователя
         root_files = [f for f in os.listdir(user_folder) if os.path.isfile(os.path.join(user_folder, f))]
         if root_files:
             invalid_folders.append("Корневая папка")
             folder_errors["Корневая папка"] = f"загружены файлы в корень ({len(root_files)} шт.)"
-            logger.warning(f"⚠️ Файлы загружены в корень папки пользователя")
+            logger.warning(f"⚠️ Файлы в корне: {root_files[:5]}")
+        
+        # Если нет папок, но есть файлы - возможно, структура другая
+        if not valid_folders and not invalid_folders:
+            # Проверяем, есть ли info.txt в корне
+            if os.path.exists(os.path.join(user_folder, 'info.txt')):
+                valid_folders.append("Корневая папка")
+                logger.info("✅ Найден info.txt в корне")
         
         # Сохраняем результат для пользователя
         user_temp_data[user_id] = {
@@ -510,7 +532,6 @@ def upload_folder():
         
         # Отправляем сообщение пользователю
         if invalid_folders and valid_folders:
-            # Есть и валидные, и невалидные
             api.send_message(
                 user_id,
                 f"📊 **Результат загрузки:**\n\n"
@@ -528,7 +549,6 @@ def upload_folder():
                 }
             })
         elif valid_folders:
-            # Только валидные
             api.send_message(
                 user_id,
                 f"✅ **Все папки валидны!**\n\n"
@@ -542,7 +562,6 @@ def upload_folder():
                 'message': f'✅ Загружено {len(valid_folders)} объявлений. Публикация началась!'
             })
         else:
-            # Только невалидные
             api.send_message(
                 user_id,
                 f"❌ **Нет валидных папок!**\n\n"
