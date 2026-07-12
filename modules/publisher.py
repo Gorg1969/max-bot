@@ -25,6 +25,10 @@ class Publisher:
         Сортировка по имени файла (чтобы порядок был предсказуемым)
         """
         images = []
+        if not os.path.exists(folder_path):
+            logger.error(f"❌ Папка не найдена: {folder_path}")
+            return images
+            
         for file in os.listdir(folder_path):
             if file.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
                 # Пропускаем системные файлы
@@ -41,11 +45,16 @@ class Publisher:
         try:
             logger.info(f"🚀 Запуск публикации для пользователя {user_id}")
             
+            # Получаем папку пользователя через FileManager (ЕДИНЫЙ ИСТОЧНИК)
             user_folder = self.fm.get_user_folder(user_id)
+            logger.info(f"📁 Папка пользователя: {user_folder}")
+            
+            # Проверяем, есть ли папка "Самосвалы" внутри
             samosvaly_path = os.path.join(user_folder, "Самосвалы")
             
             # Определяем папки с объявлениями
             if os.path.exists(samosvaly_path) and os.path.isdir(samosvaly_path):
+                logger.info(f"📁 Найдена папка: {samosvaly_path}")
                 subfolders = []
                 for item in os.listdir(samosvaly_path):
                     item_path = os.path.join(samosvaly_path, item)
@@ -53,7 +62,11 @@ class Publisher:
                         info_path = os.path.join(item_path, 'info.txt')
                         if os.path.exists(info_path):
                             subfolders.append(item)
+                            logger.info(f"✅ Папка {item} - валидна (есть info.txt)")
+                        else:
+                            logger.warning(f"⚠️ В папке {item} нет info.txt")
             else:
+                logger.warning(f"⚠️ Папка 'Самосвалы' не найдена, ищем в {user_folder}")
                 subfolders = []
                 for item in os.listdir(user_folder):
                     item_path = os.path.join(user_folder, item)
@@ -61,6 +74,7 @@ class Publisher:
                         info_path = os.path.join(item_path, 'info.txt')
                         if os.path.exists(info_path):
                             subfolders.append(item)
+                            logger.info(f"✅ Папка {item} - валидна (есть info.txt)")
             
             if not subfolders:
                 self.api.send_message(user_id, "❌ Нет папок с объявлениями для публикации.")
@@ -75,15 +89,18 @@ class Publisher:
                     break
                 
                 try:
-                    # Путь к папке с объявлением
+                    # Путь к папке с объявлением (ЕДИНЫЙ ИСТОЧНИК)
                     if os.path.exists(samosvaly_path):
                         folder_path = os.path.join(samosvaly_path, folder_name)
                     else:
                         folder_path = os.path.join(user_folder, folder_name)
                     
+                    logger.info(f"📁 Путь к папке: {folder_path}")
+                    
                     # Читаем текст
                     info_path = os.path.join(folder_path, 'info.txt')
                     if not os.path.exists(info_path):
+                        logger.warning(f"⚠️ Нет info.txt в папке {folder_name}")
                         continue
                     
                     with open(info_path, 'r', encoding='utf-8') as f:
@@ -111,12 +128,17 @@ class Publisher:
                     logger.info(f"✅ Текст отправлен в {chat_id}")
                     time.sleep(1)
                     
-                    # 2. Отправляем каждое фото отдельно через правильный multipart
+                    # 2. Отправляем каждое фото отдельно через send_photo_to_chat
                     for i, img_name in enumerate(images):
                         if not self.active_users.get(user_id, True):
                             break
                         
                         img_path = os.path.join(folder_path, img_name)
+                        
+                        # Проверяем, что файл существует
+                        if not os.path.exists(img_path):
+                            logger.warning(f"⚠️ Файл не найден: {img_path}")
+                            continue
                         
                         # Проверяем размер файла
                         file_size = os.path.getsize(img_path) / (1024 * 1024)
@@ -126,7 +148,7 @@ class Publisher:
                         
                         caption = f"📸 Фото {i+1}/{len(images)}" if i == 0 else None
                         
-                        # Используем новый метод для отправки фото
+                        # 🔥 ИСПОЛЬЗУЕМ НОВЫЙ МЕТОД send_photo_to_chat
                         success = self.api.send_photo_to_chat(chat_id, img_path, caption)
                         
                         if success:
@@ -168,3 +190,5 @@ class Publisher:
         if user_id in self.active_users:
             self.active_users[user_id] = False
             logger.info(f"⏹️ Публикация остановлена для пользователя {user_id}")
+        else:
+            logger.info(f"ℹ️ Публикация для пользователя {user_id} не была активна")
