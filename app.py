@@ -4,6 +4,7 @@ import logging
 import os
 import shutil
 import urllib3
+import json
 from modules import Database, FileManager, Publisher, WebInterface
 
 # ОТКЛЮЧАЕМ ПРЕДУПРЕЖДЕНИЯ SSL
@@ -42,6 +43,9 @@ class APIClient:
                 timeout=30,
                 verify=False
             )
+            logger.info(f"📤 Отправка сообщения пользователю {user_id}, статус: {response.status_code}")
+            if response.status_code != 200:
+                logger.error(f"❌ Ошибка отправки: {response.text}")
             return response.status_code == 200
         except Exception as e:
             logger.error(f"❌ Ошибка отправки: {e}")
@@ -357,8 +361,9 @@ UPLOAD_PAGE = """
 
 # ========== ФУНКЦИЯ ДЛЯ ОТПРАВКИ КНОПОК ==========
 def send_confirmation_buttons(user_id):
-    """Отправляет кнопки подтверждения"""
+    """Отправляет кнопки подтверждения в MAX"""
     try:
+        # Формат кнопок для MAX API
         attachments = [{
             "type": "keyboard",
             "buttons": [
@@ -366,20 +371,33 @@ def send_confirmation_buttons(user_id):
                     {
                         "type": "text",
                         "text": "✅ Да, публиковать",
-                        "payload": {"action": "confirm_publish", "user_id": user_id}
+                        "payload": json.dumps({"action": "confirm_publish", "user_id": user_id})
                     },
                     {
                         "type": "text",
                         "text": "❌ Нет, отменить",
-                        "payload": {"action": "cancel_publish", "user_id": user_id}
+                        "payload": json.dumps({"action": "cancel_publish", "user_id": user_id})
                     }
                 ]
             ]
         }]
         
-        api.send_message(user_id, "Выберите действие:", attachments)
+        # Отправляем сообщение с кнопками
+        success = api.send_message(user_id, "Выберите действие:", attachments)
+        if success:
+            logger.info(f"✅ Кнопки отправлены пользователю {user_id}")
+        else:
+            logger.error(f"❌ Не удалось отправить кнопки пользователю {user_id}")
+            
     except Exception as e:
         logger.error(f"❌ Ошибка отправки кнопок: {e}")
+        # Если кнопки не отправились, отправляем текстовое сообщение
+        api.send_message(
+            user_id,
+            "⚠️ Не удалось отправить кнопки. Пожалуйста, напишите:\n"
+            "• `Да` - чтобы начать публикацию\n"
+            "• `Нет` - чтобы отменить"
+        )
 
 # ========== МАРШРУТЫ ==========
 
@@ -552,15 +570,22 @@ def webhook():
                 user_id = msg['sender'].get('user_id')
             if 'body' in msg:
                 text = msg['body'].get('text')
+                # Получаем payload (для кнопок)
                 payload = msg['body'].get('payload')
+                # Если payload пришёл как строка JSON, парсим его
+                if payload and isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except:
+                        pass
         
         if not user_id:
             return jsonify({"ok": True}), 200
 
         logger.info(f"💬 user_id={user_id}, text={text}, payload={payload}")
 
-        # Обработка кнопок
-        if payload:
+        # Обработка кнопок через payload
+        if payload and isinstance(payload, dict):
             action = payload.get('action')
             if action == 'confirm_publish':
                 # Пользователь подтвердил публикацию
@@ -569,6 +594,18 @@ def webhook():
                 return jsonify({"ok": True}), 200
             elif action == 'cancel_publish':
                 # Пользователь отменил публикацию
+                api.send_message(user_id, "⏹️ Публикация отменена. Очищаю данные...")
+                fm.clear_user_data(user_id)
+                return jsonify({"ok": True}), 200
+
+        # Обработка текстовых команд (если кнопки не сработали)
+        if text:
+            text_lower = text.strip().lower()
+            if text_lower == 'да' or text_lower == 'yes' or text_lower == 'да, публиковать':
+                api.send_message(user_id, "🚀 Начинаю публикацию валидных объявлений...")
+                publisher.start(user_id)
+                return jsonify({"ok": True}), 200
+            elif text_lower == 'нет' or text_lower == 'no' or text_lower == 'отменить':
                 api.send_message(user_id, "⏹️ Публикация отменена. Очищаю данные...")
                 fm.clear_user_data(user_id)
                 return jsonify({"ok": True}), 200
@@ -596,6 +633,8 @@ def webhook():
 
     except Exception as e:
         logger.error(f"❌ ОШИБКА: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return jsonify({"ok": False}), 500
 
 @app.route('/health')
