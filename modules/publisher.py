@@ -2,7 +2,6 @@ import logging
 import os
 import time
 import re
-import base64
 
 logger = logging.getLogger(__name__)
 
@@ -14,18 +13,38 @@ class Publisher:
         self.active_users = {}
     
     def extract_chat_id(self, folder_name):
+        """Извлекает ID чата из названия папки"""
         match = re.search(r'-\s*(\d+)', folder_name)
         if match:
             return f"-{match.group(1)}"
         return None
     
+    def get_sorted_images(self, folder_path, max_count=5):
+        """
+        Возвращает отсортированный список изображений в папке
+        Сортировка по имени файла (чтобы порядок был предсказуемым)
+        """
+        images = []
+        for file in os.listdir(folder_path):
+            if file.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
+                # Пропускаем системные файлы
+                if file.startswith('.'):
+                    continue
+                images.append(file)
+        
+        # Сортируем по имени
+        images.sort()
+        return images[:max_count]
+    
     def start(self, user_id):
+        """Запускает публикацию для пользователя"""
         try:
             logger.info(f"🚀 Запуск публикации для пользователя {user_id}")
             
             user_folder = self.fm.get_user_folder(user_id)
             samosvaly_path = os.path.join(user_folder, "Самосвалы")
             
+            # Определяем папки с объявлениями
             if os.path.exists(samosvaly_path) and os.path.isdir(samosvaly_path):
                 subfolders = []
                 for item in os.listdir(samosvaly_path):
@@ -56,11 +75,13 @@ class Publisher:
                     break
                 
                 try:
+                    # Путь к папке с объявлением
                     if os.path.exists(samosvaly_path):
                         folder_path = os.path.join(samosvaly_path, folder_name)
                     else:
                         folder_path = os.path.join(user_folder, folder_name)
                     
+                    # Читаем текст
                     info_path = os.path.join(folder_path, 'info.txt')
                     if not os.path.exists(info_path):
                         continue
@@ -68,19 +89,17 @@ class Publisher:
                     with open(info_path, 'r', encoding='utf-8') as f:
                         text = f.read()
                     
+                    # Извлекаем ID чата
                     chat_id = self.extract_chat_id(folder_name)
                     if not chat_id:
+                        logger.warning(f"⚠️ Не удалось извлечь ID чата из {folder_name}")
                         continue
                     
-                    # Собираем изображения (только первые 3)
-                    images = []
-                    for file in os.listdir(folder_path):
-                        if file.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
-                            images.append(os.path.basename(file))
-                            if len(images) >= 3:
-                                break
+                    # Получаем список изображений (отсортированный)
+                    images = self.get_sorted_images(folder_path, max_count=5)
                     
                     logger.info(f"📤 Публикация в чат {chat_id}: {folder_name}")
+                    logger.info(f"📄 Текст: {text[:100]}...")
                     logger.info(f"🖼️ Найдено {len(images)} изображений")
                     
                     # 1. Отправляем текст
@@ -92,32 +111,23 @@ class Publisher:
                     logger.info(f"✅ Текст отправлен в {chat_id}")
                     time.sleep(1)
                     
-                    # 2. Отправляем каждое фото отдельно через attachments
+                    # 2. Отправляем каждое фото отдельно через правильный multipart
                     for i, img_name in enumerate(images):
                         if not self.active_users.get(user_id, True):
                             break
                         
                         img_path = os.path.join(folder_path, img_name)
                         
-                        # Читаем фото и кодируем в base64
-                        with open(img_path, 'rb') as f:
-                            img_data = base64.b64encode(f.read()).decode('utf-8')
-                        
-                        # Пробуем отправить как photo
-                        photo_attachment = {
-                            "type": "photo",
-                            "payload": {
-                                "content": img_data,
-                                "filename": img_name
-                            }
-                        }
+                        # Проверяем размер файла
+                        file_size = os.path.getsize(img_path) / (1024 * 1024)
+                        if file_size > 10:
+                            logger.warning(f"⚠️ Файл {img_name} слишком большой ({file_size:.1f} МБ), пропускаем")
+                            continue
                         
                         caption = f"📸 Фото {i+1}/{len(images)}" if i == 0 else None
                         
-                        if caption:
-                            success = self.api.send_message_to_chat_with_attachments(chat_id, caption, [photo_attachment])
-                        else:
-                            success = self.api.send_message_to_chat_with_attachments(chat_id, "📸", [photo_attachment])
+                        # Используем новый метод для отправки фото
+                        success = self.api.send_photo_to_chat(chat_id, img_path, caption)
                         
                         if success:
                             logger.info(f"✅ Отправлено фото: {img_name}")
@@ -126,6 +136,7 @@ class Publisher:
                         
                         time.sleep(1)
                     
+                    # Сохраняем в базу
                     self.db.add_publication(user_id, folder_name, chat_id)
                     published += 1
                     logger.info(f"✅ Опубликовано: {folder_name}")
@@ -133,6 +144,8 @@ class Publisher:
                     
                 except Exception as e:
                     logger.error(f"❌ Ошибка публикации папки {folder_name}: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
                     continue
             
             self.active_users[user_id] = False
