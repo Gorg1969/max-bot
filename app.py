@@ -9,6 +9,7 @@ import time
 import random
 import re
 import base64
+import tempfile
 from PIL import Image, ExifTags
 import io
 from modules import Database, FileManager, Publisher, WebInterface
@@ -20,16 +21,19 @@ try:
     MAXAPI_AVAILABLE = True
     logger = logging.getLogger(__name__)
     logger.info("✅ Библиотека maxapi успешно импортирована")
-except ImportError:
+except ImportError as e:
     MAXAPI_AVAILABLE = False
     logger = logging.getLogger(__name__)
-    logger.warning("⚠️ Библиотека maxapi не установлена, используем стандартные методы")
+    logger.warning(f"⚠️ Библиотека maxapi не установлена: {e}")
     # Создаем заглушку
     class InputMedia:
         def __init__(self, file_path=None, file_data=None, filename=None):
             self.file_path = file_path
             self.file_data = file_data
             self.filename = filename
+    class Bot:
+        def __init__(self, token):
+            self.token = token
 
 # ОТКЛЮЧАЕМ ПРЕДУПРЕЖДЕНИЯ SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -56,10 +60,15 @@ class APIClient:
         self.base_url = BASE_URL
         # Инициализируем бота для maxapi
         if MAXAPI_AVAILABLE:
-            self.bot = Bot(token=TOKEN)
-            logger.info("✅ Бот MAX API инициализирован")
+            try:
+                self.bot = Bot(token=TOKEN)
+                logger.info("✅ Бот MAX API инициализирован")
+            except Exception as e:
+                self.bot = None
+                logger.error(f"❌ Ошибка инициализации бота: {e}")
         else:
             self.bot = None
+            logger.warning("⚠️ maxapi не доступна, используются стандартные методы")
 
     def send_message(self, user_id, text, attachments=None):
         """Отправляет сообщение пользователю"""
@@ -131,19 +140,20 @@ class APIClient:
             if MAXAPI_AVAILABLE and self.bot:
                 # Создаем список InputMedia для всех фото
                 attachments = []
+                
                 for filename, data in photo_files:
-                    # Сохраняем фото во временный файл для InputMedia
-                    temp_path = f"/tmp/{filename}"
-                    with open(temp_path, 'wb') as f:
-                        f.write(data)
+                    # Сохраняем данные во временный файл
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp:
+                        tmp.write(data)
+                        tmp_path = tmp.name
                     
-                    # Создаем InputMedia из файла
-                    media = InputMedia(temp_path)
+                    # Создаем InputMedia
+                    media = InputMedia(tmp_path)
                     attachments.append(media)
                     
                     # Удаляем временный файл
                     try:
-                        os.remove(temp_path)
+                        os.unlink(tmp_path)
                     except:
                         pass
                 
@@ -155,8 +165,9 @@ class APIClient:
                 )
                 logger.info(f"📤 Отправка {len(photo_files)} фото в чат {chat_id} через maxapi")
                 return True
+            
             else:
-                # Если maxapi не доступен, используем стандартный метод
+                # Если maxapi не доступен, используем метод с base64
                 success_count = 0
                 for idx, (filename, data) in enumerate(photo_files):
                     photo_base64 = base64.b64encode(data).decode('utf-8')
@@ -574,22 +585,11 @@ def send_confirmation_buttons(user_id):
             return True
         else:
             logger.error(f"❌ Ошибка отправки кнопок: {response.text}")
-            send_text_fallback(user_id)
             return False
             
     except Exception as e:
         logger.error(f"❌ Ошибка отправки кнопок: {e}")
-        send_text_fallback(user_id)
         return False
-
-def send_text_fallback(user_id):
-    """Отправляет текстовое сообщение вместо кнопок"""
-    api.send_message(
-        user_id,
-        "⚠️ Кнопки временно недоступны. Пожалуйста, напишите:\n"
-        "• `Да` - чтобы начать публикацию\n"
-        "• `Нет` - чтобы отменить"
-    )
 
 # ========== МАРШРУТЫ ==========
 
