@@ -77,7 +77,7 @@ class APIClient:
     def send_photos_to_chat(self, chat_id, photo_files, text=None, caption=None):
         """
         Отправляет фото в чат по одному.
-        Сначала загружает фото через /uploads, затем отправляет сообщение.
+        Использует двухэтапную загрузку: сначала получает upload_url, затем загружает файл.
         """
         try:
             if not photo_files:
@@ -88,39 +88,70 @@ class APIClient:
             for i, (filename, data) in enumerate(photo_files):
                 logger.info(f"📤 Загрузка фото {i+1}/{len(photo_files)}: {filename}")
                 
-                # Загружаем файл через /uploads с type в URL
-                files = {
-                    'file': (filename, data, 'image/jpeg')
-                }
-                
+                # Шаг 1: Получаем URL для загрузки
                 upload_response = requests.post(
-                    f"{self.base_url}/uploads?type=image",
-                    headers={"Authorization": self.token},
-                    files=files,
+                    f"{self.base_url}/uploads",
+                    headers={
+                        "Authorization": self.token,
+                        "Content-Type": "application/json"
+                    },
+                    json={"type": "image"},
                     timeout=30,
                     verify=False
                 )
                 
-                logger.info(f"📤 Загрузка фото {i+1}: статус {upload_response.status_code}")
+                logger.info(f"📤 Получение upload_url: статус {upload_response.status_code}")
                 
                 if upload_response.status_code != 200:
-                    logger.error(f"❌ Ошибка загрузки {filename}: {upload_response.status_code}")
+                    logger.error(f"❌ Ошибка получения upload_url: {upload_response.status_code}")
                     logger.error(f"Ответ: {upload_response.text[:500]}")
                     success = False
                     break
                 
                 upload_data = upload_response.json()
-                logger.info(f"📤 Ответ загрузки: {upload_data}")
+                logger.info(f"📤 Ответ: {upload_data}")
                 
-                token = upload_data.get('token')
+                upload_url = upload_data.get('url')
+                if not upload_url:
+                    logger.error(f"❌ Не удалось получить upload_url: {upload_data}")
+                    success = False
+                    break
+                
+                logger.info(f"✅ Получен upload_url: {upload_url[:50]}...")
+                
+                # Шаг 2: Загружаем файл по полученному URL
+                files = {
+                    'file': (filename, data, 'image/jpeg')
+                }
+                
+                file_response = requests.post(
+                    upload_url,
+                    files=files,
+                    timeout=60,
+                    verify=False
+                )
+                
+                logger.info(f"📤 Загрузка файла: статус {file_response.status_code}")
+                
+                if file_response.status_code != 200:
+                    logger.error(f"❌ Ошибка загрузки файла: {file_response.status_code}")
+                    logger.error(f"Ответ: {file_response.text[:500]}")
+                    success = False
+                    break
+                
+                file_data = file_response.json()
+                logger.info(f"📤 Ответ загрузки: {file_data}")
+                
+                # Получаем token или id из ответа
+                token = file_data.get('token') or file_data.get('id') or file_data.get('photo_id')
                 if not token:
-                    logger.error(f"❌ Не удалось получить token для {filename}: {upload_data}")
+                    logger.error(f"❌ Не удалось получить token: {file_data}")
                     success = False
                     break
                 
                 logger.info(f"✅ Фото загружено: {filename}, token: {token[:20]}...")
                 
-                # Отправляем сообщение с фото
+                # Шаг 3: Отправляем сообщение с фото
                 payload = {
                     "format": "markdown",
                     "attachments": [
@@ -709,68 +740,4 @@ def webhook():
 
         # Обработка текстовых команд
         if text:
-            text_lower = text.strip().lower()
-            if text_lower == 'да' or text_lower == 'yes':
-                api.send_message(user_id, "🚀 Начинаю публикацию валидных объявлений...")
-                publisher.start(user_id)
-                return jsonify({"ok": True}), 200
-            elif text_lower == 'нет' or text_lower == 'no':
-                api.send_message(user_id, "⏹️ Публикация отменена. Очищаю данные...")
-                fm.clear_user_data(user_id)
-                return jsonify({"ok": True}), 200
-
-        if text and text.strip() == '/start':
-            api.send_message(
-                user_id,
-                "🏠 **Главное меню**\n\n"
-                "🌐 **Загрузите папку с объявлениями через веб-интерфейс:**\n"
-                f"🔗 `https://maxbot.bothost.tech/upload`\n\n"
-                "📌 **Требования к папке:**\n"
-                "• Внутри папки должны быть подпапки с названиями: `Название -123456789`\n"
-                "• В каждой подпапке: `info.txt` (текст объявления) и изображения\n"
-                "• Можно загружать папку любого размера\n\n"
-                "⏹ Для остановки публикации отправьте `/stop`"
-            )
-            return jsonify({"ok": True}), 200
-
-        if text and text.strip() == '/stop':
-            publisher.stop(user_id)
-            api.send_message(user_id, "⏹️ Публикация остановлена.")
-            return jsonify({"ok": True}), 200
-
-        return jsonify({"ok": True}), 200
-
-    except Exception as e:
-        logger.error(f"❌ ОШИБКА: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return jsonify({"ok": False}), 500
-
-@app.route('/health')
-def health():
-    return {"status": "ok"}
-
-@app.route('/setup_webhook')
-def setup_webhook():
-    token = request.args.get('token') or TOKEN
-    if not token:
-        return "❌ Токен не найден", 400
-    
-    webhook_url = "https://maxbot.bothost.tech/webhook"
-    headers = {"Authorization": token, "Content-Type": "application/json"}
-    
-    try:
-        r = requests.post(
-            "https://platform-api2.max.ru/subscriptions",
-            headers=headers,
-            json={"url": webhook_url},
-            timeout=10,
-            verify=False
-        )
-        return f"✅ Вебхук настроен: {r.status_code}"
-    except Exception as e:
-        return f"❌ Ошибка: {e}"
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 3000))
-    app.run(host='0.0.0.0', port=port)
+            text_lower = text.strip().
