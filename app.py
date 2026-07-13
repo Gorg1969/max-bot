@@ -77,7 +77,7 @@ class APIClient:
     def send_photos_to_chat(self, chat_id, photo_files, text=None, caption=None):
         """
         Отправляет фото в чат по одному.
-        Сначала загружает фото через /uploads, затем отправляет сообщение.
+        Сначала загружает фото через /uploads с указанием типа, затем отправляет сообщение.
         """
         try:
             if not photo_files:
@@ -88,11 +88,20 @@ class APIClient:
             for i, (filename, data) in enumerate(photo_files):
                 logger.info(f"📤 Загрузка фото {i+1}/{len(photo_files)}: {filename}")
                 
-                # 1. Загружаем файл через /uploads
-                files = {'file': (filename, data, 'image/jpeg')}
+                # 1. Загружаем файл через /uploads с указанием типа
+                files = {
+                    'file': (filename, data, 'image/jpeg')
+                }
+                
+                # Добавляем параметр type
+                data_form = {
+                    'type': 'image'
+                }
+                
                 upload_response = requests.post(
                     f"{self.base_url}/uploads",
                     headers={"Authorization": self.token},
+                    data=data_form,
                     files=files,
                     timeout=30,
                     verify=False
