@@ -719,4 +719,83 @@ def webhook():
         if not user_id:
             return jsonify({"ok": True}), 200
 
-        logger.info(f"
+        logger.info(f"💬 user_id={user_id}, text={text}, payload={payload}")
+
+        if payload and isinstance(payload, dict):
+            action = payload.get('action')
+            if action == 'confirm_publish':
+                api.send_message(user_id, "🚀 Начинаю публикацию валидных объявлений...")
+                publisher.start(user_id)
+                return jsonify({"ok": True}), 200
+            elif action == 'cancel_publish':
+                api.send_message(user_id, "⏹️ Публикация отменена. Очищаю данные...")
+                publisher.stop(user_id)
+                return jsonify({"ok": True}), 200
+
+        if text:
+            text_lower = text.strip().lower()
+            if text_lower == 'да' or text_lower == 'yes':
+                api.send_message(user_id, "🚀 Начинаю публикацию валидных объявлений...")
+                publisher.start(user_id)
+                return jsonify({"ok": True}), 200
+            elif text_lower == 'нет' or text_lower == 'no':
+                api.send_message(user_id, "⏹️ Публикация отменена. Очищаю данные...")
+                publisher.stop(user_id)
+                return jsonify({"ok": True}), 200
+
+        if text and text.strip() == '/start':
+            api.send_message(
+                user_id,
+                "🏠 **Главное меню**\n\n"
+                "🌐 **Загрузите папку с объявлениями через веб-интерфейс:**\n"
+                f"🔗 `https://maxbot.bothost.tech/upload`\n\n"
+                "📌 **Требования к папке:**\n"
+                "• Внутри папки должны быть подпапки с названиями: `Название -123456789`\n"
+                "• В каждой подпапке: `info.txt` (текст объявления) и изображения\n"
+                "• Можно загружать папку любого размера\n\n"
+                "⏹ Для остановки публикации отправьте `/stop`"
+            )
+            return jsonify({"ok": True}), 200
+
+        if text and text.strip() == '/stop':
+            api.send_message(user_id, "⏹️ Останавливаю публикацию и очищаю все данные...")
+            publisher.stop(user_id)
+            api.send_message(user_id, "✅ Публикация остановлена. Все данные очищены.")
+            return jsonify({"ok": True}), 200
+
+        return jsonify({"ok": True}), 200
+
+    except Exception as e:
+        logger.error(f"❌ ОШИБКА: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({"ok": False}), 500
+
+@app.route('/health')
+def health():
+    return {"status": "ok"}
+
+@app.route('/setup_webhook')
+def setup_webhook():
+    token = request.args.get('token') or TOKEN
+    if not token:
+        return "❌ Токен не найден", 400
+    
+    webhook_url = "https://maxbot.bothost.tech/webhook"
+    headers = {"Authorization": token, "Content-Type": "application/json"}
+    
+    try:
+        r = requests.post(
+            "https://platform-api2.max.ru/subscriptions",
+            headers=headers,
+            json={"url": webhook_url},
+            timeout=10,
+            verify=False
+        )
+        return f"✅ Вебхук настроен: {r.status_code}"
+    except Exception as e:
+        return f"❌ Ошибка: {e}"
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 3000))
+    app.run(host='0.0.0.0', port=port)
