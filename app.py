@@ -80,7 +80,7 @@ class APIClient:
         Правильный процесс:
         1. Получаем URL для загрузки через /uploads
         2. Загружаем файл по этому URL
-        3. Получаем token
+        3. Получаем token из ответа (в поле photos)
         4. Отправляем сообщение с token
         """
         try:
@@ -134,7 +134,16 @@ class APIClient:
                 logger.info(f"📤 Ответ загрузки файла: {file_data}")
                 
                 # Шаг 3: Получаем token из ответа
-                token = file_data.get('token')
+                # Ответ имеет структуру: {'photos': {'photo_id': {'token': '...'}}}
+                token = None
+                photos = file_data.get('photos', {})
+                
+                if photos:
+                    # Берем первый (и единственный) photo_id
+                    for photo_id, photo_data in photos.items():
+                        token = photo_data.get('token')
+                        if token:
+                            break
                 
                 if not token:
                     logger.error(f"❌ Не удалось получить token: {file_data}")
