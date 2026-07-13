@@ -14,6 +14,9 @@ class UserState(Enum):
     PUBLISHING = "publishing"
     STOPPED = "stopped"
 
+# Глобальный флаг для остановки всех публикаций
+GLOBAL_STOP = False
+
 class Publisher:
     def __init__(self, api, file_manager, db):
         self.api = api
@@ -77,8 +80,8 @@ class Publisher:
             with open(image_path, 'rb') as f:
                 return f.read()
     
-    def get_sorted_images(self, folder_path, max_count=3):
-        """Возвращает отсортированный список изображений"""
+    def get_sorted_images(self, folder_path, max_count=10):
+        """Возвращает отсортированный список изображений (до 10)"""
         images = []
         if not os.path.exists(folder_path):
             return images
@@ -92,9 +95,33 @@ class Publisher:
         images.sort()
         return images[:max_count]
     
+    def stop_global(self):
+        """Глобальная остановка всех публикаций"""
+        global GLOBAL_STOP
+        GLOBAL_STOP = True
+        logger.info("🛑 ГЛОБАЛЬНАЯ ОСТАНОВКА ВСЕХ ПУБЛИКАЦИЙ")
+        # Очищаем все состояния
+        for user_id in list(self.user_states.keys()):
+            self.user_states[user_id] = UserState.STOPPED
+        return True
+    
+    def reset_global_stop(self):
+        """Сброс глобального флага остановки"""
+        global GLOBAL_STOP
+        GLOBAL_STOP = False
+        logger.info("🔄 Глобальный флаг остановки сброшен")
+    
     def start(self, user_id):
         """Запускает публикацию для пользователя"""
+        global GLOBAL_STOP
+        
         try:
+            # Проверяем глобальный стоп
+            if GLOBAL_STOP:
+                logger.warning(f"⚠️ Глобальная остановка активна! Публикация для {user_id} невозможна")
+                self.api.send_message(user_id, "⚠️ Публикация запрещена глобальной остановкой. Сначала выполните /reset")
+                return False
+            
             # Проверяем, не запущена ли уже публикация
             if self.user_states.get(user_id) == UserState.PUBLISHING:
                 logger.warning(f"⚠️ Публикация уже запущена для пользователя {user_id}")
@@ -130,7 +157,14 @@ class Publisher:
             published = 0
             
             for folder_name in subfolders:
-                # Проверяем состояние
+                # Проверяем глобальный стоп
+                if GLOBAL_STOP:
+                    logger.info(f"⏹️ ГЛОБАЛЬНАЯ ОСТАНОВКА! Публикация прервана для {user_id}")
+                    self.api.send_message(user_id, "⏹️ Публикация прервана глобальной остановкой.")
+                    self.user_states[user_id] = UserState.STOPPED
+                    break
+                
+                # Проверяем состояние пользователя
                 if self.user_states.get(user_id) == UserState.STOPPED:
                     logger.info(f"⏹️ Публикация остановлена пользователем {user_id}")
                     break
@@ -154,15 +188,22 @@ class Publisher:
                         logger.warning(f"⚠️ Не удалось извлечь ID чата из {folder_name}")
                         continue
                     
-                    # Получаем отсортированные изображения (до 3)
-                    images = self.get_sorted_images(folder_path, max_count=3)
+                    # Получаем до 10 изображений
+                    images = self.get_sorted_images(folder_path, max_count=10)
                     logger.info(f"📤 Публикация в чат {chat_id}: {folder_name}, фото: {len(images)}")
                     
-                    # Проверяем состояние
+                    # Проверяем глобальный стоп
+                    if GLOBAL_STOP:
+                        logger.info(f"⏹️ ГЛОБАЛЬНАЯ ОСТАНОВКА! Публикация прервана для {user_id}")
+                        self.api.send_message(user_id, "⏹️ Публикация прервана глобальной остановкой.")
+                        self.user_states[user_id] = UserState.STOPPED
+                        break
+                    
+                    # Проверяем состояние пользователя
                     if self.user_states.get(user_id) == UserState.STOPPED:
                         break
                     
-                    # Подготавливаем фото
+                    # Подготавливаем фото (до 10 штук)
                     photo_files = []
                     for img_name in images:
                         img_path = os.path.join(folder_path, img_name)
@@ -174,12 +215,12 @@ class Publisher:
                         except Exception as e:
                             logger.error(f"❌ Ошибка сжатия {img_name}: {e}")
                     
-                    # Отправляем ОДНО сообщение с текстом и фото (до 3 фото в одном сообщении)
+                    # Отправляем ОДНО сообщение с текстом и фото (до 10 фото)
                     if photo_files:
                         success = self.api.send_photos_to_chat(
                             chat_id=chat_id,
                             photo_files=photo_files,
-                            text=text  # ← текст объявления передаётся здесь
+                            text=text
                         )
                     else:
                         # Если фото нет, шлём хотя бы текст
@@ -218,7 +259,7 @@ class Publisher:
             return False
     
     def stop(self, user_id):
-        """Останавливает публикацию"""
+        """Останавливает публикацию для конкретного пользователя"""
         current_state = self.user_states.get(user_id, UserState.IDLE)
         
         if current_state == UserState.PUBLISHING:
