@@ -19,8 +19,12 @@ try:
     from maxapi import Bot
     from maxapi.types import InputMedia
     MAXAPI_AVAILABLE = True
+    logger = logging.getLogger(__name__)
+    logger.info("✅ Библиотека maxapi успешно импортирована")
 except ImportError:
     MAXAPI_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logger.warning("⚠️ Библиотека maxapi не установлена")
     class InputMedia:
         def __init__(self, file_path=None, file_data=None, filename=None):
             self.file_path = file_path
@@ -56,10 +60,8 @@ def run_async(coro):
     """Запускает асинхронную функцию в существующем event loop"""
     try:
         if loop.is_running():
-            # Если loop уже запущен, создаем задачу
             return asyncio.create_task(coro)
         else:
-            # Иначе запускаем через run_until_complete
             return loop.run_until_complete(coro)
     except Exception as e:
         logger.error(f"❌ Ошибка выполнения асинхронной функции: {e}")
@@ -90,7 +92,7 @@ class APIClient:
                         text=text,
                         attachments=attachments
                     )
-                result = run_async(send())
+                run_async(send())
                 logger.info(f"📤 Отправка сообщения пользователю {user_id} через maxapi")
                 return True
             else:
@@ -122,7 +124,7 @@ class APIClient:
                         chat_id=chat_id,
                         text=text
                     )
-                result = run_async(send())
+                run_async(send())
                 logger.info(f"📤 Отправка сообщения в чат {chat_id} через maxapi")
                 return True
             else:
@@ -167,11 +169,10 @@ class APIClient:
                         text=caption or f"📸 {len(photo_files)} фото",
                         attachments=attachments
                     )
-                result = run_async(send())
+                run_async(send())
                 logger.info(f"📤 Отправка {len(photo_files)} фото в чат {chat_id} через maxapi")
                 return True
             else:
-                # Fallback метод
                 success_count = 0
                 for idx, (filename, data) in enumerate(photo_files):
                     photo_base64 = base64.b64encode(data).decode('utf-8')
@@ -232,7 +233,7 @@ class APIClient:
                         text=text,
                         attachments=attachments
                     )
-                result = run_async(send())
+                run_async(send())
                 logger.info(f"📤 Отправка с вложениями в чат {chat_id} через maxapi")
                 return True
             else:
@@ -787,7 +788,7 @@ def webhook():
                 user_id,
                 "🏠 **Главное меню**\n\n"
                 "🌐 **Загрузите папку с объявлениями через веб-интерфейс:**\n"
-                f"🔗 `https://maxbot.bothost.tech/upload`\n\n"
+                "🔗 https://maxbot.bothost.tech/upload\n\n"
                 "📌 **Требования к папке:**\n"
                 "• Внутри папки должны быть подпапки с названиями: `Название -123456789`\n"
                 "• В каждой подпапке: `info.txt` (текст объявления) и изображения\n"
