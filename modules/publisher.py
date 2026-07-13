@@ -109,6 +109,7 @@ class Publisher:
             user_folder = self.fm.get_user_folder(user_id)
             samosvaly_path = os.path.join(user_folder, "Самосвалы")
             
+            # Получаем список подпапок
             if os.path.exists(samosvaly_path) and os.path.isdir(samosvaly_path):
                 subfolders = []
                 for item in os.listdir(samosvaly_path):
@@ -118,13 +119,7 @@ class Publisher:
                         if os.path.exists(info_path):
                             subfolders.append(item)
             else:
-                subfolders = []
-                for item in os.listdir(user_folder):
-                    item_path = os.path.join(user_folder, item)
-                    if os.path.isdir(item_path):
-                        info_path = os.path.join(item_path, 'info.txt')
-                        if os.path.exists(info_path):
-                            subfolders.append(item)
+                subfolders = self.fm.get_subfolders(user_id)
             
             if not subfolders:
                 self.api.send_message(user_id, "❌ Нет папок с объявлениями для публикации.")
@@ -141,34 +136,6 @@ class Publisher:
                     break
                 
                 try:
-                    if os.path.exists(samosvaly_path):
-                        folder_path = os.path.join(samosvaly_path, folder_name)
-                    else:
-                        folder_path = os.path.join(user_folder, folder_name)
-                    
-                    info_path = os.path.join(folder_path, 'info.txt')
-                    if not os.path.exists(info_path):
-                        continue
-                    
-                    with open(info_path, 'r', encoding='utf-8') as f:
-                        text = f.read()
-                    
-                    chat_id = self.extract_chat_id(folder_name)
-                    if not chat_id:
-                        logger.warning(f"⚠️ Не удалось извлечь ID чата из {folder_name}")
-                        continue
-                    
-                    images = self.get_sorted_images(folder_path, max_count=3)
-                    
-                    logger.info(f"📤 Публикация в чат {chat_id}: {folder_name}")
-                    logger.info(f"🖼️ Найдено {len(images)} изображений")
-                    
-                    # Проверяем состояние перед отправкой
-                    if self.user_states.get(user_id) == UserState.STOPPED:
-                        logger.info(f"⏹️ Публикация остановлена пользователем {user_id}")
-                        break
-                    
-                                    try:
                     # Определяем путь к папке
                     if os.path.exists(samosvaly_path):
                         folder_path = os.path.join(samosvaly_path, folder_name)
@@ -187,6 +154,7 @@ class Publisher:
                         logger.warning(f"⚠️ Не удалось извлечь ID чата из {folder_name}")
                         continue
                     
+                    # Получаем отсортированные изображения (до 3)
                     images = self.get_sorted_images(folder_path, max_count=3)
                     logger.info(f"📤 Публикация в чат {chat_id}: {folder_name}, фото: {len(images)}")
                     
@@ -206,12 +174,12 @@ class Publisher:
                         except Exception as e:
                             logger.error(f"❌ Ошибка сжатия {img_name}: {e}")
                     
-                    # Отправляем ОДНО сообщение с текстом и фото
+                    # Отправляем ОДНО сообщение с текстом и фото (до 3 фото в одном сообщении)
                     if photo_files:
                         success = self.api.send_photos_to_chat(
                             chat_id=chat_id,
                             photo_files=photo_files,
-                            text=text        # ← текст объявления передаётся здесь
+                            text=text  # ← текст объявления передаётся здесь
                         )
                     else:
                         # Если фото нет, шлём хотя бы текст
@@ -225,7 +193,11 @@ class Publisher:
                     self.db.add_publication(user_id, folder_name, chat_id)
                     published += 1
                     logger.info(f"✅ Опубликовано: {folder_name}")
-                    time.sleep(2)   # задержка между постами (регулируйте)
+                    time.sleep(2)  # задержка между постами
+                    
+                except Exception as e:
+                    logger.error(f"❌ Ошибка при публикации {folder_name}: {e}")
+                    continue
             
             # Завершаем публикацию
             self.user_states[user_id] = UserState.IDLE
