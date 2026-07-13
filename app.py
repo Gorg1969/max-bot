@@ -88,26 +88,37 @@ class APIClient:
             for i, (filename, data) in enumerate(photo_files):
                 logger.info(f"📤 Загрузка фото {i+1}/{len(photo_files)}: {filename}")
                 
-                # 1. Загружаем файл через /uploads с указанием типа
+                # 1. Загружаем файл через /uploads с указанием типа в query-параметре
                 files = {
                     'file': (filename, data, 'image/jpeg')
                 }
                 
-                # Добавляем параметр type
-                data_form = {
-                    'type': 'image'
-                }
-                
+                # Пробуем отправить type как query-параметр
                 upload_response = requests.post(
-                    f"{self.base_url}/uploads",
+                    f"{self.base_url}/uploads?type=image",
                     headers={"Authorization": self.token},
-                    data=data_form,
                     files=files,
                     timeout=30,
                     verify=False
                 )
                 
                 logger.info(f"📤 Загрузка фото {i+1}: статус {upload_response.status_code}")
+                
+                # Если не получилось с query-параметром, пробуем с data
+                if upload_response.status_code != 200:
+                    logger.warning(f"⚠️ Попытка с query-параметром не удалась, пробуем с data")
+                    
+                    # Пробуем с data
+                    upload_response = requests.post(
+                        f"{self.base_url}/uploads",
+                        headers={"Authorization": self.token},
+                        data={"type": "image"},
+                        files=files,
+                        timeout=30,
+                        verify=False
+                    )
+                    
+                    logger.info(f"📤 Загрузка фото {i+1} (с data): статус {upload_response.status_code}")
                 
                 if upload_response.status_code != 200:
                     logger.error(f"❌ Ошибка загрузки {filename}: {upload_response.status_code}")
