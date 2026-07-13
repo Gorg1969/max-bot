@@ -45,6 +45,26 @@ TOKEN = os.environ.get("TOKEN") or os.environ.get("MAX_BOT_TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
 DATA_DIR = "/app/data"
 
+# Создаем один event loop для всего приложения
+try:
+    loop = asyncio.get_event_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+def run_async(coro):
+    """Запускает асинхронную функцию в существующем event loop"""
+    try:
+        if loop.is_running():
+            # Если loop уже запущен, создаем задачу
+            return asyncio.create_task(coro)
+        else:
+            # Иначе запускаем через run_until_complete
+            return loop.run_until_complete(coro)
+    except Exception as e:
+        logger.error(f"❌ Ошибка выполнения асинхронной функции: {e}")
+        return None
+
 # ========== ИНИЦИАЛИЗАЦИЯ МОДУЛЕЙ ==========
 db = Database()
 fm = FileManager(DATA_DIR)
@@ -64,14 +84,13 @@ class APIClient:
         """Отправляет сообщение пользователю"""
         try:
             if MAXAPI_AVAILABLE and self.bot:
-                # Используем asyncio для вызова async метода
                 async def send():
                     return await self.bot.send_message(
                         user_id=user_id,
                         text=text,
                         attachments=attachments
                     )
-                asyncio.run(send())
+                result = run_async(send())
                 logger.info(f"📤 Отправка сообщения пользователю {user_id} через maxapi")
                 return True
             else:
@@ -103,7 +122,7 @@ class APIClient:
                         chat_id=chat_id,
                         text=text
                     )
-                asyncio.run(send())
+                result = run_async(send())
                 logger.info(f"📤 Отправка сообщения в чат {chat_id} через maxapi")
                 return True
             else:
@@ -148,7 +167,7 @@ class APIClient:
                         text=caption or f"📸 {len(photo_files)} фото",
                         attachments=attachments
                     )
-                asyncio.run(send())
+                result = run_async(send())
                 logger.info(f"📤 Отправка {len(photo_files)} фото в чат {chat_id} через maxapi")
                 return True
             else:
@@ -213,7 +232,7 @@ class APIClient:
                         text=text,
                         attachments=attachments
                     )
-                asyncio.run(send())
+                result = run_async(send())
                 logger.info(f"📤 Отправка с вложениями в чат {chat_id} через maxapi")
                 return True
             else:
