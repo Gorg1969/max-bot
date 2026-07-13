@@ -13,6 +13,24 @@ from PIL import Image, ExifTags
 import io
 from modules import Database, FileManager, Publisher, WebInterface
 
+# Импортируем maxapi
+try:
+    from maxapi import Bot
+    from maxapi.types import InputMedia
+    MAXAPI_AVAILABLE = True
+    logger = logging.getLogger(__name__)
+    logger.info("✅ Библиотека maxapi успешно импортирована")
+except ImportError:
+    MAXAPI_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logger.warning("⚠️ Библиотека maxapi не установлена, используем стандартные методы")
+    # Создаем заглушку
+    class InputMedia:
+        def __init__(self, file_path=None, file_data=None, filename=None):
+            self.file_path = file_path
+            self.file_data = file_data
+            self.filename = filename
+
 # ОТКЛЮЧАЕМ ПРЕДУПРЕЖДЕНИЯ SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -36,25 +54,42 @@ class APIClient:
     def __init__(self):
         self.token = TOKEN
         self.base_url = BASE_URL
+        # Инициализируем бота для maxapi
+        if MAXAPI_AVAILABLE:
+            self.bot = Bot(token=TOKEN)
+            logger.info("✅ Бот MAX API инициализирован")
+        else:
+            self.bot = None
 
     def send_message(self, user_id, text, attachments=None):
         """Отправляет сообщение пользователю"""
         try:
-            payload = {"text": text, "format": "markdown"}
-            if attachments:
-                payload["attachments"] = attachments
-            response = requests.post(
-                f"{self.base_url}/messages",
-                headers={"Authorization": self.token, "Content-Type": "application/json"},
-                params={"user_id": user_id},
-                json=payload,
-                timeout=30,
-                verify=False
-            )
-            logger.info(f"📤 Отправка сообщения пользователю {user_id}, статус: {response.status_code}")
-            if response.status_code != 200:
-                logger.error(f"❌ Ошибка отправки: {response.text}")
-            return response.status_code == 200
+            if MAXAPI_AVAILABLE and self.bot:
+                # Используем maxapi
+                self.bot.send_message(
+                    user_id=user_id,
+                    text=text,
+                    attachments=attachments
+                )
+                logger.info(f"📤 Отправка сообщения пользователю {user_id} через maxapi")
+                return True
+            else:
+                # Используем стандартный метод
+                payload = {"text": text, "format": "markdown"}
+                if attachments:
+                    payload["attachments"] = attachments
+                response = requests.post(
+                    f"{self.base_url}/messages",
+                    headers={"Authorization": self.token, "Content-Type": "application/json"},
+                    params={"user_id": user_id},
+                    json=payload,
+                    timeout=30,
+                    verify=False
+                )
+                logger.info(f"📤 Отправка сообщения пользователю {user_id}, статус: {response.status_code}")
+                if response.status_code != 200:
+                    logger.error(f"❌ Ошибка отправки: {response.text}")
+                return response.status_code == 200
         except Exception as e:
             logger.error(f"❌ Ошибка отправки: {e}")
             return False
@@ -62,86 +97,78 @@ class APIClient:
     def send_message_to_chat(self, chat_id, text):
         """Отправляет сообщение в чат по ID группы (с дефисом)"""
         try:
-            payload = {"text": text, "format": "markdown"}
-            response = requests.post(
-                f"{self.base_url}/messages",
-                headers={"Authorization": self.token, "Content-Type": "application/json"},
-                params={"chat_id": chat_id},
-                json=payload,
-                timeout=30,
-                verify=False
-            )
-            logger.info(f"📤 Отправка сообщения в чат {chat_id}, статус: {response.status_code}")
-            if response.status_code != 200:
-                logger.error(f"❌ Ошибка отправки в чат: {response.text}")
-            return response.status_code == 200
+            if MAXAPI_AVAILABLE and self.bot:
+                # Используем maxapi
+                self.bot.send_message(
+                    chat_id=chat_id,
+                    text=text
+                )
+                logger.info(f"📤 Отправка сообщения в чат {chat_id} через maxapi")
+                return True
+            else:
+                payload = {"text": text, "format": "markdown"}
+                response = requests.post(
+                    f"{self.base_url}/messages",
+                    headers={"Authorization": self.token, "Content-Type": "application/json"},
+                    params={"chat_id": chat_id},
+                    json=payload,
+                    timeout=30,
+                    verify=False
+                )
+                logger.info(f"📤 Отправка сообщения в чат {chat_id}, статус: {response.status_code}")
+                if response.status_code != 200:
+                    logger.error(f"❌ Ошибка отправки в чат: {response.text}")
+                return response.status_code == 200
         except Exception as e:
             logger.error(f"❌ Ошибка отправки в чат: {e}")
             return False
 
     def send_photos_to_chat(self, chat_id, photo_files, caption=None):
         """
-        Отправляет фото в чат через attachments в JSON формате
-        Как требует MAX API - через InputMedia
+        Отправляет фото в чат используя InputMedia из maxapi
         """
         try:
-            # Проверяем общий размер
-            total_size = sum(len(data) for _, data in photo_files)
-            total_size_mb = total_size / (1024 * 1024)
-            
-            # Если общий размер меньше 2 МБ - отправляем все вместе
-            if total_size_mb < 2 and len(photo_files) <= 3:
+            if MAXAPI_AVAILABLE and self.bot:
+                # Создаем список InputMedia для всех фото
                 attachments = []
                 for filename, data in photo_files:
-                    photo_base64 = base64.b64encode(data).decode('utf-8')
-                    attachments.append({
-                        "type": "image",
-                        "payload": {
-                            "data": photo_base64,
-                            "filename": filename
-                        }
-                    })
+                    # Сохраняем фото во временный файл для InputMedia
+                    temp_path = f"/tmp/{filename}"
+                    with open(temp_path, 'wb') as f:
+                        f.write(data)
+                    
+                    # Создаем InputMedia из файла
+                    media = InputMedia(temp_path)
+                    attachments.append(media)
+                    
+                    # Удаляем временный файл
+                    try:
+                        os.remove(temp_path)
+                    except:
+                        pass
                 
-                payload = {
-                    "text": caption or f"📸 {len(photo_files)} фото",
-                    "format": "markdown",
-                    "attachments": attachments
-                }
-                
-                response = requests.post(
-                    f"{self.base_url}/messages",
-                    headers={
-                        "Authorization": self.token,
-                        "Content-Type": "application/json"
-                    },
-                    params={"chat_id": chat_id},
-                    json=payload,
-                    timeout=120,
-                    verify=False
+                # Отправляем все фото одним сообщением
+                self.bot.send_message(
+                    chat_id=chat_id,
+                    text=caption or f"📸 {len(photo_files)} фото",
+                    attachments=attachments
                 )
-                
-                logger.info(f"📤 Отправка {len(photo_files)} фото в чат {chat_id}, статус: {response.status_code}")
-                if response.status_code != 200:
-                    logger.error(f"❌ Ошибка отправки фото: {response.status_code} {response.text[:500]}")
-                    return False
+                logger.info(f"📤 Отправка {len(photo_files)} фото в чат {chat_id} через maxapi")
                 return True
-            
-            # Если фото большие или их много - отправляем по одному
             else:
+                # Если maxapi не доступен, используем стандартный метод
                 success_count = 0
-                
                 for idx, (filename, data) in enumerate(photo_files):
                     photo_base64 = base64.b64encode(data).decode('utf-8')
                     
                     attachments = [{
-                        "type": "image",
+                        "type": "photo",
                         "payload": {
                             "data": photo_base64,
                             "filename": filename
                         }
                     }]
                     
-                    # Для первого фото используем caption, для остальных - номер
                     if idx == 0 and caption:
                         text = caption
                     else:
@@ -171,7 +198,6 @@ class APIClient:
                     else:
                         logger.error(f"❌ Ошибка отправки фото {filename}: {response.status_code} {response.text[:200]}")
                     
-                    # Пауза между фото
                     if idx < len(photo_files) - 1:
                         time.sleep(1)
                 
@@ -186,23 +212,33 @@ class APIClient:
     def send_message_to_chat_with_attachments(self, chat_id, text, attachments):
         """Отправляет сообщение с вложениями в чат"""
         try:
-            payload = {
-                "text": text,
-                "format": "markdown",
-                "attachments": attachments
-            }
-            response = requests.post(
-                f"{self.base_url}/messages",
-                headers={"Authorization": self.token, "Content-Type": "application/json"},
-                params={"chat_id": chat_id},
-                json=payload,
-                timeout=30,
-                verify=False
-            )
-            logger.info(f"📤 Отправка с вложениями в чат {chat_id}, статус: {response.status_code}")
-            if response.status_code != 200:
-                logger.error(f"❌ Ошибка отправки с вложениями: {response.text}")
-            return response.status_code == 200
+            if MAXAPI_AVAILABLE and self.bot:
+                # Используем maxapi
+                self.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    attachments=attachments
+                )
+                logger.info(f"📤 Отправка с вложениями в чат {chat_id} через maxapi")
+                return True
+            else:
+                payload = {
+                    "text": text,
+                    "format": "markdown",
+                    "attachments": attachments
+                }
+                response = requests.post(
+                    f"{self.base_url}/messages",
+                    headers={"Authorization": self.token, "Content-Type": "application/json"},
+                    params={"chat_id": chat_id},
+                    json=payload,
+                    timeout=30,
+                    verify=False
+                )
+                logger.info(f"📤 Отправка с вложениями в чат {chat_id}, статус: {response.status_code}")
+                if response.status_code != 200:
+                    logger.error(f"❌ Ошибка отправки с вложениями: {response.text}")
+                return response.status_code == 200
         except Exception as e:
             logger.error(f"❌ Ошибка отправки с вложениями: {e}")
             return False
