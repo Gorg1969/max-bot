@@ -77,60 +77,35 @@ class APIClient:
         """
         Отправляет фото в чат вместе с текстом объявления одним сообщением.
         photo_files: список кортежей (filename, binary_data)
+        
+        В MAX API фото отправляются через multipart/form-data с полем file
         """
         try:
-            # Сначала загружаем каждое фото на сервер MAX
-            attachments = []
-            
+            # Подготавливаем файлы для отправки
+            files = []
             for filename, data in photo_files:
-                # Загружаем файл на сервер MAX
-                upload_response = requests.post(
-                    f"{self.base_url}/files",
-                    headers={"Authorization": self.token},
-                    files={"file": (filename, data, 'image/jpeg')},
-                    timeout=30,
-                    verify=False
+                files.append(
+                    ('file', (filename, data, 'image/jpeg'))
                 )
-                
-                if upload_response.status_code == 200:
-                    file_info = upload_response.json()
-                    # Получаем ID загруженного файла
-                    file_id = file_info.get('id')
-                    if file_id:
-                        attachments.append({
-                            "type": "photo",
-                            "id": file_id
-                        })
-                        logger.info(f"✅ Загружено фото: {filename}")
-                    else:
-                        logger.error(f"❌ Не удалось получить ID для {filename}")
-                        logger.error(f"Ответ: {file_info}")
-                else:
-                    logger.error(f"❌ Ошибка загрузки фото {filename}: {upload_response.status_code}")
-                    logger.error(f"Ответ: {upload_response.text[:200]}")
-                    return False
             
-            if not attachments:
-                logger.error("❌ Нет загруженных фото")
-                return False
-            
-            # Отправляем сообщение с вложениями
-            payload = {
+            # Подготавливаем данные
+            data = {
+                "chat_id": chat_id,
                 "text": text or caption or "",
-                "format": "markdown",
-                "attachments": attachments
+                "format": "markdown"
             }
             
+            # Отправляем запрос с файлами
             response = requests.post(
                 f"{self.base_url}/messages",
-                headers={"Authorization": self.token, "Content-Type": "application/json"},
-                params={"chat_id": chat_id},
-                json=payload,
-                timeout=30,
+                headers={"Authorization": self.token},
+                data=data,
+                files=files,
+                timeout=60,
                 verify=False
             )
             
-            logger.info(f"📤 Отправка {len(attachments)} фото в чат {chat_id}, статус: {response.status_code}")
+            logger.info(f"📤 Отправка {len(photo_files)} фото в чат {chat_id}, статус: {response.status_code}")
             if response.status_code != 200:
                 logger.error(f"❌ Ошибка отправки: {response.text[:300]}")
             else:
