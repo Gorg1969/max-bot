@@ -6,7 +6,6 @@ import shutil
 import urllib3
 import json
 import time
-import base64
 from modules import Database, FileManager, Publisher, WebInterface
 
 # ОТКЛЮЧАЕМ ПРЕДУПРЕЖДЕНИЯ SSL
@@ -78,49 +77,103 @@ class APIClient:
     def send_photos_to_chat(self, chat_id, photo_files, text=None, caption=None):
         """
         Отправляет фото в чат.
-        Использует data URL (base64) для изображений.
+        Правильная загрузка через /uploads с получением token.
         """
         try:
             if not photo_files:
                 return self.send_message_to_chat(chat_id, text or caption or "")
             
-            # Подготавливаем attachments с base64 изображениями
-            attachments = []
+            success = True
             
-            for filename, data in photo_files:
-                # Конвертируем изображение в base64
-                base64_data = base64.b64encode(data).decode('utf-8')
+            for i, (filename, data) in enumerate(photo_files):
+                logger.info(f"📤 Загрузка фото {i+1}/{len(photo_files)}: {filename}")
                 
-                # Создаем data URL
-                data_url = f"data:image/jpeg;base64,{base64_data}"
+                # 1. Загружаем файл через /uploads
+                files = {
+                    'file': (filename, data, 'image/jpeg')
+                }
                 
-                attachments.append({
-                    "type": "image",
-                    "payload": {"url": data_url}
-                })
+                # Пробуем с type как query-параметр
+                upload_response = requests.post(
+                    f"{self.base_url}/uploads?type=image",
+                    headers={"Authorization": self.token},
+                    files=files,
+                    timeout=30,
+                    verify=False
+                )
+                
+                logger.info(f"📤 Загрузка фото {i+1}: статус {upload_response.status_code}")
+                
+                if upload_response.status_code != 200:
+                    # Пробуем с type в теле
+                    files_with_type = {
+                        'file': (filename, data, 'image/jpeg'),
+                        'type': (None, 'image')
+                    }
+                    upload_response = requests.post(
+                        f"{self.base_url}/uploads",
+                        headers={"Authorization": self.token},
+                        files=files_with_type,
+                        timeout=30,
+                        verify=False
+                    )
+                    logger.info(f"📤 Загрузка фото {i+1} (с type в теле): статус {upload_response.status_code}")
+                
+                if upload_response.status_code != 200:
+                    logger.error(f"❌ Ошибка загрузки {filename}: {upload_response.status_code}")
+                    logger.error(f"Ответ: {upload_response.text[:500]}")
+                    success = False
+                    break
+                
+                upload_data = upload_response.json()
+                logger.info(f"📤 Ответ загрузки: {upload_data}")
+                
+                # Получаем token
+                token = upload_data.get('token') or upload_data.get('id')
+                
+                if not token:
+                    logger.error(f"❌ Не удалось получить token: {upload_data}")
+                    success = False
+                    break
+                
+                logger.info(f"✅ Фото загружено: {filename}, token: {token[:20]}...")
+                
+                # 2. Отправляем сообщение с фото
+                payload = {
+                    "format": "markdown",
+                    "attachments": [
+                        {
+                            "type": "image",
+                            "payload": {"token": token}
+                        }
+                    ]
+                }
+                
+                if i == 0 and text:
+                    payload["text"] = text
+                
+                response = requests.post(
+                    f"{self.base_url}/messages",
+                    headers={"Authorization": self.token, "Content-Type": "application/json"},
+                    params={"chat_id": chat_id},
+                    json=payload,
+                    timeout=30,
+                    verify=False
+                )
+                
+                logger.info(f"📤 Отправка фото {i+1}/{len(photo_files)} в чат {chat_id}, статус: {response.status_code}")
+                
+                if response.status_code != 200:
+                    logger.error(f"❌ Ошибка отправки фото {i+1}: {response.text[:500]}")
+                    success = False
+                    break
+                else:
+                    logger.info(f"✅ Фото {i+1} отправлено успешно")
+                
+                if i < len(photo_files) - 1:
+                    time.sleep(1)
             
-            # Отправляем все фото в одном сообщении
-            payload = {
-                "text": text or caption or "",
-                "format": "markdown",
-                "attachments": attachments
-            }
-            
-            response = requests.post(
-                f"{self.base_url}/messages",
-                headers={"Authorization": self.token, "Content-Type": "application/json"},
-                params={"chat_id": chat_id},
-                json=payload,
-                timeout=60,
-                verify=False
-            )
-            
-            logger.info(f"📤 Отправка {len(attachments)} фото в чат {chat_id}, статус: {response.status_code}")
-            if response.status_code != 200:
-                logger.error(f"❌ Ошибка отправки: {response.text[:500]}")
-            else:
-                logger.info(f"✅ Ответ API: {response.json()}")
-            return response.status_code == 200
+            return success
             
         except Exception as e:
             logger.error(f"❌ Ошибка отправки фото: {e}")
