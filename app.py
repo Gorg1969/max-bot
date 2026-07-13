@@ -76,19 +76,21 @@ class APIClient:
 
     def send_photos_to_chat(self, chat_id, photo_files, text=None, caption=None):
         """
-        Отправляет фото в чат.
-        Правильная загрузка через /uploads с получением token.
+        Отправляет все фото в одном сообщении.
+        Сначала загружает все фото через /uploads, получает токены,
+        затем отправляет одно сообщение со всеми фото и текстом.
         """
         try:
             if not photo_files:
                 return self.send_message_to_chat(chat_id, text or caption or "")
             
-            success = True
+            # Загружаем все фото и получаем токены
+            attachments = []
             
-            for i, (filename, data) in enumerate(photo_files):
-                logger.info(f"📤 Загрузка фото {i+1}/{len(photo_files)}: {filename}")
+            for filename, data in photo_files:
+                logger.info(f"📤 Загрузка фото: {filename}")
                 
-                # 1. Загружаем файл через /uploads
+                # Загружаем файл через /uploads
                 files = {
                     'file': (filename, data, 'image/jpeg')
                 }
@@ -101,8 +103,6 @@ class APIClient:
                     timeout=30,
                     verify=False
                 )
-                
-                logger.info(f"📤 Загрузка фото {i+1}: статус {upload_response.status_code}")
                 
                 if upload_response.status_code != 200:
                     # Пробуем с type в теле
@@ -117,13 +117,11 @@ class APIClient:
                         timeout=30,
                         verify=False
                     )
-                    logger.info(f"📤 Загрузка фото {i+1} (с type в теле): статус {upload_response.status_code}")
                 
                 if upload_response.status_code != 200:
                     logger.error(f"❌ Ошибка загрузки {filename}: {upload_response.status_code}")
                     logger.error(f"Ответ: {upload_response.text[:500]}")
-                    success = False
-                    break
+                    return False
                 
                 upload_data = upload_response.json()
                 logger.info(f"📤 Ответ загрузки: {upload_data}")
@@ -133,47 +131,37 @@ class APIClient:
                 
                 if not token:
                     logger.error(f"❌ Не удалось получить token: {upload_data}")
-                    success = False
-                    break
+                    return False
                 
-                logger.info(f"✅ Фото загружено: {filename}, token: {token[:20]}...")
-                
-                # 2. Отправляем сообщение с фото
-                payload = {
-                    "format": "markdown",
-                    "attachments": [
-                        {
-                            "type": "image",
-                            "payload": {"token": token}
-                        }
-                    ]
-                }
-                
-                if i == 0 and text:
-                    payload["text"] = text
-                
-                response = requests.post(
-                    f"{self.base_url}/messages",
-                    headers={"Authorization": self.token, "Content-Type": "application/json"},
-                    params={"chat_id": chat_id},
-                    json=payload,
-                    timeout=30,
-                    verify=False
-                )
-                
-                logger.info(f"📤 Отправка фото {i+1}/{len(photo_files)} в чат {chat_id}, статус: {response.status_code}")
-                
-                if response.status_code != 200:
-                    logger.error(f"❌ Ошибка отправки фото {i+1}: {response.text[:500]}")
-                    success = False
-                    break
-                else:
-                    logger.info(f"✅ Фото {i+1} отправлено успешно")
-                
-                if i < len(photo_files) - 1:
-                    time.sleep(1)
+                # Добавляем в attachments
+                attachments.append({
+                    "type": "image",
+                    "payload": {"token": token}
+                })
+                logger.info(f"✅ Фото загружено: {filename}")
             
-            return success
+            # Отправляем ОДНО сообщение со всеми фото и текстом
+            payload = {
+                "text": text or caption or "",
+                "format": "markdown",
+                "attachments": attachments
+            }
+            
+            response = requests.post(
+                f"{self.base_url}/messages",
+                headers={"Authorization": self.token, "Content-Type": "application/json"},
+                params={"chat_id": chat_id},
+                json=payload,
+                timeout=60,
+                verify=False
+            )
+            
+            logger.info(f"📤 Отправка {len(attachments)} фото в чат {chat_id}, статус: {response.status_code}")
+            if response.status_code != 200:
+                logger.error(f"❌ Ошибка отправки: {response.text[:500]}")
+            else:
+                logger.info(f"✅ Ответ API: {response.json()}")
+            return response.status_code == 200
             
         except Exception as e:
             logger.error(f"❌ Ошибка отправки фото: {e}")
