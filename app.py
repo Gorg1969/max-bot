@@ -6,7 +6,6 @@ import shutil
 import urllib3
 import json
 import time
-import urllib.parse
 from modules import Database, FileManager, Publisher, WebInterface
 
 # ОТКЛЮЧАЕМ ПРЕДУПРЕЖДЕНИЯ SSL
@@ -78,19 +77,18 @@ class APIClient:
     def send_photos_to_chat(self, chat_id, photo_files, text=None, caption=None):
         """
         Отправляет все фото в одном сообщении.
-        Использует photoIds из URL как идентификатор.
+        Использует прямую URL-ссылку для изображений.
         """
         try:
             if not photo_files:
                 return self.send_message_to_chat(chat_id, text or caption or "")
             
-            # Загружаем все фото и получаем photoIds
             attachments = []
             
             for filename, data in photo_files:
                 logger.info(f"📤 Загрузка фото: {filename}")
                 
-                # Загружаем файл через /uploads
+                # Загружаем фото через /uploads
                 files = {
                     'file': (filename, data, 'image/jpeg')
                 }
@@ -111,26 +109,19 @@ class APIClient:
                 upload_data = upload_response.json()
                 logger.info(f"📤 Ответ загрузки: {upload_data}")
                 
-                upload_url = upload_data.get('url')
-                if not upload_url:
-                    logger.error(f"❌ Не удалось получить url: {upload_data}")
+                # Пробуем получить прямой URL
+                image_url = upload_data.get('url') or upload_data.get('link')
+                
+                if not image_url:
+                    # Если нет прямого URL, пробуем извлечь из ответа
+                    logger.error(f"❌ Не удалось получить URL: {upload_data}")
                     return False
                 
-                # Извлекаем photoIds из URL
-                parsed_url = urllib.parse.urlparse(upload_url)
-                query_params = urllib.parse.parse_qs(parsed_url.query)
-                photo_ids = query_params.get('photoIds', [None])[0]
-                
-                if not photo_ids:
-                    logger.error(f"❌ Не удалось получить photoIds из URL: {upload_url}")
-                    return False
-                
-                # Используем photoIds как token
                 attachments.append({
                     "type": "image",
-                    "payload": {"token": photo_ids}
+                    "payload": {"url": image_url}
                 })
-                logger.info(f"✅ Фото загружено: {filename}, photoIds: {photo_ids[:20]}...")
+                logger.info(f"✅ Фото загружено: {filename}")
             
             # Отправляем ОДНО сообщение со всеми фото и текстом
             payload = {
