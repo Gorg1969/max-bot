@@ -15,6 +15,7 @@ class Database:
     def _init_db(self):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
+        # Таблица токенов
         c.execute('''
             CREATE TABLE IF NOT EXISTS user_tokens (
                 user_id INTEGER PRIMARY KEY,
@@ -25,6 +26,7 @@ class Database:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        # Таблица публикаций
         c.execute('''
             CREATE TABLE IF NOT EXISTS publications (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,6 +41,8 @@ class Database:
         ''')
         conn.commit()
         conn.close()
+    
+    # ========== МЕТОДЫ ДЛЯ ТОКЕНОВ ==========
     
     def save_user_token(self, user_id, access_token, refresh_token=None, expires_in=None, token_type='Bearer'):
         conn = sqlite3.connect(self.db_path)
@@ -90,6 +94,8 @@ class Database:
         conn.close()
         logger.info(f"🗑️ Токен удалён для пользователя {user_id}")
     
+    # ========== МЕТОДЫ ДЛЯ ПУБЛИКАЦИЙ ==========
+    
     def add_publication(self, user_id, folder_name, group_id):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
@@ -102,6 +108,7 @@ class Database:
         logger.info(f"📝 Добавлена публикация: {folder_name} -> {group_id}")
     
     def update_status(self, folder_name, status, error=None):
+        """Обновление статуса публикации"""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         if error:
