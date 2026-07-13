@@ -9,7 +9,7 @@ import time
 import random
 import re
 import base64
-import tempfile
+import asyncio
 from PIL import Image, ExifTags
 import io
 from modules import Database, FileManager, Publisher, WebInterface
@@ -19,13 +19,8 @@ try:
     from maxapi import Bot
     from maxapi.types import InputMedia
     MAXAPI_AVAILABLE = True
-    logger = logging.getLogger(__name__)
-    logger.info("✅ Библиотека maxapi успешно импортирована")
-except ImportError as e:
+except ImportError:
     MAXAPI_AVAILABLE = False
-    logger = logging.getLogger(__name__)
-    logger.warning(f"⚠️ Библиотека maxapi не установлена: {e}")
-    # Создаем заглушку
     class InputMedia:
         def __init__(self, file_path=None, file_data=None, filename=None):
             self.file_path = file_path
@@ -58,32 +53,28 @@ class APIClient:
     def __init__(self):
         self.token = TOKEN
         self.base_url = BASE_URL
-        # Инициализируем бота для maxapi
         if MAXAPI_AVAILABLE:
-            try:
-                self.bot = Bot(token=TOKEN)
-                logger.info("✅ Бот MAX API инициализирован")
-            except Exception as e:
-                self.bot = None
-                logger.error(f"❌ Ошибка инициализации бота: {e}")
+            self.bot = Bot(token=TOKEN)
+            logger.info("✅ Бот MAX API инициализирован")
         else:
             self.bot = None
-            logger.warning("⚠️ maxapi не доступна, используются стандартные методы")
+            logger.warning("⚠️ maxapi не доступна")
 
     def send_message(self, user_id, text, attachments=None):
         """Отправляет сообщение пользователю"""
         try:
             if MAXAPI_AVAILABLE and self.bot:
-                # Используем maxapi
-                self.bot.send_message(
-                    user_id=user_id,
-                    text=text,
-                    attachments=attachments
-                )
+                # Используем asyncio для вызова async метода
+                async def send():
+                    return await self.bot.send_message(
+                        user_id=user_id,
+                        text=text,
+                        attachments=attachments
+                    )
+                asyncio.run(send())
                 logger.info(f"📤 Отправка сообщения пользователю {user_id} через maxapi")
                 return True
             else:
-                # Используем стандартный метод
                 payload = {"text": text, "format": "markdown"}
                 if attachments:
                     payload["attachments"] = attachments
@@ -107,11 +98,12 @@ class APIClient:
         """Отправляет сообщение в чат по ID группы (с дефисом)"""
         try:
             if MAXAPI_AVAILABLE and self.bot:
-                # Используем maxapi
-                self.bot.send_message(
-                    chat_id=chat_id,
-                    text=text
-                )
+                async def send():
+                    return await self.bot.send_message(
+                        chat_id=chat_id,
+                        text=text
+                    )
+                asyncio.run(send())
                 logger.info(f"📤 Отправка сообщения в чат {chat_id} через maxapi")
                 return True
             else:
@@ -133,45 +125,37 @@ class APIClient:
             return False
 
     def send_photos_to_chat(self, chat_id, photo_files, caption=None):
-        """
-        Отправляет фото в чат используя InputMedia из maxapi
-        """
+        """Отправляет фото в чат используя InputMedia из maxapi"""
         try:
             if MAXAPI_AVAILABLE and self.bot:
-                # Создаем список InputMedia для всех фото
+                import tempfile
                 attachments = []
                 
                 for filename, data in photo_files:
-                    # Сохраняем данные во временный файл
                     with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp:
                         tmp.write(data)
                         tmp_path = tmp.name
-                    
-                    # Создаем InputMedia
                     media = InputMedia(tmp_path)
                     attachments.append(media)
-                    
-                    # Удаляем временный файл
                     try:
                         os.unlink(tmp_path)
                     except:
                         pass
                 
-                # Отправляем все фото одним сообщением
-                self.bot.send_message(
-                    chat_id=chat_id,
-                    text=caption or f"📸 {len(photo_files)} фото",
-                    attachments=attachments
-                )
+                async def send():
+                    return await self.bot.send_message(
+                        chat_id=chat_id,
+                        text=caption or f"📸 {len(photo_files)} фото",
+                        attachments=attachments
+                    )
+                asyncio.run(send())
                 logger.info(f"📤 Отправка {len(photo_files)} фото в чат {chat_id} через maxapi")
                 return True
-            
             else:
-                # Если maxapi не доступен, используем метод с base64
+                # Fallback метод
                 success_count = 0
                 for idx, (filename, data) in enumerate(photo_files):
                     photo_base64 = base64.b64encode(data).decode('utf-8')
-                    
                     attachments = [{
                         "type": "photo",
                         "payload": {
@@ -179,7 +163,6 @@ class APIClient:
                             "filename": filename
                         }
                     }]
-                    
                     if idx == 0 and caption:
                         text = caption
                     else:
@@ -224,12 +207,13 @@ class APIClient:
         """Отправляет сообщение с вложениями в чат"""
         try:
             if MAXAPI_AVAILABLE and self.bot:
-                # Используем maxapi
-                self.bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    attachments=attachments
-                )
+                async def send():
+                    return await self.bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        attachments=attachments
+                    )
+                asyncio.run(send())
                 logger.info(f"📤 Отправка с вложениями в чат {chat_id} через maxapi")
                 return True
             else:
