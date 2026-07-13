@@ -11,16 +11,21 @@ class FileManager:
         os.makedirs(data_dir, exist_ok=True)
     
     def get_user_folder(self, user_id):
+        """Возвращает путь к папке пользователя"""
         user_folder = os.path.join(self.data_dir, f"user_{user_id}")
         os.makedirs(user_folder, exist_ok=True)
         return user_folder
     
     def get_temp_folder(self, user_id):
+        """Возвращает путь к временной папке для загрузки"""
         temp_folder = os.path.join(self.get_user_folder(user_id), "temp_upload")
         os.makedirs(temp_folder, exist_ok=True)
         return temp_folder
     
     def save_uploaded_files(self, files, user_id):
+        """
+        Сохраняет загруженные файлы с сохранением структуры папок
+        """
         try:
             temp_folder = self.get_temp_folder(user_id)
             
@@ -87,6 +92,7 @@ class FileManager:
             }
     
     def extract_zip(self, user_id, zip_path):
+        """Извлекает ZIP-архив в папку пользователя"""
         try:
             user_folder = self.get_user_folder(user_id)
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
@@ -98,6 +104,7 @@ class FileManager:
             return False
     
     def clear_user_data(self, user_id):
+        """Очищает данные пользователя"""
         user_folder = self.get_user_folder(user_id)
         if os.path.exists(user_folder):
             shutil.rmtree(user_folder)
@@ -105,6 +112,7 @@ class FileManager:
             logger.info(f"🗑️ Данные пользователя {user_id} очищены")
     
     def get_folders(self, user_id):
+        """Возвращает список папок с объявлениями пользователя"""
         user_folder = self.get_user_folder(user_id)
         folders = []
         if os.path.exists(user_folder):
@@ -117,9 +125,14 @@ class FileManager:
         return folders
     
     def get_folder_path(self, user_id, folder_name):
+        """Возвращает путь к конкретной папке объявления"""
         return os.path.join(self.get_user_folder(user_id), folder_name)
     
     def get_subfolders(self, user_id):
+        """
+        Возвращает список подпапок в папке пользователя (для Publisher)
+        Рекурсивно обходит все папки и ищет info.txt
+        """
         user_folder = self.get_user_folder(user_id)
         subfolders = []
         
@@ -127,6 +140,7 @@ class FileManager:
             logger.warning(f"⚠️ Папка пользователя {user_id} не существует")
             return subfolders
         
+        # Рекурсивно обходим все папки
         for root, dirs, files in os.walk(user_folder):
             if 'info.txt' in files:
                 folder_name = os.path.basename(root)
