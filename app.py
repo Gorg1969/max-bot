@@ -5,6 +5,12 @@ import os
 import shutil
 import urllib3
 import json
+import time
+import random
+import re
+import base64
+from PIL import Image, ExifTags
+import io
 from modules import Database, FileManager, Publisher, WebInterface
 
 # ОТКЛЮЧАЕМ ПРЕДУПРЕЖДЕНИЯ SSL
@@ -73,49 +79,112 @@ class APIClient:
             logger.error(f"❌ Ошибка отправки в чат: {e}")
             return False
 
-    def send_photos_to_chat(self, chat_id, photo_files, text=None, caption=None):
+    def send_photos_to_chat(self, chat_id, photo_files, caption=None):
         """
-        Отправляет фото в чат вместе с текстом объявления одним сообщением.
-        photo_files: список кортежей (filename, binary_data)
+        Отправляет фото в чат через attachments в JSON формате
+        Как требует MAX API - через InputMedia
         """
         try:
-            files = []
-            for filename, data in photo_files:
-                files.append(
-                    ('file', (filename, data, 'image/jpeg'))
+            # Проверяем общий размер
+            total_size = sum(len(data) for _, data in photo_files)
+            total_size_mb = total_size / (1024 * 1024)
+            
+            # Если общий размер меньше 2 МБ - отправляем все вместе
+            if total_size_mb < 2 and len(photo_files) <= 3:
+                attachments = []
+                for filename, data in photo_files:
+                    photo_base64 = base64.b64encode(data).decode('utf-8')
+                    attachments.append({
+                        "type": "image",
+                        "payload": {
+                            "data": photo_base64,
+                            "filename": filename
+                        }
+                    })
+                
+                payload = {
+                    "text": caption or f"📸 {len(photo_files)} фото",
+                    "format": "markdown",
+                    "attachments": attachments
+                }
+                
+                response = requests.post(
+                    f"{self.base_url}/messages",
+                    headers={
+                        "Authorization": self.token,
+                        "Content-Type": "application/json"
+                    },
+                    params={"chat_id": chat_id},
+                    json=payload,
+                    timeout=120,
+                    verify=False
                 )
-
-            # Все данные передаём через поле data, чтобы сервер Max их увидел
-            data = {"chat_id": chat_id}
-            if text:
-                data["text"] = text
-            if caption:
-                data["caption"] = caption
-
-            response = requests.post(
-                f"{self.base_url}/messages",
-                headers={"Authorization": self.token},
-                data=data,          # <-- chat_id и текст в теле формы
-                files=files,
-                timeout=120,
-                verify=False
-            )
-
-            logger.info(f"📤 Отправка {len(photo_files)} фото в чат {chat_id}, статус: {response.status_code}")
-            if response.status_code != 200:
-                # Выводим тело ответа для диагностики
-                logger.error(f"❌ Ошибка отправки фото: {response.status_code} {response.text[:300]}")
+                
+                logger.info(f"📤 Отправка {len(photo_files)} фото в чат {chat_id}, статус: {response.status_code}")
+                if response.status_code != 200:
+                    logger.error(f"❌ Ошибка отправки фото: {response.status_code} {response.text[:500]}")
+                    return False
+                return True
+            
+            # Если фото большие или их много - отправляем по одному
             else:
-                resp_json = response.json()
-                logger.info(f"✅ Ответ API: {resp_json}")
-            return response.status_code == 200
-
+                success_count = 0
+                
+                for idx, (filename, data) in enumerate(photo_files):
+                    photo_base64 = base64.b64encode(data).decode('utf-8')
+                    
+                    attachments = [{
+                        "type": "image",
+                        "payload": {
+                            "data": photo_base64,
+                            "filename": filename
+                        }
+                    }]
+                    
+                    # Для первого фото используем caption, для остальных - номер
+                    if idx == 0 and caption:
+                        text = caption
+                    else:
+                        text = f"📸 Фото {idx+1}/{len(photo_files)}"
+                    
+                    payload = {
+                        "text": text,
+                        "format": "markdown",
+                        "attachments": attachments
+                    }
+                    
+                    response = requests.post(
+                        f"{self.base_url}/messages",
+                        headers={
+                            "Authorization": self.token,
+                            "Content-Type": "application/json"
+                        },
+                        params={"chat_id": chat_id},
+                        json=payload,
+                        timeout=60,
+                        verify=False
+                    )
+                    
+                    if response.status_code == 200:
+                        success_count += 1
+                        logger.info(f"✅ Отправлено фото {idx+1}/{len(photo_files)}: {filename}")
+                    else:
+                        logger.error(f"❌ Ошибка отправки фото {filename}: {response.status_code} {response.text[:200]}")
+                    
+                    # Пауза между фото
+                    if idx < len(photo_files) - 1:
+                        time.sleep(1)
+                
+                return success_count == len(photo_files)
+            
         except Exception as e:
             logger.error(f"❌ Ошибка отправки фото: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
 
     def send_message_to_chat_with_attachments(self, chat_id, text, attachments):
-        """Устаревший метод — оставлен для совместимости"""
+        """Отправляет сообщение с вложениями в чат"""
         try:
             payload = {
                 "text": text,
@@ -509,33 +578,26 @@ def upload_folder():
         
         logger.info(f"📥 Получено {len(files)} файлов от пользователя {user_id}")
         
-        # Получаем папку пользователя
         user_folder = fm.get_user_folder(user_id)
         
-        # Очищаем папку пользователя перед загрузкой
         if os.path.exists(user_folder):
             shutil.rmtree(user_folder)
             logger.info(f"🗑️ Папка пользователя {user_id} очищена")
         os.makedirs(user_folder, exist_ok=True)
         
-        # Сохраняем файлы с полной структурой
         saved_count = 0
         root_folder_name = None
         
         for file in files:
-            # Получаем путь (webkitRelativePath)
             rel_path = file.filename
             if not rel_path:
                 rel_path = file.name
             
-            # Разбиваем путь на части
             parts = rel_path.split('/')
             
-            # Запоминаем имя корневой папки
             if len(parts) >= 1 and not root_folder_name:
                 root_folder_name = parts[0]
             
-            # Сохраняем файл с полным путём
             full_path = os.path.join(user_folder, rel_path)
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
             file.save(full_path)
@@ -544,7 +606,6 @@ def upload_folder():
         logger.info(f"✅ Сохранено {saved_count} файлов")
         logger.info(f"📁 Корневая папка: {root_folder_name}")
         
-        # Ищем подпапки внутри корневой папки
         valid_folders = []
         invalid_folders = []
         folder_errors = {}
@@ -564,14 +625,12 @@ def upload_folder():
                             folder_errors[item] = "отсутствует info.txt"
                             logger.warning(f"⚠️ В папке {item} нет info.txt")
         
-        # Сохраняем результат
         user_temp_data[user_id] = {
             'valid_folders': valid_folders,
             'invalid_folders': invalid_folders,
             'folder_errors': folder_errors
         }
         
-        # Формируем сообщение
         message = ""
         if valid_folders:
             message += f"✅ **Найдено {len(valid_folders)} валидных объявлений:**\n"
@@ -584,13 +643,10 @@ def upload_folder():
             for folder, error in folder_errors.items():
                 message += f"  • {folder} - {error}\n"
         
-        # Отправляем результат
         if invalid_folders and valid_folders:
             api.send_message(
                 user_id,
-                f"📊 **Результат загрузки:**\n\n"
-                f"{message}\n"
-                f"Публиковать валидные объявления?"
+                f"📊 **Результат загрузки:**\n\n{message}\nПубликовать валидные объявления?"
             )
             send_confirmation_buttons(user_id)
             
@@ -605,10 +661,7 @@ def upload_folder():
         elif valid_folders:
             api.send_message(
                 user_id,
-                f"✅ **Все папки валидны!**\n\n"
-                f"Найдено {len(valid_folders)} объявлений:\n"
-                f"{', '.join(valid_folders)}\n\n"
-                f"🚀 Начинаем публикацию..."
+                f"✅ **Все папки валидны!**\n\nНайдено {len(valid_folders)} объявлений:\n{', '.join(valid_folders)}\n\n🚀 Начинаем публикацию..."
             )
             send_confirmation_buttons(user_id)
             
@@ -623,9 +676,7 @@ def upload_folder():
         else:
             api.send_message(
                 user_id,
-                f"❌ **Нет валидных папок!**\n\n"
-                f"{message}\n"
-                f"Проверьте структуру папок и попробуйте снова."
+                f"❌ **Нет валидных папок!**\n\n{message}\nПроверьте структуру папок и попробуйте снова."
             )
             return jsonify({
                 'success': False,
@@ -668,84 +719,4 @@ def webhook():
         if not user_id:
             return jsonify({"ok": True}), 200
 
-        logger.info(f"💬 user_id={user_id}, text={text}, payload={payload}")
-
-        # Обработка кнопок
-        if payload and isinstance(payload, dict):
-            action = payload.get('action')
-            if action == 'confirm_publish':
-                api.send_message(user_id, "🚀 Начинаю публикацию валидных объявлений...")
-                publisher.start(user_id)
-                return jsonify({"ok": True}), 200
-            elif action == 'cancel_publish':
-                api.send_message(user_id, "⏹️ Публикация отменена. Очищаю данные...")
-                fm.clear_user_data(user_id)
-                return jsonify({"ok": True}), 200
-
-        # Обработка текстовых команд
-        if text:
-            text_lower = text.strip().lower()
-            if text_lower == 'да' or text_lower == 'yes':
-                api.send_message(user_id, "🚀 Начинаю публикацию валидных объявлений...")
-                publisher.start(user_id)
-                return jsonify({"ok": True}), 200
-            elif text_lower == 'нет' or text_lower == 'no':
-                api.send_message(user_id, "⏹️ Публикация отменена. Очищаю данные...")
-                fm.clear_user_data(user_id)
-                return jsonify({"ok": True}), 200
-
-        if text and text.strip() == '/start':
-            api.send_message(
-                user_id,
-                "🏠 **Главное меню**\n\n"
-                "🌐 **Загрузите папку с объявлениями через веб-интерфейс:**\n"
-                f"🔗 `https://maxbot.bothost.tech/upload`\n\n"
-                "📌 **Требования к папке:**\n"
-                "• Внутри папки должны быть подпапки с названиями: `Название -123456789`\n"
-                "• В каждой подпапке: `info.txt` (текст объявления) и изображения\n"
-                "• Можно загружать папку любого размера\n\n"
-                "⏹ Для остановки публикации отправьте `/stop`"
-            )
-            return jsonify({"ok": True}), 200
-
-        if text and text.strip() == '/stop':
-            publisher.stop(user_id)
-            api.send_message(user_id, "⏹️ Публикация остановлена.")
-            return jsonify({"ok": True}), 200
-
-        return jsonify({"ok": True}), 200
-
-    except Exception as e:
-        logger.error(f"❌ ОШИБКА: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return jsonify({"ok": False}), 500
-
-@app.route('/health')
-def health():
-    return {"status": "ok"}
-
-@app.route('/setup_webhook')
-def setup_webhook():
-    token = request.args.get('token') or TOKEN
-    if not token:
-        return "❌ Токен не найден", 400
-    
-    webhook_url = "https://maxbot.bothost.tech/webhook"
-    headers = {"Authorization": token, "Content-Type": "application/json"}
-    
-    try:
-        r = requests.post(
-            "https://platform-api2.max.ru/subscriptions",
-            headers=headers,
-            json={"url": webhook_url},
-            timeout=10,
-            verify=False
-        )
-        return f"✅ Вебхук настроен: {r.status_code}"
-    except Exception as e:
-        return f"❌ Ошибка: {e}"
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 3000))
-    app.run(host='0.0.0.0', port=port)
+        logger.info(f"
