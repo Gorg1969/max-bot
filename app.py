@@ -12,10 +12,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")
-# Увеличиваем лимит до 2 ГБ
 app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024 * 2  # 2 ГБ
-# Увеличиваем таймаут для больших запросов
-app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -88,6 +85,7 @@ class APIClient:
                     ('file', (filename, data, 'image/jpeg'))
                 )
 
+            # Все данные передаём через поле data, чтобы сервер Max их увидел
             data = {"chat_id": chat_id}
             if text:
                 data["text"] = text
@@ -97,7 +95,7 @@ class APIClient:
             response = requests.post(
                 f"{self.base_url}/messages",
                 headers={"Authorization": self.token},
-                data=data,
+                data=data,          # <-- chat_id и текст в теле формы
                 files=files,
                 timeout=120,
                 verify=False
@@ -105,6 +103,7 @@ class APIClient:
 
             logger.info(f"📤 Отправка {len(photo_files)} фото в чат {chat_id}, статус: {response.status_code}")
             if response.status_code != 200:
+                # Выводим тело ответа для диагностики
                 logger.error(f"❌ Ошибка отправки фото: {response.status_code} {response.text[:300]}")
             else:
                 resp_json = response.json()
@@ -347,13 +346,6 @@ UPLOAD_PAGE = """
                 return;
             }
 
-            // Показываем предупреждение о большом количестве файлов
-            if (selectedFiles.length > 500) {
-                if (!confirm(`⚠️ Вы загружаете ${selectedFiles.length} файлов. Это может занять много времени. Продолжить?`)) {
-                    return;
-                }
-            }
-
             const formData = new FormData();
             selectedFiles.forEach(file => {
                 formData.append('files[]', file, file.webkitRelativePath);
@@ -368,65 +360,63 @@ UPLOAD_PAGE = """
             addLog('🚀 Начинаем загрузку...');
             addLog(`📁 Файлов: ${selectedFiles.length}`);
 
-            const xhr = new XMLHttpRequest();
-            
-            xhr.upload.addEventListener('progress', (e) => {
-                if (e.lengthComputable) {
-                    const percent = Math.round((e.loaded / e.total) * 100);
-                    progress.style.width = percent + '%';
-                    progress.textContent = percent + '%';
-                    if (percent % 10 === 0) {
-                        addLog(`📥 Загружено: ${(e.loaded / 1024 / 1024).toFixed(1)} МБ из ${(e.total / 1024 / 1024).toFixed(1)} МБ (${percent}%)`);
-                    }
-                }
-            });
-
-            xhr.onload = function() {
-                if (xhr.status === 200) {
-                    try {
-                        const response = JSON.parse(xhr.responseText);
-                        if (response.success) {
-                            showStatus('success', '✅ ' + response.message);
-                            addLog('✅ ' + response.message);
-                            progress.style.width = '100%';
-                            progress.textContent = '100%';
-                            if (response.result) {
-                                if (response.result.valid_folders && response.result.valid_folders.length > 0) {
-                                    addLog(`✅ Готовы к публикации: ${response.result.valid_folders.join(', ')}`);
-                                }
-                                if (response.result.invalid_folders && response.result.invalid_folders.length > 0) {
-                                    addLog(`❌ Пропущены: ${response.result.invalid_folders.join(', ')}`);
-                                }
-                            }
-                        } else {
-                            showStatus('error', '❌ ' + response.message);
-                            addLog('❌ Ошибка: ' + response.message);
+            try {
+                const xhr = new XMLHttpRequest();
+                
+                xhr.upload.addEventListener('progress', (e) => {
+                    if (e.lengthComputable) {
+                        const percent = Math.round((e.loaded / e.total) * 100);
+                        progress.style.width = percent + '%';
+                        progress.textContent = percent + '%';
+                        if (percent % 10 === 0) {
+                            addLog(`📥 Загружено: ${(e.loaded / 1024 / 1024).toFixed(1)} МБ из ${(e.total / 1024 / 1024).toFixed(1)} МБ (${percent}%)`);
                         }
-                    } catch (e) {
-                        showStatus('error', '❌ Ошибка обработки ответа');
-                        addLog('❌ Ошибка: ' + e.message);
                     }
-                } else {
-                    showStatus('error', '❌ Ошибка загрузки: ' + xhr.status);
-                    addLog('❌ Ошибка сервера: ' + xhr.status);
-                }
-            };
+                });
 
-            xhr.onerror = function() {
-                showStatus('error', '❌ Ошибка соединения');
-                addLog('❌ Ошибка соединения с сервером');
-            };
+                xhr.onload = function() {
+                    if (xhr.status === 200) {
+                        try {
+                            const response = JSON.parse(xhr.responseText);
+                            if (response.success) {
+                                showStatus('success', '✅ ' + response.message);
+                                addLog('✅ ' + response.message);
+                                progress.style.width = '100%';
+                                progress.textContent = '100%';
+                                if (response.result) {
+                                    if (response.result.valid_folders && response.result.valid_folders.length > 0) {
+                                        addLog(`✅ Готовы к публикации: ${response.result.valid_folders.join(', ')}`);
+                                    }
+                                    if (response.result.invalid_folders && response.result.invalid_folders.length > 0) {
+                                        addLog(`❌ Пропущены: ${response.result.invalid_folders.join(', ')}`);
+                                    }
+                                }
+                            } else {
+                                showStatus('error', '❌ ' + response.message);
+                                addLog('❌ Ошибка: ' + response.message);
+                            }
+                        } catch (e) {
+                            showStatus('error', '❌ Ошибка обработки ответа');
+                            addLog('❌ Ошибка: ' + e.message);
+                        }
+                    } else {
+                        showStatus('error', '❌ Ошибка загрузки: ' + xhr.status);
+                        addLog('❌ Ошибка сервера: ' + xhr.status);
+                    }
+                };
 
-            xhr.ontimeout = function() {
-                showStatus('error', '❌ Таймаут загрузки');
-                addLog('❌ Превышено время ожидания ответа от сервера');
-            };
+                xhr.onerror = function() {
+                    showStatus('error', '❌ Ошибка соединения');
+                    addLog('❌ Ошибка соединения с сервером');
+                };
 
-            // Увеличиваем таймаут для XHR
-            xhr.timeout = 600000; // 10 минут
-            
-            xhr.open('POST', '/upload_folder');
-            xhr.send(formData);
+                xhr.open('POST', '/upload_folder');
+                xhr.send(formData);
+                
+            } catch (error) {
+                showStatus('error', '❌ Ошибка: ' + error.message);
+                addLog('❌ Ошибка: ' + error.message);
+            }
         }
 
         function showStatus(type, message) {
@@ -511,16 +501,11 @@ def upload_page():
 def upload_folder():
     """Обработка загрузки папки с поиском info.txt в подпапках"""
     try:
-        # Проверяем наличие файлов
-        if 'files[]' not in request.files:
-            return jsonify({'success': False, 'message': 'Файлы не найдены в запросе'}), 400
-        
+        user_id = int(request.form.get('user_id', 151296248))
         files = request.files.getlist('files[]')
         
-        if not files or len(files) == 0:
+        if not files:
             return jsonify({'success': False, 'message': 'Файлы не выбраны'}), 400
-        
-        user_id = int(request.form.get('user_id', 151296248))
         
         logger.info(f"📥 Получено {len(files)} файлов от пользователя {user_id}")
         
