@@ -6,7 +6,6 @@ import shutil
 import urllib3
 import json
 import time
-import base64
 from modules import Database, FileManager, Publisher, WebInterface
 
 # ОТКЛЮЧАЕМ ПРЕДУПРЕЖДЕНИЯ SSL
@@ -75,93 +74,56 @@ class APIClient:
             logger.error(f"❌ Ошибка отправки в чат: {e}")
             return False
 
-    def upload_file(self, filename, data):
-        """
-        Загружает файл на сервер MAX через InputMedia
-        Возвращает ID загруженного файла
-        """
-        try:
-            # Отправляем файл на сервер
-            files = {'file': (filename, data, 'image/jpeg')}
-            response = requests.post(
-                f"{self.base_url}/files",
-                headers={"Authorization": self.token},
-                files=files,
-                timeout=30,
-                verify=False
-            )
-            
-            if response.status_code == 200:
-                file_info = response.json()
-                file_id = file_info.get('id')
-                if file_id:
-                    logger.info(f"✅ Файл загружен: {filename}, ID: {file_id}")
-                    return file_id
-                else:
-                    logger.error(f"❌ Не удалось получить ID для {filename}: {file_info}")
-                    return None
-            else:
-                logger.error(f"❌ Ошибка загрузки {filename}: {response.status_code}")
-                logger.error(f"Ответ: {response.text[:300]}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки файла: {e}")
-            return None
-
     def send_photos_to_chat(self, chat_id, photo_files, text=None, caption=None):
         """
-        Отправляет фото в чат вместе с текстом объявления одним сообщением.
-        Использует InputMedia подход - сначала загружает файлы,
-        затем отправляет attachments с их ID.
+        Отправляет фото в чат. Первое фото с текстом, остальные без текста.
         photo_files: список кортежей (filename, binary_data)
         """
         try:
             if not photo_files:
                 return self.send_message_to_chat(chat_id, text or caption or "")
             
-            # Загружаем все фото и получаем их ID
-            attachments = []
+            success = True
             
-            for filename, data in photo_files:
-                # Загружаем файл через /files
-                file_id = self.upload_file(filename, data)
-                if file_id:
-                    # Добавляем в attachments как в примере с InputMedia
-                    attachments.append({
-                        "type": "photo",
-                        "id": file_id
-                    })
+            for i, (filename, data) in enumerate(photo_files):
+                # Подготавливаем файл
+                files = [('file', (filename, data, 'image/jpeg'))]
+                
+                # Подготавливаем данные
+                if i == 0:
+                    # Первое фото отправляем с текстом
+                    form_data = {
+                        "chat_id": chat_id,
+                        "text": text or caption or "",
+                        "format": "markdown"
+                    }
                 else:
-                    logger.error(f"❌ Не удалось загрузить {filename}")
-                    return False
+                    # Остальные фото отправляем без текста
+                    form_data = {
+                        "chat_id": chat_id
+                    }
+                
+                # Отправляем запрос
+                response = requests.post(
+                    f"{self.base_url}/messages",
+                    headers={"Authorization": self.token},
+                    data=form_data,
+                    files=files,
+                    timeout=60,
+                    verify=False
+                )
+                
+                logger.info(f"📤 Отправка фото {i+1}/{len(photo_files)} в чат {chat_id}, статус: {response.status_code}")
+                if response.status_code != 200:
+                    logger.error(f"❌ Ошибка отправки фото {i+1}: {response.text[:300]}")
+                    success = False
+                    break
+                
+                # Задержка между отправками
+                if i < len(photo_files) - 1:
+                    time.sleep(1)
             
-            if not attachments:
-                logger.error("❌ Нет загруженных фото для отправки")
-                return False
-            
-            # Отправляем сообщение с attachments (как в примере)
-            payload = {
-                "text": text or caption or "",
-                "format": "markdown",
-                "attachments": attachments
-            }
-            
-            response = requests.post(
-                f"{self.base_url}/messages",
-                headers={"Authorization": self.token, "Content-Type": "application/json"},
-                params={"chat_id": chat_id},
-                json=payload,
-                timeout=30,
-                verify=False
-            )
-            
-            logger.info(f"📤 Отправка {len(attachments)} фото в чат {chat_id}, статус: {response.status_code}")
-            if response.status_code != 200:
-                logger.error(f"❌ Ошибка отправки: {response.text[:300]}")
-            else:
-                logger.info(f"✅ Ответ API: {response.json()}")
-            return response.status_code == 200
+            return success
             
         except Exception as e:
             logger.error(f"❌ Ошибка отправки фото: {e}")
