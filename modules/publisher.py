@@ -2,7 +2,7 @@ import logging
 import os
 import time
 import re
-import random
+import base64
 from enum import Enum
 from PIL import Image, ExifTags
 import io
@@ -19,15 +19,16 @@ class Publisher:
         self.api = api
         self.fm = file_manager
         self.db = db
-        self.user_states = {}
-
+        self.user_states = {}  # user_id -> UserState
+    
     def extract_chat_id(self, folder_name):
         match = re.search(r'-\s*(\d+)', folder_name)
         if match:
             return f"-{match.group(1)}"
         return None
-
+    
     def fix_image_orientation(self, img):
+        """Исправляет ориентацию изображения на основе EXIF-данных"""
         try:
             for orientation in ExifTags.TAGS.keys():
                 if ExifTags.TAGS[orientation] == 'Orientation':
@@ -45,8 +46,9 @@ class Publisher:
         except Exception as e:
             logger.debug(f"⚠️ Ошибка исправления ориентации: {e}")
         return img
-
+    
     def compress_image(self, image_path, max_size_mb=0.8, quality=75):
+        """Сжимает изображение с исправлением ориентации и очисткой EXIF"""
         try:
             with Image.open(image_path) as img:
                 img = self.fix_image_orientation(img)
@@ -74,8 +76,9 @@ class Publisher:
             logger.error(f"❌ Ошибка сжатия: {e}")
             with open(image_path, 'rb') as f:
                 return f.read()
-
+    
     def get_sorted_images(self, folder_path, max_count=3):
+        """Возвращает отсортированный список изображений"""
         images = []
         if not os.path.exists(folder_path):
             return images
@@ -88,26 +91,40 @@ class Publisher:
         
         images.sort()
         return images[:max_count]
-
+    
     def start(self, user_id):
+        """Запускает публикацию для пользователя"""
         try:
+            # Проверяем, не запущена ли уже публикация
             if self.user_states.get(user_id) == UserState.PUBLISHING:
                 logger.warning(f"⚠️ Публикация уже запущена для пользователя {user_id}")
                 self.api.send_message(user_id, "⚠️ Публикация уже запущена. Дождитесь завершения.")
                 return False
             
             logger.info(f"🚀 Запуск публикации для пользователя {user_id}")
+            
+            # Устанавливаем состояние PUBLISHING
             self.user_states[user_id] = UserState.PUBLISHING
             
             user_folder = self.fm.get_user_folder(user_id)
+            samosvaly_path = os.path.join(user_folder, "Самосвалы")
             
-            subfolders = []
-            if os.path.exists(user_folder):
-                for root, dirs, files in os.walk(user_folder):
-                    if 'info.txt' in files:
-                        folder_name = os.path.basename(root)
-                        subfolders.append((folder_name, root))
-                        logger.info(f"📁 Найдена подпапка с info.txt: {folder_name}")
+            if os.path.exists(samosvaly_path) and os.path.isdir(samosvaly_path):
+                subfolders = []
+                for item in os.listdir(samosvaly_path):
+                    item_path = os.path.join(samosvaly_path, item)
+                    if os.path.isdir(item_path):
+                        info_path = os.path.join(item_path, 'info.txt')
+                        if os.path.exists(info_path):
+                            subfolders.append(item)
+            else:
+                subfolders = []
+                for item in os.listdir(user_folder):
+                    item_path = os.path.join(user_folder, item)
+                    if os.path.isdir(item_path):
+                        info_path = os.path.join(item_path, 'info.txt')
+                        if os.path.exists(info_path):
+                            subfolders.append(item)
             
             if not subfolders:
                 self.api.send_message(user_id, "❌ Нет папок с объявлениями для публикации.")
@@ -117,14 +134,18 @@ class Publisher:
             self.api.send_message(user_id, f"📢 Начинаю публикацию {len(subfolders)} объявлений...")
             published = 0
             
-            subfolders.sort(key=lambda x: x[0])
-            
-            for index, (folder_name, folder_path) in enumerate(subfolders):
+            for folder_name in subfolders:
+                # Проверяем состояние
                 if self.user_states.get(user_id) == UserState.STOPPED:
                     logger.info(f"⏹️ Публикация остановлена пользователем {user_id}")
                     break
                 
                 try:
+                    if os.path.exists(samosvaly_path):
+                        folder_path = os.path.join(samosvaly_path, folder_name)
+                    else:
+                        folder_path = os.path.join(user_folder, folder_name)
+                    
                     info_path = os.path.join(folder_path, 'info.txt')
                     if not os.path.exists(info_path):
                         continue
@@ -142,68 +163,71 @@ class Publisher:
                     logger.info(f"📤 Публикация в чат {chat_id}: {folder_name}")
                     logger.info(f"🖼️ Найдено {len(images)} изображений")
                     
+                    # Проверяем состояние перед отправкой
                     if self.user_states.get(user_id) == UserState.STOPPED:
                         logger.info(f"⏹️ Публикация остановлена пользователем {user_id}")
                         break
                     
-                    success = self.api.send_message_to_chat(chat_id, text)
-                    if not success:
-                        logger.error(f"❌ Не удалось отправить текст в {chat_id}")
-                        self.api.send_message(user_id, f"⚠️ Не удалось отправить в чат {chat_id}")
+                                    try:
+                    # Определяем путь к папке
+                    if os.path.exists(samosvaly_path):
+                        folder_path = os.path.join(samosvaly_path, folder_name)
+                    else:
+                        folder_path = os.path.join(user_folder, folder_name)
+                    
+                    info_path = os.path.join(folder_path, 'info.txt')
+                    if not os.path.exists(info_path):
                         continue
                     
-                    logger.info(f"✅ Текст отправлен в {chat_id}")
-                    time.sleep(2)
+                    with open(info_path, 'r', encoding='utf-8') as f:
+                        text = f.read()
                     
+                    chat_id = self.extract_chat_id(folder_name)
+                    if not chat_id:
+                        logger.warning(f"⚠️ Не удалось извлечь ID чата из {folder_name}")
+                        continue
+                    
+                    images = self.get_sorted_images(folder_path, max_count=3)
+                    logger.info(f"📤 Публикация в чат {chat_id}: {folder_name}, фото: {len(images)}")
+                    
+                    # Проверяем состояние
                     if self.user_states.get(user_id) == UserState.STOPPED:
-                        logger.info(f"⏹️ Публикация остановлена пользователем {user_id}")
                         break
                     
-                    if images:
-                        photo_files = []
-                        for img_name in images:
-                            img_path = os.path.join(folder_path, img_name)
-                            if not os.path.exists(img_path):
-                                continue
-                            
-                            try:
-                                compressed = self.compress_image(img_path)
-                                photo_files.append((img_name, compressed))
-                                logger.info(f"✅ Подготовлено фото: {img_name}")
-                            except Exception as e:
-                                logger.error(f"❌ Ошибка подготовки фото {img_name}: {e}")
-                        
-                        if photo_files:
-                            success = self.api.send_photos_to_chat(chat_id, photo_files)
-                            if success:
-                                logger.info(f"✅ Отправлено {len(photo_files)} фото в {chat_id}")
-                            else:
-                                logger.error(f"❌ Не удалось отправить фото в {chat_id}")
-                                self.api.send_message(user_id, f"⚠️ Не удалось отправить фото в чат {chat_id}")
+                    # Подготавливаем фото
+                    photo_files = []
+                    for img_name in images:
+                        img_path = os.path.join(folder_path, img_name)
+                        if not os.path.exists(img_path):
+                            continue
+                        try:
+                            compressed = self.compress_image(img_path)
+                            photo_files.append((img_name, compressed))
+                        except Exception as e:
+                            logger.error(f"❌ Ошибка сжатия {img_name}: {e}")
                     
+                    # Отправляем ОДНО сообщение с текстом и фото
+                    if photo_files:
+                        success = self.api.send_photos_to_chat(
+                            chat_id=chat_id,
+                            photo_files=photo_files,
+                            text=text        # ← текст объявления передаётся здесь
+                        )
+                    else:
+                        # Если фото нет, шлём хотя бы текст
+                        success = self.api.send_message_to_chat(chat_id, text)
+                    
+                    if not success:
+                        logger.error(f"❌ Не удалось отправить объявление в {chat_id}")
+                        continue
+                    
+                    # Запись в БД и задержка
                     self.db.add_publication(user_id, folder_name, chat_id)
                     published += 1
                     logger.info(f"✅ Опубликовано: {folder_name}")
-                    
-                    if index < len(subfolders) - 1:
-                        delay = random.randint(30, 60)
-                        logger.info(f"⏳ Пауза {delay} секунд перед следующей публикацией...")
-                        self.api.send_message(user_id, f"⏳ Следующая публикация через {delay} секунд...")
-                        
-                        for _ in range(delay):
-                            if self.user_states.get(user_id) == UserState.STOPPED:
-                                logger.info(f"⏹️ Публикация остановлена пользователем {user_id} во время паузы")
-                                break
-                            time.sleep(1)
-                        
-                        if self.user_states.get(user_id) == UserState.STOPPED:
-                            break
-                    
-                except Exception as e:
-                    logger.error(f"❌ Ошибка публикации папки {folder_name}: {e}")
-                    self.api.send_message(user_id, f"⚠️ Ошибка в {folder_name}: {str(e)[:100]}")
-                    continue
+                    time.sleep(2)   # задержка между постами (регулируйте)
             
+            # Завершаем публикацию
             self.user_states[user_id] = UserState.IDLE
             
             if published > 0:
@@ -220,18 +244,21 @@ class Publisher:
             self.user_states[user_id] = UserState.IDLE
             self.api.send_message(user_id, f"❌ Ошибка публикации: {str(e)}")
             return False
-
+    
     def stop(self, user_id):
+        """Останавливает публикацию"""
         current_state = self.user_states.get(user_id, UserState.IDLE)
-        self.user_states[user_id] = UserState.STOPPED
-        self.fm.clear_user_data(user_id)
-        self.db.clear_user_publications(user_id)
         
         if current_state == UserState.PUBLISHING:
-            logger.info(f"⏹️ Публикация НЕМЕДЛЕННО остановлена для пользователя {user_id}")
-            self.api.send_message(user_id, "⏹️ Публикация остановлена. Все данные очищены.")
+            self.user_states[user_id] = UserState.STOPPED
+            logger.info(f"⏹️ Публикация остановлена для пользователя {user_id}")
+            self.api.send_message(user_id, "⏹️ Публикация остановлена.")
             return True
+        elif current_state == UserState.STOPPED:
+            logger.info(f"ℹ️ Публикация уже остановлена для пользователя {user_id}")
+            self.api.send_message(user_id, "ℹ️ Публикация уже остановлена.")
+            return False
         else:
             logger.info(f"ℹ️ Публикация не активна для пользователя {user_id}")
-            self.api.send_message(user_id, "ℹ️ Нет активной публикации. Данные очищены.")
+            self.api.send_message(user_id, "ℹ️ Нет активной публикации для остановки.")
             return False
