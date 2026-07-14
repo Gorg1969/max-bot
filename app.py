@@ -76,17 +76,35 @@ class APIClient:
             return False
 
     def send_photos_to_chat(self, chat_id, photo_files, text=None, caption=None):
+        """
+        Отправляет фото в чат вместе с текстом объявления
+        photo_files: список кортежей (filename, binary_data)
+        """
         if not self.token:
+            logger.error("❌ Токен не установлен!")
             return False
+        
         try:
             files = []
             for filename, data in photo_files:
-                files.append(('file', (filename, data, 'image/jpeg')))
+                # Определяем расширение и тип
+                ext = filename.split('.')[-1].lower() if '.' in filename else 'jpg'
+                content_type = 'image/jpeg'
+                if ext in ['png', 'gif', 'webp']:
+                    content_type = f'image/{ext}'
+                elif ext == 'jpg' or ext == 'jpeg':
+                    content_type = 'image/jpeg'
+                
+                files.append(('file', (filename, data, content_type)))
+            
             data = {"chat_id": chat_id}
             if text:
                 data["text"] = text
             if caption:
                 data["caption"] = caption
+            
+            logger.info(f"📤 Отправка {len(photo_files)} фото в чат {chat_id}")
+            
             response = requests.post(
                 f"{self.base_url}/messages",
                 headers={"Authorization": self.token},
@@ -95,16 +113,28 @@ class APIClient:
                 timeout=120,
                 verify=False
             )
-            return response.status_code == 200
+            
+            logger.info(f"📊 Статус ответа: {response.status_code}")
+            
+            if response.status_code == 200:
+                logger.info(f"✅ Фото отправлены в чат {chat_id}")
+                return True
+            else:
+                logger.error(f"❌ Ошибка отправки фото: {response.status_code}")
+                logger.error(f"❌ Ответ сервера: {response.text[:500]}")
+                return False
+
         except Exception as e:
             logger.error(f"❌ Ошибка отправки фото: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
 api = APIClient()
 publisher = Publisher(api, fm, db)
 report_gen = ReportGenerator(fm, db)
 
-# ========== HTML СТРАНИЦА (С КЛИЕНТСКИМ СЖАТИЕМ) ==========
+# ========== HTML СТРАНИЦА ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -153,7 +183,7 @@ UPLOAD_PAGE = """
             <strong>📌 Как подготовить папку:</strong><br>
             1️⃣ Создайте головную папку (любое название)<br>
             2️⃣ Внутри создайте подпапки объявлений: <code>1 -123456789</code>, <code>2 -987654321</code><br>
-            3️⃣ В каждой подпапке: <code>info.txt</code> (текст) и фото (1-10 шт)<br>
+            3️⃣ В каждой подпапке: <code>info.txt</code> (текст) и фото<br>
             4️⃣ Перетащите головную папку в поле ниже<br>
             5️⃣ Фото сжимаются на вашем компьютере перед отправкой!
         </div>
@@ -206,7 +236,6 @@ UPLOAD_PAGE = """
         
         async function compressImage(file, maxWidth=MAX_WIDTH, quality=QUALITY) {
             return new Promise((resolve, reject) => {
-                // Если файл уже маленький - не сжимаем
                 if (file.size < 100 * 1024) {
                     resolve(file);
                     return;
