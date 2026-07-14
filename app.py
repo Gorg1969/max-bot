@@ -14,7 +14,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")
-app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2 ГБ
+app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200 МБ
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -154,7 +154,7 @@ UPLOAD_PAGE = """
             2️⃣ Внутри создайте подпапки объявлений: <code>1 -123456789</code>, <code>2 -987654321</code><br>
             3️⃣ В каждой подпапке: <code>info.txt</code> (текст) и фото (1-10 шт)<br>
             4️⃣ Перетащите головную папку в поле ниже<br>
-            5️⃣ Скрипт загружает по 2 ПАПКИ за раз (целиком)
+            5️⃣ Скрипт загружает по 1 ПАПКЕ за раз (надёжно)
         </div>
         
         <div class="drop-zone" id="dropZone">
@@ -186,7 +186,7 @@ UPLOAD_PAGE = """
     <script>
         let selectedFiles = [];
         let userId = 151296248;
-        const CHUNK_SIZE = 2;  // ПО 2 ПАПКИ ЗА РАЗ!
+        const CHUNK_SIZE = 1;  // ПО 1 ПАПКЕ ЗА РАЗ!
         
         const dropZone = document.getElementById('dropZone');
         const folderInput = document.getElementById('folderInput');
@@ -248,17 +248,14 @@ UPLOAD_PAGE = """
             const folders = new Set();
             const fileCount = {};
             
-            // Определяем структуру папок
             files.forEach(f => {
                 const parts = f.webkitRelativePath.split('/');
-                // parts[0] - головная папка, parts[1] - подпапка
                 if (parts.length >= 2) {
-                    const folder = parts[0] + '/' + parts[1];  // Головная/Подпапка
+                    const folder = parts[0] + '/' + parts[1];
                     folders.add(folder);
                     if (!fileCount[folder]) fileCount[folder] = 0;
                     fileCount[folder]++;
                 } else if (parts.length === 1) {
-                    // Если файлы прямо в головной папке (без подпапок)
                     const folder = parts[0];
                     folders.add(folder);
                     if (!fileCount[folder]) fileCount[folder] = 0;
@@ -266,7 +263,6 @@ UPLOAD_PAGE = """
                 }
             });
             
-            // Сортируем папки
             const sortedFolders = Array.from(folders).sort();
             
             sortedFolders.forEach(folder => {
@@ -277,7 +273,7 @@ UPLOAD_PAGE = """
                 fileListContent.appendChild(li);
             });
             
-            selectedInfo.textContent = `✅ Выбрано ${sortedFolders.length} папок, всего ${files.length} файлов (загрузка по 2 папки)`;
+            selectedInfo.textContent = `✅ Выбрано ${sortedFolders.length} папок, всего ${files.length} файлов (загрузка по 1 папке)`;
             fileList.style.display = 'block';
             showStatus('info', '📦 Готово к загрузке!');
         }
@@ -306,19 +302,16 @@ UPLOAD_PAGE = """
         }
 
         function getFolderStructure(files) {
-            // Группируем файлы по подпапкам (учитываем головную папку)
             const folders = {};
             files.forEach(file => {
                 const parts = file.webkitRelativePath.split('/');
-                // Если есть головная папка и подпапка
                 if (parts.length >= 2) {
-                    const folderName = parts[1];  // Берем только подпапку (без головной)
+                    const folderName = parts[1];
                     if (!folders[folderName]) {
                         folders[folderName] = [];
                     }
                     folders[folderName].push(file);
                 } else if (parts.length === 1) {
-                    // Если файлы прямо в головной папке
                     const folderName = parts[0];
                     if (!folders[folderName]) {
                         folders[folderName] = [];
@@ -335,7 +328,6 @@ UPLOAD_PAGE = """
                 return;
             }
             
-            // Группируем файлы по подпапкам
             const folders = getFolderStructure(selectedFiles);
             const folderNames = Object.keys(folders);
             const totalFolders = folderNames.length;
@@ -347,7 +339,7 @@ UPLOAD_PAGE = """
             progress.textContent = '0%';
             logDiv.textContent = '';
             addLog(`🚀 Начинаем загрузку ${totalFolders} папок...`);
-            addLog(`📦 Разбито на ${totalChunks} пачек по ${CHUNK_SIZE} папки`);
+            addLog(`📦 Разбито на ${totalChunks} пачек по ${CHUNK_SIZE} папке`);
             
             let uploadedFolders = 0;
             let failedChunks = 0;
@@ -357,7 +349,6 @@ UPLOAD_PAGE = """
                 const chunkFolders = folderNames.slice(i, i + CHUNK_SIZE);
                 const chunkNum = Math.floor(i / CHUNK_SIZE) + 1;
                 
-                // Собираем все файлы из пачек папок
                 const chunkFiles = [];
                 chunkFolders.forEach(folderName => {
                     folders[folderName].forEach(file => {
@@ -397,12 +388,10 @@ UPLOAD_PAGE = """
                     addLog(`❌ Ошибка пачки ${chunkNum}: ${error.message}`);
                 }
                 
-                // Обновляем прогресс
                 const progressPercent = Math.min(100, Math.round(((i + chunkFolders.length) / totalFolders) * 100));
                 progress.style.width = progressPercent + '%';
                 progress.textContent = progressPercent + '%';
                 
-                // Пауза между пачками
                 if (i + CHUNK_SIZE < totalFolders) {
                     await new Promise(r => setTimeout(r, 500));
                 }
@@ -418,7 +407,6 @@ UPLOAD_PAGE = """
                 addLog(`⚠️ Загружено ${uploadedFolders} папок, ${failedChunks} пачек с ошибками`);
             }
             
-            // Запускаем публикацию
             if (uploadedFolders > 0) {
                 addLog('🚀 Запускаем публикацию...');
                 try {
@@ -455,7 +443,7 @@ def upload_page():
 
 @app.route('/upload_chunk', methods=['POST'])
 def upload_chunk():
-    """Загружает одну пачку папок (до 2 папок за раз)"""
+    """Загружает одну пачку (1 папка)"""
     try:
         if 'files[]' not in request.files:
             return jsonify({'success': False, 'message': 'Файлы не найдены'}), 400
@@ -479,7 +467,6 @@ def upload_chunk():
         
         logger.info(f"📦 Пачка {chunk_num}/{total_chunks}: {len(files)} файлов для пользователя {user_id}")
         
-        # Сохраняем пачку
         result = fm.save_uploaded_files_stream(files, user_id, append=append)
         
         if not result['success']:
@@ -493,11 +480,12 @@ def upload_chunk():
         
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки пачки: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/start_publish', methods=['POST'])
 def start_publish():
-    """Запускает публикацию"""
     try:
         data = request.get_json()
         user_id = data.get('user_id')
@@ -641,8 +629,6 @@ def setup_webhook():
             return f"❌ Ошибка: {r.status_code} - {r.text}"
     except Exception as e:
         return f"❌ Ошибка: {e}"
-
-# ========== ЗАПУСК ==========
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
