@@ -12,30 +12,23 @@ class FileManager:
         os.makedirs(data_dir, exist_ok=True)
     
     def get_user_folder(self, user_id):
-        """Возвращает путь к папке пользователя"""
         user_folder = os.path.join(self.data_dir, f"user_{user_id}")
         os.makedirs(user_folder, exist_ok=True)
         return user_folder
     
     def get_temp_folder(self, user_id):
-        """Возвращает путь к временной папке для загрузки"""
         temp_folder = os.path.join(self.get_user_folder(user_id), "temp_upload")
         os.makedirs(temp_folder, exist_ok=True)
         return temp_folder
     
     def extract_chat_id_from_name(self, folder_name):
-        """Извлекает chat_id из имени папки"""
         match = re.search(r'-\s*(\d+)', folder_name)
         if match:
             return f"-{match.group(1)}"
         return None
     
     def save_uploaded_files_stream(self, files, user_id, append=False):
-        """
-        ПОТОКОВОЕ сохранение файлов - НЕ ДЕРЖИТ В ПАМЯТИ!
-        Сохраняет файлы чанками по 64KB
-        append=True - добавляет файлы в существующую папку
-        """
+        """ПОТОКОВОЕ сохранение файлов - НЕ ДЕРЖИТ В ПАМЯТИ!"""
         try:
             user_folder = self.get_user_folder(user_id)
             
@@ -50,8 +43,6 @@ class FileManager:
             for file in files:
                 if not file.filename:
                     continue
-                
-                # Пропускаем системные файлы
                 if file.filename.startswith('.'):
                     continue
                 
@@ -59,30 +50,25 @@ class FileManager:
                 full_path = os.path.join(user_folder, rel_path)
                 os.makedirs(os.path.dirname(full_path), exist_ok=True)
                 
-                # Сохраняем потоково, чанками по 64KB
                 with open(full_path, 'wb') as f:
                     while True:
-                        chunk = file.stream.read(64 * 1024)  # 64KB
+                        chunk = file.stream.read(64 * 1024)
                         if not chunk:
                             break
                         f.write(chunk)
                 saved_count += 1
             
-            logger.info(f"✅ Сохранено {saved_count} файлов потоково (append={append})")
+            logger.info(f"✅ Сохранено {saved_count} файлов (append={append})")
             return {'success': True, 'saved_count': saved_count}
             
         except Exception as e:
-            logger.error(f"❌ Ошибка потокового сохранения: {e}")
+            logger.error(f"❌ Ошибка сохранения: {e}")
             return {'success': False, 'error': str(e)}
     
     def save_uploaded_files(self, files, user_id):
-        """
-        Сохраняет загруженные файлы с сохранением структуры папок
-        (старый метод, оставлен для совместимости)
-        """
+        """Старый метод - оставлен для совместимости"""
         try:
             temp_folder = self.get_temp_folder(user_id)
-            
             if os.path.exists(temp_folder):
                 shutil.rmtree(temp_folder)
             os.makedirs(temp_folder)
@@ -92,7 +78,6 @@ class FileManager:
                 rel_path = getattr(file, 'filename', file.name)
                 if not rel_path:
                     rel_path = file.name
-                
                 full_path = os.path.join(temp_folder, rel_path)
                 os.makedirs(os.path.dirname(full_path), exist_ok=True)
                 file.save(full_path)
@@ -130,7 +115,6 @@ class FileManager:
                 logger.info(f"📦 Перенесена папка {folder}")
             
             shutil.rmtree(temp_folder)
-            
             return {
                 'success': True,
                 'folders': moved_folders,
@@ -146,7 +130,6 @@ class FileManager:
             }
     
     def extract_zip(self, user_id, zip_path):
-        """Извлекает ZIP-архив в папку пользователя"""
         try:
             user_folder = self.get_user_folder(user_id)
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
@@ -158,7 +141,6 @@ class FileManager:
             return False
     
     def clear_user_data(self, user_id):
-        """Очищает данные пользователя"""
         user_folder = self.get_user_folder(user_id)
         if os.path.exists(user_folder):
             shutil.rmtree(user_folder)
@@ -166,7 +148,6 @@ class FileManager:
             logger.info(f"🗑️ Данные пользователя {user_id} очищены")
     
     def get_folders(self, user_id):
-        """Возвращает список папок с объявлениями пользователя"""
         user_folder = self.get_user_folder(user_id)
         folders = []
         if os.path.exists(user_folder):
@@ -179,26 +160,18 @@ class FileManager:
         return folders
     
     def get_folder_path(self, user_id, folder_name):
-        """Возвращает путь к конкретной папке объявления"""
         return os.path.join(self.get_user_folder(user_id), folder_name)
     
     def get_subfolders(self, user_id):
-        """
-        Возвращает список подпапок в папке пользователя (для Publisher)
-        Рекурсивно обходит все папки и ищет info.txt
-        """
         user_folder = self.get_user_folder(user_id)
         subfolders = []
-        
         if not os.path.exists(user_folder):
             logger.warning(f"⚠️ Папка пользователя {user_id} не существует")
             return subfolders
-        
         for root, dirs, files in os.walk(user_folder):
             if 'info.txt' in files:
                 folder_name = os.path.basename(root)
                 subfolders.append(folder_name)
                 logger.info(f"📁 Найдена подпапка с info.txt: {folder_name}")
-        
         logger.info(f"📁 Всего найдено {len(subfolders)} подпапок для пользователя {user_id}")
         return subfolders
