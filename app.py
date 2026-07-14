@@ -34,6 +34,29 @@ def get_token():
         os.environ.get('MAX_BOT_TOKEN')
     )
 
+def init_max_api():
+    """Инициализация MAX API"""
+    token = get_token()
+    
+    if not token:
+        logger.error("❌ Токен не найден!")
+        return None
+    
+    logger.info(f"✅ Токен найден (первые 10): {token[:10]}...")
+    
+    try:
+        import maxapi
+        if hasattr(maxapi, 'Bot'):
+            api = maxapi.Bot(token=token)
+            logger.info("✅ MAX API инициализирован через Bot")
+            return api
+        else:
+            logger.error("❌ Не найден класс Bot в maxapi")
+            return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка инициализации: {e}")
+        return None
+
 # ============================================
 # ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЯ
 # ============================================
@@ -42,15 +65,14 @@ app = Flask(__name__)
 
 db = Database()
 fm = FileManager()
-
-# Инициализируем Publisher (без API, будем использовать прямые HTTP запросы)
-publisher = Publisher(None, fm, db)
+api = init_max_api()
+publisher = Publisher(api, fm, db)
 web_interface = WebInterface(fm, publisher)
 
-# ========== ОТПРАВКА СООБЩЕНИЙ ==========
+# ========== ОТПРАВКА СООБЩЕНИЙ (ИСПРАВЛЕНА) ==========
 
-def send_message(user_id, text):
-    """Отправка сообщения пользователю (используем user_id)"""
+def send_message(chat_id, text):
+    """Отправка сообщения в чат (используем chat_id из вебхука)"""
     token = get_token()
     if not token:
         logger.warning(f"⚠️ Токен не найден!")
@@ -62,17 +84,17 @@ def send_message(user_id, text):
             "Authorization": token,
             "Content-Type": "application/json",
         }
-        # Используем user_id!
+        # Используем chat_id, который пришел в вебхуке
         json_data = {
-            "user_id": user_id,  # ← user_id, НЕ chat_id!
+            "chat_id": chat_id,
             "text": text,
         }
         
-        logger.info(f"📤 Отправка пользователю {user_id}: {text[:30]}...")
+        logger.info(f"📤 Отправка в чат {chat_id}: {text[:30]}...")
         response = requests.post(url, headers=headers, json=json_data, timeout=30, verify=False)
         
         if response.status_code == 200:
-            logger.info(f"✅ Сообщение отправлено пользователю {user_id}")
+            logger.info(f"✅ Сообщение отправлено в чат {chat_id}")
             return True
         else:
             logger.error(f"❌ Ошибка API: {response.status_code} - {response.text}")
@@ -93,42 +115,41 @@ def webhook():
         if not data:
             return jsonify({'status': 'ok'}), 200
         
+        # Проверяем тип обновления
         update_type = data.get('update_type')
         
+        # Пропускаем не-сообщения
         if update_type != 'message_created':
             return jsonify({'status': 'ok'}), 200
         
+        # Извлекаем данные
         message = data.get('message', {})
         recipient = message.get('recipient', {})
         body = message.get('body', {})
-        sender = message.get('sender', {})
         
-        # Берем user_id из sender
-        user_id = sender.get('user_id')
-        # Или из recipient если нет sender
-        if not user_id:
-            user_id = recipient.get('user_id')
-        
+        # Берем chat_id из recipient (это ID диалога)
+        chat_id = recipient.get('chat_id')
         text = body.get('text', '')
         
-        if not user_id or not text:
+        if not chat_id or not text:
             return jsonify({'status': 'ok'}), 200
         
-        logger.info(f"📩 Сообщение от {user_id}: {text}")
+        logger.info(f"📩 Сообщение от {chat_id}: {text}")
         
         response = None
         
+        # ===== ОБРАБОТКА КОМАНД =====
         if text.startswith('/start'):
             response = "👋 Привет! Я бот для публикации объявлений.\nИспользуйте /help для списка команд."
         
         elif text.startswith('/publish'):
-            send_message(user_id, "📢 Начинаю однократную публикацию...")
-            threading.Thread(target=publisher.start, args=(user_id,)).start()
+            send_message(chat_id, "📢 Начинаю однократную публикацию...")
+            threading.Thread(target=publisher.start, args=(chat_id,)).start()
             return jsonify({'status': 'ok'}), 200
         
         elif text.startswith('/stop'):
-            send_message(user_id, "⏹️ Останавливаю публикацию...")
-            publisher.stop(user_id)
+            send_message(chat_id, "⏹️ Останавливаю публикацию...")
+            publisher.stop(chat_id)
             return jsonify({'status': 'ok'}), 200
         
         elif text.startswith('/stop_global'):
@@ -159,7 +180,7 @@ def webhook():
             response = f"❓ Неизвестная команда. Используйте /help"
         
         if response:
-            send_message(user_id, response)
+            send_message(chat_id, response)
         
         return jsonify({'status': 'ok'}), 200
         
@@ -196,6 +217,7 @@ def upload_folder():
 def status():
     return jsonify({
         'status': 'running',
+        'api_available': api is not None,
         'global_stop': publisher.global_stop,
         'running': publisher.running,
         'auto_publish': False
