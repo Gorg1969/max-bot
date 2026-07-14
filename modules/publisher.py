@@ -2,7 +2,9 @@ import logging
 import os
 import time
 import re
-import base64
+import json
+import threading
+import hashlib
 from enum import Enum
 from PIL import Image, ExifTags
 import io
@@ -14,15 +16,95 @@ class UserState(Enum):
     PUBLISHING = "publishing"
     STOPPED = "stopped"
 
-# Глобальный флаг для остановки всех публикаций
-GLOBAL_STOP = False
-
 class Publisher:
     def __init__(self, api, file_manager, db):
         self.api = api
         self.fm = file_manager
         self.db = db
         self.user_states = {}  # user_id -> UserState
+        
+        # Флаги для реальной остановки
+        self.running = False
+        self.stop_requested = False
+        self.publish_thread = None
+        
+        # Защита от дубликатов
+        self.published_hashes = set()
+        self.hash_file = "published_hashes.json"
+        self._load_published_hashes()
+        
+        # Состояние глобального стопа
+        self.global_stop_file = "global_stop.json"
+        self._load_global_stop_state()
+    
+    def _load_published_hashes(self):
+        """Загружает хэши опубликованных объявлений"""
+        try:
+            if os.path.exists(self.hash_file):
+                with open(self.hash_file, 'r') as f:
+                    data = json.load(f)
+                    self.published_hashes = set(data.get('hashes', []))
+                logger.info(f"🔓 Загружено {len(self.published_hashes)} хэшей опубликованных объявлений")
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки хэшей: {e}")
+            self.published_hashes = set()
+    
+    def _save_published_hashes(self):
+        """Сохраняет хэши опубликованных объявлений"""
+        try:
+            with open(self.hash_file, 'w') as f:
+                json.dump({'hashes': list(self.published_hashes)}, f)
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения хэшей: {e}")
+    
+    def _load_global_stop_state(self):
+        """Загружает состояние глобального стопа"""
+        try:
+            if os.path.exists(self.global_stop_file):
+                with open(self.global_stop_file, 'r') as f:
+                    data = json.load(f)
+                    self.global_stop = data.get('global_stop', False)
+                logger.info(f"🔓 Загружено состояние глобального стопа: {self.global_stop}")
+            else:
+                self.global_stop = False
+                self._save_global_stop_state()
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки состояния: {e}")
+            self.global_stop = False
+    
+    def _save_global_stop_state(self):
+        """Сохраняет состояние глобального стопа"""
+        try:
+            with open(self.global_stop_file, 'w') as f:
+                json.dump({'global_stop': self.global_stop}, f)
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения состояния: {e}")
+    
+    def _get_ad_hash(self, folder_path):
+        """Создает уникальный хэш объявления"""
+        hasher = hashlib.md5()
+        try:
+            # Хэшируем содержимое info.txt
+            info_path = os.path.join(folder_path, 'info.txt')
+            if os.path.exists(info_path):
+                with open(info_path, 'rb') as f:
+                    hasher.update(f.read())
+            
+            # Хэшируем имена файлов изображений
+            files = sorted(os.listdir(folder_path))
+            for f in files:
+                if f.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    hasher.update(f.encode())
+                    # Добавляем размер файла для надежности
+                    file_path = os.path.join(folder_path, f)
+                    if os.path.exists(file_path):
+                        hasher.update(str(os.path.getsize(file_path)).encode())
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания хэша: {e}")
+            return str(time.time())
+        
+        return hasher.hexdigest()
     
     def extract_chat_id(self, folder_name):
         match = re.search(r'-\s*(\d+)', folder_name)
@@ -97,29 +179,206 @@ class Publisher:
     
     def stop_global(self):
         """Глобальная остановка всех публикаций"""
-        global GLOBAL_STOP
-        GLOBAL_STOP = True
+        self.global_stop = True
+        self._save_global_stop_state()
         logger.info("🛑 ГЛОБАЛЬНАЯ ОСТАНОВКА ВСЕХ ПУБЛИКАЦИЙ")
-        # Очищаем все состояния
+        
+        # Останавливаем цикл публикации
+        self.stop_publishing_loop()
+        
+        # Останавливаем всех пользователей
         for user_id in list(self.user_states.keys()):
-            self.user_states[user_id] = UserState.STOPPED
+            if self.user_states[user_id] == UserState.PUBLISHING:
+                self.user_states[user_id] = UserState.STOPPED
+                self.api.send_message(user_id, "⏹️ Публикация остановлена глобальной командой.")
+        
         return True
     
     def reset_global_stop(self):
         """Сброс глобального флага остановки"""
-        global GLOBAL_STOP
-        GLOBAL_STOP = False
+        self.global_stop = False
+        self._save_global_stop_state()
         logger.info("🔄 Глобальный флаг остановки сброшен")
+        return True
+    
+    def start_publishing_loop(self, user_id, check_interval=60):
+        """Запускает непрерывный цикл публикации новых объявлений"""
+        if self.running:
+            logger.warning("⚠️ Цикл публикации уже запущен")
+            return False
+        
+        if self.global_stop:
+            logger.warning(f"⚠️ Глобальная остановка активна! Публикация для {user_id} невозможна")
+            self.api.send_message(user_id, "⚠️ Публикация запрещена глобальной остановкой. Выполните /reset_global")
+            return False
+        
+        self.running = True
+        self.stop_requested = False
+        
+        self.publish_thread = threading.Thread(
+            target=self._publishing_loop,
+            args=(user_id, check_interval)
+        )
+        self.publish_thread.daemon = True
+        self.publish_thread.start()
+        
+        logger.info(f"🚀 Запущен цикл публикации для пользователя {user_id}")
+        self.api.send_message(user_id, f"🔄 Запущен автоматический поиск новых объявлений (проверка каждые {check_interval} сек)")
+        return True
+    
+    def stop_publishing_loop(self):
+        """Останавливает цикл публикации"""
+        if not self.running:
+            logger.info("ℹ️ Цикл публикации не запущен")
+            return False
+        
+        logger.info("⏹️ Остановка цикла публикации...")
+        self.stop_requested = True
+        self.running = False
+        
+        if self.publish_thread and self.publish_thread.is_alive():
+            self.publish_thread.join(timeout=5)
+        
+        logger.info("✅ Цикл публикации остановлен")
+        return True
+    
+    def _publishing_loop(self, user_id, check_interval):
+        """Основной цикл публикации"""
+        logger.info(f"🔄 Запущен цикл проверки для {user_id}")
+        
+        while not self.stop_requested and self.running:
+            try:
+                # Проверяем глобальный стоп
+                if self.global_stop:
+                    logger.info(f"⏹️ Глобальная остановка! Цикл прерван для {user_id}")
+                    self.api.send_message(user_id, "⏹️ Цикл публикации прерван глобальной остановкой.")
+                    break
+                
+                # Проверяем новые объявления
+                new_ads = self._check_new_ads(user_id)
+                
+                if new_ads:
+                    logger.info(f"📢 Найдено {len(new_ads)} новых объявлений для {user_id}")
+                    self.api.send_message(user_id, f"📢 Найдено {len(new_ads)} новых объявлений. Начинаю публикацию...")
+                    
+                    for ad in new_ads:
+                        if self.stop_requested or not self.running or self.global_stop:
+                            break
+                        self._publish_ad(user_id, ad)
+                        time.sleep(2)  # Задержка между отправками
+                
+                # Ждем следующую проверку
+                for _ in range(check_interval):
+                    if self.stop_requested or not self.running or self.global_stop:
+                        break
+                    time.sleep(1)
+                    
+            except Exception as e:
+                logger.error(f"❌ Ошибка в цикле публикации: {e}")
+                time.sleep(10)  # Пауза при ошибке
+        
+        self.running = False
+        self.api.send_message(user_id, "⏹️ Цикл публикации завершен")
+        logger.info(f"⏹️ Цикл публикации для {user_id} завершен")
+    
+    def _check_new_ads(self, user_id):
+        """Проверяет новые объявления для публикации"""
+        try:
+            user_folder = self.fm.get_user_folder(user_id)
+            samosvaly_path = os.path.join(user_folder, "Самосвалы")
+            
+            new_ads = []
+            
+            if os.path.exists(samosvaly_path) and os.path.isdir(samosvaly_path):
+                for folder_name in os.listdir(samosvaly_path):
+                    folder_path = os.path.join(samosvaly_path, folder_name)
+                    if os.path.isdir(folder_path):
+                        info_path = os.path.join(folder_path, 'info.txt')
+                        if os.path.exists(info_path):
+                            # Проверяем, не опубликовано ли уже
+                            ad_hash = self._get_ad_hash(folder_path)
+                            if ad_hash not in self.published_hashes:
+                                new_ads.append(folder_name)
+                                # Сразу добавляем в опубликованные, чтобы не дублировать
+                                self.published_hashes.add(ad_hash)
+                                self._save_published_hashes()
+            
+            return new_ads
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки новых объявлений: {e}")
+            return []
+    
+    def _publish_ad(self, user_id, folder_name):
+        """Публикует одно объявление"""
+        try:
+            user_folder = self.fm.get_user_folder(user_id)
+            folder_path = os.path.join(user_folder, "Самосвалы", folder_name)
+            
+            if not os.path.exists(folder_path):
+                return False
+            
+            # Читаем текст
+            info_path = os.path.join(folder_path, 'info.txt')
+            with open(info_path, 'r', encoding='utf-8') as f:
+                text = f.read()
+            
+            # Извлекаем chat_id
+            chat_id = self.extract_chat_id(folder_name)
+            if not chat_id:
+                logger.warning(f"⚠️ Не удалось извлечь ID чата из {folder_name}")
+                return False
+            
+            # Получаем фото
+            images = self.get_sorted_images(folder_path, max_count=10)
+            logger.info(f"📤 Публикация в чат {chat_id}: {folder_name}, фото: {len(images)}")
+            
+            # Проверяем остановку перед отправкой
+            if self.stop_requested or not self.running or self.global_stop:
+                logger.info(f"⏹️ Публикация прервана для {folder_name}")
+                return False
+            
+            photo_files = []
+            for img_name in images:
+                img_path = os.path.join(folder_path, img_name)
+                if os.path.exists(img_path):
+                    try:
+                        compressed = self.compress_image(img_path)
+                        photo_files.append((img_name, compressed))
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка сжатия {img_name}: {e}")
+            
+            # Отправляем
+            if photo_files:
+                success = self.api.send_photos_to_chat(
+                    chat_id=chat_id,
+                    photo_files=photo_files,
+                    text=text
+                )
+            else:
+                success = self.api.send_message_to_chat(chat_id, text)
+            
+            if success:
+                self.db.add_publication(user_id, folder_name, chat_id)
+                logger.info(f"✅ Опубликовано: {folder_name}")
+                return True
+            else:
+                logger.error(f"❌ Не удалось опубликовать: {folder_name}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка публикации {folder_name}: {e}")
+            return False
     
     def start(self, user_id):
-        """Запускает публикацию для пользователя"""
+        """Запускает однократную публикацию всех объявлений (существующий метод)"""
         global GLOBAL_STOP
         
         try:
             # Проверяем глобальный стоп
-            if GLOBAL_STOP:
+            if self.global_stop:
                 logger.warning(f"⚠️ Глобальная остановка активна! Публикация для {user_id} невозможна")
-                self.api.send_message(user_id, "⚠️ Публикация запрещена глобальной остановкой. Сначала выполните /reset")
+                self.api.send_message(user_id, "⚠️ Публикация запрещена глобальной остановкой. Выполните /reset_global")
                 return False
             
             # Проверяем, не запущена ли уже публикация
@@ -158,7 +417,7 @@ class Publisher:
             
             for folder_name in subfolders:
                 # Проверяем глобальный стоп
-                if GLOBAL_STOP:
+                if self.global_stop:
                     logger.info(f"⏹️ ГЛОБАЛЬНАЯ ОСТАНОВКА! Публикация прервана для {user_id}")
                     self.api.send_message(user_id, "⏹️ Публикация прервана глобальной остановкой.")
                     self.user_states[user_id] = UserState.STOPPED
@@ -170,11 +429,12 @@ class Publisher:
                     break
                 
                 try:
-                    # Определяем путь к папке
-                    if os.path.exists(samosvaly_path):
-                        folder_path = os.path.join(samosvaly_path, folder_name)
-                    else:
-                        folder_path = os.path.join(user_folder, folder_name)
+                    # Проверяем, не опубликовано ли уже
+                    folder_path = os.path.join(samosvaly_path, folder_name)
+                    ad_hash = self._get_ad_hash(folder_path)
+                    if ad_hash in self.published_hashes:
+                        logger.info(f"ℹ️ Объявление {folder_name} уже было опубликовано, пропускаем")
+                        continue
                     
                     info_path = os.path.join(folder_path, 'info.txt')
                     if not os.path.exists(info_path):
@@ -193,7 +453,7 @@ class Publisher:
                     logger.info(f"📤 Публикация в чат {chat_id}: {folder_name}, фото: {len(images)}")
                     
                     # Проверяем глобальный стоп
-                    if GLOBAL_STOP:
+                    if self.global_stop:
                         logger.info(f"⏹️ ГЛОБАЛЬНАЯ ОСТАНОВКА! Публикация прервана для {user_id}")
                         self.api.send_message(user_id, "⏹️ Публикация прервана глобальной остановкой.")
                         self.user_states[user_id] = UserState.STOPPED
@@ -203,7 +463,7 @@ class Publisher:
                     if self.user_states.get(user_id) == UserState.STOPPED:
                         break
                     
-                    # Подготавливаем фото (до 10 штук)
+                    # Подготавливаем фото
                     photo_files = []
                     for img_name in images:
                         img_path = os.path.join(folder_path, img_name)
@@ -215,7 +475,7 @@ class Publisher:
                         except Exception as e:
                             logger.error(f"❌ Ошибка сжатия {img_name}: {e}")
                     
-                    # Отправляем ОДНО сообщение с текстом и фото (до 10 фото)
+                    # Отправляем
                     if photo_files:
                         success = self.api.send_photos_to_chat(
                             chat_id=chat_id,
@@ -223,18 +483,21 @@ class Publisher:
                             text=text
                         )
                     else:
-                        # Если фото нет, шлём хотя бы текст
                         success = self.api.send_message_to_chat(chat_id, text)
                     
                     if not success:
                         logger.error(f"❌ Не удалось отправить объявление в {chat_id}")
                         continue
                     
+                    # Добавляем в опубликованные
+                    self.published_hashes.add(ad_hash)
+                    self._save_published_hashes()
+                    
                     # Запись в БД и задержка
                     self.db.add_publication(user_id, folder_name, chat_id)
                     published += 1
                     logger.info(f"✅ Опубликовано: {folder_name}")
-                    time.sleep(2)  # задержка между постами
+                    time.sleep(2)
                     
                 except Exception as e:
                     logger.error(f"❌ Ошибка при публикации {folder_name}: {e}")
