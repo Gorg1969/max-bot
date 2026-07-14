@@ -19,10 +19,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================
-# ГЛОБАЛЬНЫЙ EVENT LOOP (СОЗДАЕМ 1 РАЗ)
+# ГЛОБАЛЬНЫЙ EVENT LOOP
 # ============================================
 
-# Создаем event loop при старте
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
@@ -50,13 +49,13 @@ def init_max_api():
         # Пробуем SyncBot
         if hasattr(maxapi, 'SyncBot'):
             api = maxapi.SyncBot(token=token)
-            logger.info("✅ MAX API инициализирован через SyncBot")
+            logger.info("✅ MAX API инициализирован через SyncBot (синхронный)")
             return api
         
-        # Используем Bot с event loop
+        # Используем Bot
         elif hasattr(maxapi, 'Bot'):
             api = maxapi.Bot(token=token)
-            logger.info("✅ MAX API инициализирован через Bot (с event loop)")
+            logger.info("✅ MAX API инициализирован через Bot (асинхронный)")
             return api
         
         else:
@@ -75,38 +74,20 @@ app = Flask(__name__)
 db = Database()
 fm = FileManager()
 api = init_max_api()
-publisher = Publisher(api, fm, db)
+publisher = Publisher(api, fm, db)  # ← Ваш publisher.py с _call_api
 web_interface = WebInterface(fm, publisher)
 
 # ========== ФУНКЦИИ ОТПРАВКИ ==========
 
 def send_message(chat_id, text):
-    """Отправка сообщения через event loop"""
+    """Отправка сообщения"""
     if not api:
         logger.warning(f"⚠️ API не инициализирован!")
         return False
     
     try:
-        # Проверяем, есть ли метод send_message
-        if hasattr(api, 'send_message'):
-            # Запускаем через event loop
-            future = asyncio.run_coroutine_threadsafe(
-                api.send_message(chat_id, text),
-                loop
-            )
-            future.result(timeout=30)
-        elif hasattr(api, 'sendMessage'):
-            future = asyncio.run_coroutine_threadsafe(
-                api.sendMessage(chat_id, text),
-                loop
-            )
-            future.result(timeout=30)
-        else:
-            logger.error(f"❌ Нет метода отправки!")
-            return False
-        
-        logger.info(f"✅ Сообщение отправлено в {chat_id}")
-        return True
+        # Используем метод из publisher
+        return publisher.send_message(chat_id, text)
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
         return False
@@ -234,6 +215,4 @@ if __name__ == '__main__':
     logger.info("📌 АВТОМАТИЧЕСКАЯ ПУБЛИКАЦИЯ ОТКЛЮЧЕНА")
     logger.info("📌 Используйте /publish для однократной публикации")
     logger.info("=" * 50)
-    
-    # Запускаем Flask
     app.run(host='0.0.0.0', port=port, debug=False)
