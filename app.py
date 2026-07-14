@@ -2,8 +2,7 @@ import logging
 import os
 import time
 import threading
-import asyncio
-import inspect
+import requests
 from flask import Flask, request, jsonify, render_template_string
 
 # Импорты из modules
@@ -20,16 +19,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================
-# ИНИЦИАЛИЗАЦИЯ MAX API
+# ИНИЦИАЛИЗАЦИЯ
 # ============================================
 
-def init_max_api():
-    """Инициализация MAX API"""
-    token = (
+def get_token():
+    """Получает токен из переменных окружения"""
+    return (
         os.environ.get('API_TOKEN') or
         os.environ.get('MAX_TOKEN') or
         os.environ.get('MAX_BOT_TOKEN')
     )
+
+def init_max_api():
+    """Инициализация MAX API"""
+    token = get_token()
     
     if not token:
         logger.error("❌ Токен не найден!")
@@ -50,10 +53,6 @@ def init_max_api():
         logger.error(f"❌ Ошибка инициализации: {e}")
         return None
 
-# ============================================
-# ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЯ
-# ============================================
-
 app = Flask(__name__)
 
 db = Database()
@@ -62,24 +61,35 @@ api = init_max_api()
 publisher = Publisher(api, fm, db)
 web_interface = WebInterface(fm, publisher)
 
-# ========== ФУНКЦИИ ОТПРАВКИ (ИСПРАВЛЕНА) ==========
+# ========== ОТПРАВКА СООБЩЕНИЙ ==========
 
 def send_message(chat_id, text):
-    """Отправка сообщения с поддержкой асинхронных методов"""
-    if not api:
-        logger.warning(f"⚠️ API не инициализирован!")
+    """Отправка сообщения в чат (ПРАВИЛЬНАЯ ВЕРСИЯ)"""
+    token = get_token()
+    if not token:
+        logger.warning(f"⚠️ Токен не найден!")
         return False
     
     try:
-        # Проверяем, является ли метод асинхронным
-        if inspect.iscoroutinefunction(api.send_message):
-            # Если асинхронный - запускаем через asyncio
-            asyncio.run(api.send_message(chat_id, text))
+        url = "https://platform-api2.max.ru/messages"
+        headers = {
+            "Authorization": token,
+            "Content-Type": "application/json",
+        }
+        json_data = {
+            "chat_id": chat_id,  # ← chat_id из вебхука
+            "text": text,
+        }
+        
+        logger.info(f"📤 Отправка в {chat_id}: {text[:30]}...")
+        response = requests.post(url, headers=headers, json=json_data, timeout=30)
+        
+        if response.status_code == 200:
+            logger.info(f"✅ Сообщение отправлено в {chat_id}")
+            return True
         else:
-            # Если синхронный - вызываем напрямую
-            api.send_message(chat_id, text)
-        logger.info(f"✅ Сообщение отправлено в {chat_id}")
-        return True
+            logger.error(f"❌ Ошибка API: {response.status_code} - {response.text}")
+            return False
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
         return False
@@ -96,14 +106,12 @@ def webhook():
         if not data:
             return jsonify({'status': 'ok'}), 200
         
-        # Проверяем тип обновления
         update_type = data.get('update_type')
         
         # Пропускаем не-сообщения
         if update_type != 'message_created':
             return jsonify({'status': 'ok'}), 200
         
-        # Извлекаем данные
         message = data.get('message', {})
         recipient = message.get('recipient', {})
         body = message.get('body', {})
@@ -118,7 +126,6 @@ def webhook():
         
         response = None
         
-        # ===== ОБРАБОТКА КОМАНД =====
         if text.startswith('/start'):
             response = "👋 Привет! Я бот для публикации объявлений.\nИспользуйте /help для списка команд."
         
