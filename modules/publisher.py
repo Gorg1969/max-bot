@@ -26,67 +26,6 @@ class Publisher:
             return f"-{match.group(1)}"
         return None
     
-    def fix_image_orientation(self, img):
-        """Исправляет ориентацию изображения на основе EXIF-данных"""
-        try:
-            for orientation in ExifTags.TAGS.keys():
-                if ExifTags.TAGS[orientation] == 'Orientation':
-                    break
-            
-            exif = img._getexif()
-            if exif and orientation in exif:
-                orientation_value = exif[orientation]
-                if orientation_value == 3:
-                    img = img.rotate(180, expand=True)
-                elif orientation_value == 6:
-                    img = img.rotate(270, expand=True)
-                elif orientation_value == 8:
-                    img = img.rotate(90, expand=True)
-        except Exception as e:
-            logger.debug(f"⚠️ Ошибка исправления ориентации: {e}")
-        return img
-    
-    def compress_image_to_bytes(self, image_path, max_size_mb=0.8, quality=75):
-        """
-        Сжимает изображение и возвращает бинарные данные (bytes)
-        БЕЗ СОХРАНЕНИЯ НА ДИСК!
-        """
-        try:
-            with Image.open(image_path) as img:
-                # Исправляем ориентацию
-                img = self.fix_image_orientation(img)
-                
-                # Конвертируем в RGB (для JPEG)
-                if img.mode in ('RGBA', 'P'):
-                    img = img.convert('RGB')
-                
-                # Уменьшаем размер (максимум 1280px)
-                max_dimension = 1280
-                if img.width > max_dimension or img.height > max_dimension:
-                    ratio = min(max_dimension / img.width, max_dimension / img.height)
-                    new_size = (int(img.width * ratio), int(img.height * ratio))
-                    img = img.resize(new_size, Image.Resampling.LANCZOS)
-                
-                # Сохраняем в память (BytesIO)
-                buffer = io.BytesIO()
-                img.save(buffer, format='JPEG', quality=quality, optimize=True, progressive=True)
-                compressed_data = buffer.getvalue()
-                
-                # Если всё ещё слишком большое - сжимаем сильнее
-                if len(compressed_data) > max_size_mb * 1024 * 1024:
-                    buffer = io.BytesIO()
-                    img.save(buffer, format='JPEG', quality=50, optimize=True, progressive=True)
-                    compressed_data = buffer.getvalue()
-                
-                logger.debug(f"✅ Сжато: {image_path} -> {len(compressed_data) / 1024:.1f} КБ")
-                return compressed_data
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка сжатия {image_path}: {e}")
-            # Если сжатие не удалось - читаем файл как есть
-            with open(image_path, 'rb') as f:
-                return f.read()
-    
     def get_sorted_images(self, folder_path, max_count=10):
         """Возвращает отсортированный список изображений (до 10)"""
         images = []
@@ -158,7 +97,7 @@ class Publisher:
                         logger.warning(f"⚠️ Не удалось извлечь ID чата из {folder_name}")
                         continue
                     
-                    # Получаем до 10 изображений
+                    # Получаем до 10 изображений (уже сжатые на клиенте!)
                     images = self.get_sorted_images(folder_path, max_count=10)
                     logger.info(f"📤 Публикация в чат {chat_id}: {folder_name}, фото: {len(images)}")
                     
@@ -167,19 +106,17 @@ class Publisher:
                         logger.info(f"⏹️ Публикация остановлена пользователем {user_id}")
                         break
                     
-                    # Подготавливаем фото С ЖАТИЕМ В ПАМЯТИ!
+                    # Читаем фото с диска (они уже сжаты на клиенте!)
                     photo_files = []
                     for img_name in images:
                         img_path = os.path.join(folder_path, img_name)
                         if not os.path.exists(img_path):
                             continue
                         try:
-                            # Сжимаем в памяти (НЕ СОХРАНЯЕМ НА ДИСК!)
-                            compressed = self.compress_image_to_bytes(img_path)
-                            photo_files.append((img_name, compressed))
-                            logger.debug(f"✅ Фото готово: {img_name} ({len(compressed) / 1024:.1f} КБ)")
+                            with open(img_path, 'rb') as f:
+                                photo_files.append((img_name, f.read()))
                         except Exception as e:
-                            logger.error(f"❌ Ошибка подготовки {img_name}: {e}")
+                            logger.error(f"❌ Ошибка чтения {img_name}: {e}")
                     
                     # Отправляем
                     if photo_files:
