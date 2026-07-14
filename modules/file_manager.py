@@ -12,32 +12,63 @@ class FileManager:
         os.makedirs(data_dir, exist_ok=True)
     
     def get_user_folder(self, user_id):
+        """Возвращает папку пользователя"""
         user_folder = os.path.join(self.data_dir, f"user_{user_id}")
         os.makedirs(user_folder, exist_ok=True)
         return user_folder
     
-    def get_temp_folder(self, user_id):
-        temp_folder = os.path.join(self.get_user_folder(user_id), "temp_upload")
-        os.makedirs(temp_folder, exist_ok=True)
-        return temp_folder
+    def get_ads_folder(self, user_id):
+        """
+        Возвращает ФИКСИРОВАННУЮ папку для объявлений пользователя
+        С проверкой существования и автоматическим созданием
+        """
+        user_folder = self.get_user_folder(user_id)
+        ads_folder = os.path.join(user_folder, "ads")
+        
+        # Проверяем существование папки
+        if not os.path.exists(ads_folder):
+            os.makedirs(ads_folder, exist_ok=True)
+            logger.info(f"📁 Создана папка ads для пользователя {user_id}")
+        else:
+            logger.info(f"📁 Папка ads существует для пользователя {user_id}")
+        
+        return ads_folder
     
-    def extract_chat_id_from_name(self, folder_name):
-        match = re.search(r'-\s*(\d+)', folder_name)
-        if match:
-            return f"-{match.group(1)}"
-        return None
+    def clear_ads_folder(self, user_id):
+        """
+        ОЧИЩАЕТ папку ads пользователя (удаляет всё содержимое)
+        """
+        ads_folder = self.get_ads_folder(user_id)
+        if os.path.exists(ads_folder):
+            # Удаляем всё содержимое, но оставляем саму папку
+            for item in os.listdir(ads_folder):
+                item_path = os.path.join(ads_folder, item)
+                try:
+                    if os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+                    else:
+                        os.remove(item_path)
+                except Exception as e:
+                    logger.error(f"❌ Ошибка удаления {item_path}: {e}")
+            logger.info(f"🗑️ Папка ads очищена для пользователя {user_id}")
+        else:
+            logger.info(f"ℹ️ Папка ads не существовала, создаю...")
+            os.makedirs(ads_folder, exist_ok=True)
     
     def save_uploaded_files_stream(self, files, user_id, append=False):
-        """ПОТОКОВОЕ сохранение файлов - НЕ ДЕРЖИТ В ПАМЯТИ!"""
+        """
+        ПОТОКОВОЕ сохранение файлов - ВСЕГДА в папку ads/
+        Если append=False - папка очищается перед сохранением
+        """
         try:
-            user_folder = self.get_user_folder(user_id)
+            # Получаем папку ads (создаётся автоматически)
+            ads_folder = self.get_ads_folder(user_id)
             
+            # Если не append - ОЧИЩАЕМ папку
             if not append:
-                if os.path.exists(user_folder):
-                    shutil.rmtree(user_folder)
-                os.makedirs(user_folder, exist_ok=True)
-            else:
-                os.makedirs(user_folder, exist_ok=True)
+                self.clear_ads_folder(user_id)
+                # Папка очищена, теперь сохраняем
+                ads_folder = self.get_ads_folder(user_id)
             
             saved_count = 0
             for file in files:
@@ -46,8 +77,9 @@ class FileManager:
                 if file.filename.startswith('.'):
                     continue
                 
+                # Сохраняем файлы с сохранением структуры подпапок
                 rel_path = file.filename
-                full_path = os.path.join(user_folder, rel_path)
+                full_path = os.path.join(ads_folder, rel_path)
                 os.makedirs(os.path.dirname(full_path), exist_ok=True)
                 
                 with open(full_path, 'wb') as f:
@@ -58,120 +90,67 @@ class FileManager:
                         f.write(chunk)
                 saved_count += 1
             
-            logger.info(f"✅ Сохранено {saved_count} файлов (append={append})")
+            logger.info(f"✅ Сохранено {saved_count} файлов в /ads/ для пользователя {user_id}")
             return {'success': True, 'saved_count': saved_count}
             
         except Exception as e:
             logger.error(f"❌ Ошибка сохранения: {e}")
             return {'success': False, 'error': str(e)}
     
-    def save_uploaded_files(self, files, user_id):
-        """Старый метод - оставлен для совместимости"""
-        try:
-            temp_folder = self.get_temp_folder(user_id)
-            if os.path.exists(temp_folder):
-                shutil.rmtree(temp_folder)
-            os.makedirs(temp_folder)
-            
-            saved_count = 0
-            for file in files:
-                rel_path = getattr(file, 'filename', file.name)
-                if not rel_path:
-                    rel_path = file.name
-                full_path = os.path.join(temp_folder, rel_path)
-                os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                file.save(full_path)
-                saved_count += 1
-            
-            logger.info(f"✅ Сохранено {saved_count} файлов во временную папку")
-            
-            folders = []
-            for item in os.listdir(temp_folder):
-                item_path = os.path.join(temp_folder, item)
-                if os.path.isdir(item_path):
-                    info_path = os.path.join(item_path, 'info.txt')
-                    if os.path.exists(info_path):
-                        folders.append(item)
-                        logger.info(f"📁 Найдена папка объявления: {item}")
-                    else:
-                        logger.warning(f"⚠️ В папке {item} нет info.txt")
-            
-            if not folders:
-                return {
-                    'success': False,
-                    'folders': [],
-                    'message': 'Не найдено папок с info.txt'
-                }
-            
-            user_folder = self.get_user_folder(user_id)
-            moved_folders = []
-            for folder in folders:
-                src = os.path.join(temp_folder, folder)
-                dst = os.path.join(user_folder, folder)
-                if os.path.exists(dst):
-                    shutil.rmtree(dst)
-                shutil.move(src, dst)
-                moved_folders.append(folder)
-                logger.info(f"📦 Перенесена папка {folder}")
-            
-            shutil.rmtree(temp_folder)
-            return {
-                'success': True,
-                'folders': moved_folders,
-                'message': f'✅ Загружено {len(moved_folders)} объявлений'
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка сохранения файлов: {e}")
-            return {
-                'success': False,
-                'folders': [],
-                'message': f'Ошибка: {str(e)}'
-            }
+    def get_subfolders(self, user_id):
+        """
+        Возвращает список подпапок с info.txt из папки ads/
+        """
+        ads_folder = self.get_ads_folder(user_id)
+        subfolders = []
+        
+        if not os.path.exists(ads_folder):
+            logger.warning(f"⚠️ Папка ads не существует для пользователя {user_id}")
+            return subfolders
+        
+        # Рекурсивно обходим папку ads/
+        for root, dirs, files in os.walk(ads_folder):
+            if 'info.txt' in files:
+                # Берем имя папки относительно ads/
+                rel_path = os.path.relpath(root, ads_folder)
+                if rel_path == '.':
+                    folder_name = os.path.basename(root)
+                else:
+                    folder_name = rel_path
+                subfolders.append(folder_name)
+                logger.info(f"📁 Найдена папка с info.txt: {folder_name}")
+        
+        logger.info(f"📁 Всего найдено {len(subfolders)} папок с info.txt для пользователя {user_id}")
+        return subfolders
     
-    def extract_zip(self, user_id, zip_path):
-        try:
-            user_folder = self.get_user_folder(user_id)
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(user_folder)
-            logger.info(f"✅ ZIP распакован для пользователя {user_id}")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Ошибка распаковки ZIP: {e}")
-            return False
+    def get_folder_path(self, user_id, folder_name):
+        """Возвращает путь к конкретной папке в ads/"""
+        ads_folder = self.get_ads_folder(user_id)
+        return os.path.join(ads_folder, folder_name)
     
     def clear_user_data(self, user_id):
+        """Полностью удаляет папку пользователя"""
         user_folder = self.get_user_folder(user_id)
         if os.path.exists(user_folder):
             shutil.rmtree(user_folder)
             os.makedirs(user_folder, exist_ok=True)
-            logger.info(f"🗑️ Данные пользователя {user_id} очищены")
+            logger.info(f"🗑️ Все данные пользователя {user_id} удалены")
     
     def get_folders(self, user_id):
-        user_folder = self.get_user_folder(user_id)
+        """Возвращает список папок с info.txt из ads/"""
+        ads_folder = self.get_ads_folder(user_id)
         folders = []
-        if os.path.exists(user_folder):
-            for item in os.listdir(user_folder):
-                item_path = os.path.join(user_folder, item)
+        if os.path.exists(ads_folder):
+            for item in os.listdir(ads_folder):
+                item_path = os.path.join(ads_folder, item)
                 if os.path.isdir(item_path):
                     info_path = os.path.join(item_path, 'info.txt')
                     if os.path.exists(info_path):
                         folders.append(item)
         return folders
     
-    def get_folder_path(self, user_id, folder_name):
-        return os.path.join(self.get_user_folder(user_id), folder_name)
-    
-    def get_subfolders(self, user_id):
-        user_folder = self.get_user_folder(user_id)
-        subfolders = []
-        if not os.path.exists(user_folder):
-            logger.warning(f"⚠️ Папка пользователя {user_id} не существует")
-            return subfolders
-        for root, dirs, files in os.walk(user_folder):
-            if 'info.txt' in files:
-                folder_name = os.path.basename(root)
-                subfolders.append(folder_name)
-                logger.info(f"📁 Найдена подпапка с info.txt: {folder_name}")
-        logger.info(f"📁 Всего найдено {len(subfolders)} подпапок для пользователя {user_id}")
-        return subfolders
+    def extract_chat_id_from_name(self, folder_name):
+        match = re.search(r'-\s*(\d+)', folder_name)
+        if match:
+            return f"-{match.group(1)}"
+        return None
