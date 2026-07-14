@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # ============================================
 
 def init_max_api():
-    """Инициализация MAX API"""
+    """Инициализация MAX API - используем SyncBot!"""
     token = (
         os.environ.get('API_TOKEN') or
         os.environ.get('MAX_TOKEN') or
@@ -37,16 +37,19 @@ def init_max_api():
     
     try:
         import maxapi
-        # Пробуем использовать синхронный клиент
+        
+        # Пробуем SyncBot - СИНХРОННАЯ ВЕРСИЯ!
         if hasattr(maxapi, 'SyncBot'):
             api = maxapi.SyncBot(token=token)
-            logger.info("✅ MAX API инициализирован через класс: SyncBot (синхронный)")
+            logger.info("✅ MAX API инициализирован через класс: SyncBot (СИНХРОННЫЙ)")
             return api
+        
+        # Если SyncBot нет - пробуем Bot (но он асинхронный)
         elif hasattr(maxapi, 'Bot'):
-            api = maxapi.Bot(token=token)
-            logger.info("✅ MAX API инициализирован через класс: Bot (асинхронный)")
-            logger.warning("⚠️ Bot - асинхронный, могут быть проблемы с отправкой")
-            return api
+            logger.error("❌ SyncBot не найден в maxapi!")
+            logger.warning("⚠️ Bot - асинхронный, НЕ БУДЕТ РАБОТАТЬ!")
+            return None
+        
         else:
             logger.error("❌ Не найден подходящий класс в maxapi")
             return None
@@ -69,13 +72,13 @@ web_interface = WebInterface(fm, publisher)
 # ========== ФУНКЦИИ ОТПРАВКИ ==========
 
 def send_message(chat_id, text):
-    """Отправка сообщения - ПРОСТОЙ ВЫЗОВ"""
+    """Отправка сообщения"""
     if not api:
         logger.warning(f"⚠️ API не инициализирован!")
         return False
     
     try:
-        # Просто вызываем метод, без всяких await/asyncio
+        # Проверяем, есть ли метод send_message
         if hasattr(api, 'send_message'):
             api.send_message(chat_id, text)
         elif hasattr(api, 'sendMessage'):
@@ -88,6 +91,8 @@ def send_message(chat_id, text):
         return True
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 # ========== ВЕБХУК ==========
