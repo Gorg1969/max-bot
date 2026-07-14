@@ -34,45 +34,20 @@ def get_token():
         os.environ.get('MAX_BOT_TOKEN')
     )
 
-def init_max_api():
-    """Инициализация MAX API"""
-    token = get_token()
-    
-    if not token:
-        logger.error("❌ Токен не найден!")
-        return None
-    
-    logger.info(f"✅ Токен найден (первые 10): {token[:10]}...")
-    
-    try:
-        import maxapi
-        if hasattr(maxapi, 'Bot'):
-            api = maxapi.Bot(token=token)
-            logger.info("✅ MAX API инициализирован через Bot")
-            return api
-        else:
-            logger.error("❌ Не найден класс Bot в maxapi")
-            return None
-    except Exception as e:
-        logger.error(f"❌ Ошибка инициализации: {e}")
-        return None
-
-# ============================================
-# ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЯ
-# ============================================
-
 app = Flask(__name__)
 
 db = Database()
 fm = FileManager()
-api = init_max_api()
-publisher = Publisher(api, fm, db)
+publisher = Publisher(None, fm, db)
 web_interface = WebInterface(fm, publisher)
 
-# ========== ОТПРАВКА СООБЩЕНИЙ (ИСПРАВЛЕНА) ==========
+# Храним ID последнего обработанного сообщения
+last_processed_mid = None
+
+# ========== ОТПРАВКА СООБЩЕНИЙ ==========
 
 def send_message(chat_id, text):
-    """Отправка сообщения в чат (используем chat_id из вебхука)"""
+    """Отправка сообщения в чат (используем chat_id)"""
     token = get_token()
     if not token:
         logger.warning(f"⚠️ Токен не найден!")
@@ -84,7 +59,6 @@ def send_message(chat_id, text):
             "Authorization": token,
             "Content-Type": "application/json",
         }
-        # Используем chat_id, который пришел в вебхуке
         json_data = {
             "chat_id": chat_id,
             "text": text,
@@ -103,96 +77,128 @@ def send_message(chat_id, text):
         logger.error(f"❌ Ошибка отправки: {e}")
         return False
 
-# ========== ВЕБХУК ==========
+# ========== ОБРАБОТКА КОМАНД ==========
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Обработка вебхуков"""
-    try:
-        data = request.get_json()
-        logger.info(f"📨 Получен вебхук")
-        
-        if not data:
-            return jsonify({'status': 'ok'}), 200
-        
-        # Проверяем тип обновления
-        update_type = data.get('update_type')
-        
-        # Пропускаем не-сообщения
-        if update_type != 'message_created':
-            return jsonify({'status': 'ok'}), 200
-        
-        # Извлекаем данные
-        message = data.get('message', {})
-        recipient = message.get('recipient', {})
-        body = message.get('body', {})
-        
-        # Берем chat_id из recipient (это ID диалога)
-        chat_id = recipient.get('chat_id')
-        text = body.get('text', '')
-        
-        if not chat_id or not text:
-            return jsonify({'status': 'ok'}), 200
-        
-        logger.info(f"📩 Сообщение от {chat_id}: {text}")
-        
-        response = None
-        
-        # ===== ОБРАБОТКА КОМАНД =====
-        if text.startswith('/start'):
-            response = "👋 Привет! Я бот для публикации объявлений.\nИспользуйте /help для списка команд."
-        
-        elif text.startswith('/publish'):
-            send_message(chat_id, "📢 Начинаю однократную публикацию...")
-            threading.Thread(target=publisher.start, args=(chat_id,)).start()
-            return jsonify({'status': 'ok'}), 200
-        
-        elif text.startswith('/stop'):
-            send_message(chat_id, "⏹️ Останавливаю публикацию...")
-            publisher.stop(chat_id)
-            return jsonify({'status': 'ok'}), 200
-        
-        elif text.startswith('/stop_global'):
-            publisher.stop_global()
-            response = "🛑 Глобальная остановка ВСЕХ публикаций"
-        
-        elif text.startswith('/reset_global'):
-            publisher.reset_global_stop()
-            response = "🔄 Глобальный стоп сброшен"
-        
-        elif text.startswith('/status'):
-            status = f"📊 Статус:\n"
-            status += f"• Глобальный стоп: {'❌ ВКЛ' if publisher.global_stop else '✅ ВЫКЛ'}\n"
-            status += f"• Публикация: {'🔄 активна' if publisher.running else '⏸️ не активна'}\n"
-            status += f"• Автоматическая публикация: ⏸️ ОТКЛЮЧЕНА"
-            response = status
-        
-        elif text.startswith('/help'):
-            response = "🤖 Команды:\n"
-            response += "/start - Приветствие\n"
-            response += "/publish - ОДНОКРАТНАЯ публикация\n"
-            response += "/stop - Остановить публикацию\n"
-            response += "/status - Статус бота\n"
-            response += "/stop_global - Глобальная остановка\n"
-            response += "/reset_global - Сброс стопа"
-        
-        else:
-            response = f"❓ Неизвестная команда. Используйте /help"
-        
-        if response:
-            send_message(chat_id, response)
-        
-        return jsonify({'status': 'ok'}), 200
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка в вебхуке: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'status': 'error'}), 500
+def handle_command(chat_id, text):
+    """Обработка команд"""
+    logger.info(f"📩 Обработка команды от {chat_id}: {text}")
+    
+    if text.startswith('/start'):
+        return "👋 Привет! Я бот для публикации объявлений.\nИспользуйте /help для списка команд."
+    
+    elif text.startswith('/help'):
+        return (
+            "🤖 Команды:\n"
+            "/start - Приветствие\n"
+            "/publish - ОДНОКРАТНАЯ публикация\n"
+            "/stop - Остановить публикацию\n"
+            "/status - Статус бота\n"
+            "/stop_global - Глобальная остановка\n"
+            "/reset_global - Сброс стопа"
+        )
+    
+    elif text.startswith('/publish'):
+        send_message(chat_id, "📢 Начинаю однократную публикацию...")
+        threading.Thread(target=publisher.start, args=(chat_id,)).start()
+        return None
+    
+    elif text.startswith('/stop'):
+        send_message(chat_id, "⏹️ Останавливаю публикацию...")
+        publisher.stop(chat_id)
+        return None
+    
+    elif text.startswith('/stop_global'):
+        publisher.stop_global()
+        return "🛑 Глобальная остановка ВСЕХ публикаций"
+    
+    elif text.startswith('/reset_global'):
+        publisher.reset_global_stop()
+        return "🔄 Глобальный стоп сброшен"
+    
+    elif text.startswith('/status'):
+        status = (
+            f"📊 Статус:\n"
+            f"• Глобальный стоп: {'❌ ВКЛ' if publisher.global_stop else '✅ ВЫКЛ'}\n"
+            f"• Публикация: {'🔄 активна' if publisher.running else '⏸️ не активна'}\n"
+            f"• Автоматическая публикация: ⏸️ ОТКЛЮЧЕНА"
+        )
+        return status
+    
+    else:
+        return f"❓ Неизвестная команда. Используйте /help"
 
-@app.route('/webhook', methods=['GET'])
-def webhook_get():
-    return jsonify({'status': 'ok'}), 200
+# ========== LONG POLLING ==========
+
+def poll_messages():
+    """Основной цикл Long Polling - опрашивает API на наличие новых сообщений"""
+    global last_processed_mid
+    
+    logger.info("🔄 Запущен цикл Long Polling...")
+    
+    # Ваш USER_ID (из логов: 151296248)
+    user_id = 151296248
+    
+    while True:
+        try:
+            token = get_token()
+            if not token:
+                logger.error("❌ Токен не найден!")
+                time.sleep(10)
+                continue
+            
+            # Получаем сообщения для пользователя
+            url = f"https://platform-api2.max.ru/messages?user_id={user_id}&count=10"
+            headers = {
+                "Authorization": token,
+            }
+            
+            response = requests.get(url, headers=headers, timeout=30, verify=False)
+            
+            if response.status_code == 200:
+                data = response.json()
+                messages = data.get('messages', [])
+                
+                if messages:
+                    logger.info(f"📨 Получено {len(messages)} сообщений")
+                    # Обрабатываем в обратном порядке (от старых к новым)
+                    for msg in reversed(messages):
+                        mid = msg.get('body', {}).get('mid')
+                        text = msg.get('body', {}).get('text', '')
+                        chat_id = msg.get('recipient', {}).get('chat_id')
+                        
+                        # Пропускаем уже обработанные
+                        if mid == last_processed_mid:
+                            continue
+                        
+                        if text and text.startswith('/'):
+                            logger.info(f"📩 Новое сообщение: {text}")
+                            
+                            # Обрабатываем команду
+                            response_text = handle_command(chat_id, text)
+                            if response_text:
+                                send_message(chat_id, response_text)
+                        
+                        # Запоминаем ID последнего обработанного
+                        if mid:
+                            last_processed_mid = mid
+                else:
+                    logger.debug("📭 Новых сообщений нет")
+            else:
+                logger.error(f"❌ Ошибка получения сообщений: {response.status_code} - {response.text}")
+            
+            time.sleep(2)  # Пауза между опросами
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в Long Polling: {e}")
+            import traceback
+            traceback.print_exc()
+            time.sleep(5)
+
+# Запускаем Long Polling в фоновом потоке
+def start_polling():
+    poll_thread = threading.Thread(target=poll_messages, daemon=True)
+    poll_thread.start()
+    logger.info("✅ Long Polling запущен")
 
 # ========== ВЕБ-ИНТЕРФЕЙС ==========
 
@@ -217,20 +223,24 @@ def upload_folder():
 def status():
     return jsonify({
         'status': 'running',
-        'api_available': api is not None,
         'global_stop': publisher.global_stop,
         'running': publisher.running,
-        'auto_publish': False
+        'polling': True
     })
 
 # ========== ЗАПУСК ==========
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 3000))
+    
+    # Запускаем Long Polling
+    start_polling()
+    
     logger.info("=" * 50)
-    logger.info("🚀 БОТ ЗАПУЩЕН!")
+    logger.info("🚀 БОТ ЗАПУЩЕН (режим Long Polling)!")
     logger.info("📌 АВТОМАТИЧЕСКАЯ ПУБЛИКАЦИЯ ОТКЛЮЧЕНА")
     logger.info("📌 Используйте /publish для однократной публикации")
-    logger.info("📌 Нужен вебхук в MAX: https://ваш-домен/webhook")
+    logger.info("📌 ВЕБХУК НЕ НУЖЕН - бот сам опрашивает API")
     logger.info("=" * 50)
+    
     app.run(host='0.0.0.0', port=port, debug=False)
