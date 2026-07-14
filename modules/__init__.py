@@ -8,12 +8,14 @@ from .process_links import (
     download_file_from_drive,
     process_google_drive_link
 )
+from .max_client import ReportGenerator
 
 __all__ = [
     'Database',
     'FileManager',
     'Publisher',
     'WebInterface',
+    'ReportGenerator',
     'extract_file_id_from_url',
     'convert_to_direct_link',
     'download_file_from_drive',
