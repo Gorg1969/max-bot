@@ -1,629 +1,752 @@
+from flask import Flask, request, jsonify, render_template_string
+import requests
 import logging
 import os
-import time
-import re
-import json
-import threading
-import hashlib
-from enum import Enum
-from PIL import Image, ExifTags
-import io
-import requests
+import shutil
 import urllib3
-from flask import Flask, request, jsonify, render_template_string
+import json
+from modules import Database, FileManager, Publisher, WebInterface
 
-# Отключаем предупреждения о SSL
+# ОТКЛЮЧАЕМ ПРЕДУПРЕЖДЕНИЯ SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024 * 2  # 2 ГБ
+
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ============================================
-# PUBLISHER (КАК ВЧЕРА)
-# ============================================
+# ========== КОНФИГ ==========
+# ИСПРАВЛЕНО: используем MAX_TOKEN и MAX_BOT_TOKEN
+TOKEN = os.environ.get("MAX_TOKEN") or os.environ.get("MAX_BOT_TOKEN") or os.environ.get("TOKEN")
+BASE_URL = "https://platform-api2.max.ru"
+DATA_DIR = "/app/data"
 
-class UserState(Enum):
-    IDLE = "idle"
-    PUBLISHING = "publishing"
-    STOPPED = "stopped"
+if not TOKEN:
+    logger.error("❌ ТОКЕН НЕ НАЙДЕН! Установите переменную MAX_TOKEN или MAX_BOT_TOKEN")
 
-class Publisher:
-    def __init__(self, api, file_manager, db):
-        self.api = api
-        self.fm = file_manager
-        self.db = db
-        self.user_states = {}
-        self.running = False
-        self.stop_requested = False
-        self.publish_thread = None
-        self.published_hashes = set()
-        self.hash_file = "published_hashes.json"
-        self._load_published_hashes()
-        self.global_stop_file = "global_stop.json"
-        self._load_global_stop_state()
-    
-    def _load_published_hashes(self):
-        try:
-            if os.path.exists(self.hash_file):
-                with open(self.hash_file, 'r') as f:
-                    data = json.load(f)
-                    self.published_hashes = set(data.get('hashes', []))
-                logger.info(f"🔓 Загружено {len(self.published_hashes)} хэшей")
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки хэшей: {e}")
-    
-    def _save_published_hashes(self):
-        try:
-            with open(self.hash_file, 'w') as f:
-                json.dump({'hashes': list(self.published_hashes)}, f)
-        except Exception as e:
-            logger.error(f"❌ Ошибка сохранения хэшей: {e}")
-    
-    def _load_global_stop_state(self):
-        try:
-            if os.path.exists(self.global_stop_file):
-                with open(self.global_stop_file, 'r') as f:
-                    data = json.load(f)
-                    self.global_stop = data.get('global_stop', False)
-                logger.info(f"🔓 Загружено состояние глобального стопа: {self.global_stop}")
-            else:
-                self.global_stop = False
-                self._save_global_stop_state()
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки состояния: {e}")
-            self.global_stop = False
-    
-    def _save_global_stop_state(self):
-        try:
-            with open(self.global_stop_file, 'w') as f:
-                json.dump({'global_stop': self.global_stop}, f)
-        except Exception as e:
-            logger.error(f"❌ Ошибка сохранения состояния: {e}")
-    
-    def _get_ad_hash(self, folder_path):
-        hasher = hashlib.md5()
-        try:
-            info_path = os.path.join(folder_path, 'info.txt')
-            if os.path.exists(info_path):
-                with open(info_path, 'rb') as f:
-                    hasher.update(f.read())
-            files = sorted(os.listdir(folder_path))
-            for f in files:
-                if f.lower().endswith(('.jpg', '.jpeg', '.png')):
-                    hasher.update(f.encode())
-                    file_path = os.path.join(folder_path, f)
-                    if os.path.exists(file_path):
-                        hasher.update(str(os.path.getsize(file_path)).encode())
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания хэша: {e}")
-            return str(time.time())
-        return hasher.hexdigest()
-    
-    def extract_chat_id(self, folder_name):
-        match = re.search(r'-\s*(\d+)', folder_name)
-        if match:
-            return f"-{match.group(1)}"
-        return None
-    
-    def fix_image_orientation(self, img):
-        try:
-            for orientation in ExifTags.TAGS.keys():
-                if ExifTags.TAGS[orientation] == 'Orientation':
-                    break
-            exif = img._getexif()
-            if exif and orientation in exif:
-                orientation_value = exif[orientation]
-                if orientation_value == 3:
-                    img = img.rotate(180, expand=True)
-                elif orientation_value == 6:
-                    img = img.rotate(270, expand=True)
-                elif orientation_value == 8:
-                    img = img.rotate(90, expand=True)
-        except Exception as e:
-            logger.debug(f"⚠️ Ошибка исправления ориентации: {e}")
-        return img
-    
-    def compress_image(self, image_path, max_size_mb=0.8, quality=75):
-        try:
-            with Image.open(image_path) as img:
-                img = self.fix_image_orientation(img)
-                if img.mode in ('RGBA', 'P'):
-                    img = img.convert('RGB')
-                max_dimension = 1280
-                if img.width > max_dimension or img.height > max_dimension:
-                    ratio = min(max_dimension / img.width, max_dimension / img.height)
-                    new_size = (int(img.width * ratio), int(img.height * ratio))
-                    img = img.resize(new_size, Image.Resampling.LANCZOS)
-                buffer = io.BytesIO()
-                img.save(buffer, format='JPEG', quality=quality, optimize=True, progressive=True)
-                compressed_data = buffer.getvalue()
-                if len(compressed_data) > max_size_mb * 1024 * 1024:
-                    buffer = io.BytesIO()
-                    img.save(buffer, format='JPEG', quality=50, optimize=True, progressive=True)
-                    compressed_data = buffer.getvalue()
-                return compressed_data
-        except Exception as e:
-            logger.error(f"❌ Ошибка сжатия: {e}")
-            with open(image_path, 'rb') as f:
-                return f.read()
-    
-    def get_sorted_images(self, folder_path, max_count=10):
-        images = []
-        if not os.path.exists(folder_path):
-            return images
-        for file in os.listdir(folder_path):
-            if file.lower().endswith(('.jpg', '.jpeg', '.png')):
-                if file.startswith('.'):
-                    continue
-                images.append(file)
-        images.sort()
-        return images[:max_count]
-    
-    def stop_global(self):
-        self.global_stop = True
-        self._save_global_stop_state()
-        logger.info("🛑 ГЛОБАЛЬНАЯ ОСТАНОВКА ВСЕХ ПУБЛИКАЦИЙ")
-        self.stop_publishing_loop()
-        for user_id in list(self.user_states.keys()):
-            if self.user_states[user_id] == UserState.PUBLISHING:
-                self.user_states[user_id] = UserState.STOPPED
-        return True
-    
-    def reset_global_stop(self):
-        self.global_stop = False
-        self._save_global_stop_state()
-        logger.info("🔄 Глобальный флаг остановки сброшен")
-        return True
-    
-    def start_publishing_loop(self, user_id, check_interval=60):
-        if self.running:
-            logger.warning("⚠️ Цикл публикации уже запущен")
-            return False
-        if self.global_stop:
-            logger.warning(f"⚠️ Глобальная остановка активна!")
-            return False
-        self.running = True
-        self.stop_requested = False
-        self.publish_thread = threading.Thread(
-            target=self._publishing_loop,
-            args=(user_id, check_interval)
-        )
-        self.publish_thread.daemon = True
-        self.publish_thread.start()
-        logger.info(f"🚀 Запущен цикл публикации для пользователя {user_id}")
-        return True
-    
-    def stop_publishing_loop(self):
-        if not self.running:
-            return False
-        logger.info("⏹️ Остановка цикла публикации...")
-        self.stop_requested = True
-        self.running = False
-        if self.publish_thread and self.publish_thread.is_alive():
-            self.publish_thread.join(timeout=5)
-        logger.info("✅ Цикл публикации остановлен")
-        return True
-    
-    def _publishing_loop(self, user_id, check_interval):
-        logger.info(f"🔄 Запущен цикл проверки для {user_id}")
-        while not self.stop_requested and self.running:
-            try:
-                if self.global_stop:
-                    logger.info(f"⏹️ Глобальная остановка! Цикл прерван для {user_id}")
-                    break
-                new_ads = self._check_new_ads(user_id)
-                if new_ads:
-                    logger.info(f"📢 Найдено {len(new_ads)} новых объявлений")
-                    for ad in new_ads:
-                        if self.stop_requested or not self.running or self.global_stop:
-                            break
-                        self._publish_ad(user_id, ad)
-                        time.sleep(2)
-                for _ in range(check_interval):
-                    if self.stop_requested or not self.running or self.global_stop:
-                        break
-                    time.sleep(1)
-            except Exception as e:
-                logger.error(f"❌ Ошибка в цикле публикации: {e}")
-                time.sleep(10)
-        self.running = False
-        logger.info(f"⏹️ Цикл публикации для {user_id} завершен")
-    
-    def _check_new_ads(self, user_id):
-        try:
-            user_folder = self.fm.get_user_folder(user_id)
-            samosvaly_path = os.path.join(user_folder, "Самосвалы")
-            new_ads = []
-            if os.path.exists(samosvaly_path) and os.path.isdir(samosvaly_path):
-                for folder_name in os.listdir(samosvaly_path):
-                    folder_path = os.path.join(samosvaly_path, folder_name)
-                    if os.path.isdir(folder_path):
-                        info_path = os.path.join(folder_path, 'info.txt')
-                        if os.path.exists(info_path):
-                            ad_hash = self._get_ad_hash(folder_path)
-                            if ad_hash not in self.published_hashes:
-                                new_ads.append(folder_name)
-                                self.published_hashes.add(ad_hash)
-                                self._save_published_hashes()
-            return new_ads
-        except Exception as e:
-            logger.error(f"❌ Ошибка проверки новых объявлений: {e}")
-            return []
-    
-    def _publish_ad(self, user_id, folder_name):
-        try:
-            user_folder = self.fm.get_user_folder(user_id)
-            folder_path = os.path.join(user_folder, "Самосвалы", folder_name)
-            if not os.path.exists(folder_path):
-                return False
-            info_path = os.path.join(folder_path, 'info.txt')
-            with open(info_path, 'r', encoding='utf-8') as f:
-                text = f.read()
-            chat_id = self.extract_chat_id(folder_name)
-            if not chat_id:
-                logger.warning(f"⚠️ Не удалось извлечь ID чата из {folder_name}")
-                return False
-            images = self.get_sorted_images(folder_path, max_count=10)
-            logger.info(f"📤 Публикация в чат {chat_id}: {folder_name}, фото: {len(images)}")
-            if self.stop_requested or not self.running or self.global_stop:
-                logger.info(f"⏹️ Публикация прервана для {folder_name}")
-                return False
-            photo_files = []
-            for img_name in images:
-                img_path = os.path.join(folder_path, img_name)
-                if os.path.exists(img_path):
-                    try:
-                        compressed = self.compress_image(img_path)
-                        photo_files.append((img_name, compressed))
-                    except Exception as e:
-                        logger.error(f"❌ Ошибка сжатия {img_name}: {e}")
-            if photo_files:
-                success = self.api.send_photos_to_chat(chat_id, photo_files, text)
-            else:
-                success = self.api.send_message_to_chat(chat_id, text)
-            if success:
-                self.db.add_publication(user_id, folder_name, chat_id)
-                logger.info(f"✅ Опубликовано: {folder_name}")
-                return True
-            else:
-                logger.error(f"❌ Не удалось опубликовать: {folder_name}")
-                return False
-        except Exception as e:
-            logger.error(f"❌ Ошибка публикации {folder_name}: {e}")
-            return False
-    
-    def start(self, user_id):
-        try:
-            if self.global_stop:
-                logger.warning(f"⚠️ Глобальная остановка активна!")
-                return False
-            if self.user_states.get(user_id) == UserState.PUBLISHING:
-                logger.warning(f"⚠️ Публикация уже запущена")
-                return False
-            logger.info(f"🚀 Запуск публикации для пользователя {user_id}")
-            self.user_states[user_id] = UserState.PUBLISHING
-            user_folder = self.fm.get_user_folder(user_id)
-            samosvaly_path = os.path.join(user_folder, "Самосвалы")
-            if os.path.exists(samosvaly_path) and os.path.isdir(samosvaly_path):
-                subfolders = []
-                for item in os.listdir(samosvaly_path):
-                    item_path = os.path.join(samosvaly_path, item)
-                    if os.path.isdir(item_path):
-                        info_path = os.path.join(item_path, 'info.txt')
-                        if os.path.exists(info_path):
-                            subfolders.append(item)
-            else:
-                subfolders = self.fm.get_subfolders(user_id)
-            if not subfolders:
-                self.user_states[user_id] = UserState.IDLE
-                return False
-            published = 0
-            for folder_name in subfolders:
-                if self.global_stop:
-                    logger.info(f"⏹️ ГЛОБАЛЬНАЯ ОСТАНОВКА!")
-                    self.user_states[user_id] = UserState.STOPPED
-                    break
-                if self.user_states.get(user_id) == UserState.STOPPED:
-                    logger.info(f"⏹️ Публикация остановлена пользователем")
-                    break
-                try:
-                    folder_path = os.path.join(samosvaly_path, folder_name)
-                    ad_hash = self._get_ad_hash(folder_path)
-                    if ad_hash in self.published_hashes:
-                        logger.info(f"ℹ️ Объявление {folder_name} уже было опубликовано")
-                        continue
-                    info_path = os.path.join(folder_path, 'info.txt')
-                    if not os.path.exists(info_path):
-                        continue
-                    with open(info_path, 'r', encoding='utf-8') as f:
-                        text = f.read()
-                    chat_id = self.extract_chat_id(folder_name)
-                    if not chat_id:
-                        continue
-                    images = self.get_sorted_images(folder_path, max_count=10)
-                    if self.global_stop:
-                        logger.info(f"⏹️ ГЛОБАЛЬНАЯ ОСТАНОВКА!")
-                        self.user_states[user_id] = UserState.STOPPED
-                        break
-                    if self.user_states.get(user_id) == UserState.STOPPED:
-                        break
-                    photo_files = []
-                    for img_name in images:
-                        img_path = os.path.join(folder_path, img_name)
-                        if not os.path.exists(img_path):
-                            continue
-                        try:
-                            compressed = self.compress_image(img_path)
-                            photo_files.append((img_name, compressed))
-                        except Exception as e:
-                            logger.error(f"❌ Ошибка сжатия {img_name}: {e}")
-                    if photo_files:
-                        success = self.api.send_photos_to_chat(chat_id, photo_files, text)
-                    else:
-                        success = self.api.send_message_to_chat(chat_id, text)
-                    if not success:
-                        continue
-                    self.published_hashes.add(ad_hash)
-                    self._save_published_hashes()
-                    self.db.add_publication(user_id, folder_name, chat_id)
-                    published += 1
-                    logger.info(f"✅ Опубликовано: {folder_name}")
-                    time.sleep(2)
-                except Exception as e:
-                    logger.error(f"❌ Ошибка при публикации {folder_name}: {e}")
-                    continue
-            self.user_states[user_id] = UserState.IDLE
-            if published > 0:
-                logger.info(f"✅ Публикация завершена! Опубликовано {published} объявлений.")
-            else:
-                logger.info(f"❌ Не удалось опубликовать ни одного объявления.")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Ошибка публикации: {e}")
-            self.user_states[user_id] = UserState.IDLE
-            return False
-    
-    def stop(self, user_id):
-        current_state = self.user_states.get(user_id, UserState.IDLE)
-        if current_state == UserState.PUBLISHING:
-            self.user_states[user_id] = UserState.STOPPED
-            logger.info(f"⏹️ Публикация остановлена для пользователя {user_id}")
-            return True
-        elif current_state == UserState.STOPPED:
-            logger.info(f"ℹ️ Публикация уже остановлена для пользователя {user_id}")
-            return False
-        else:
-            logger.info(f"ℹ️ Публикация не активна для пользователя {user_id}")
-            return False
-
-# ============================================
-# ИНИЦИАЛИЗАЦИЯ
-# ============================================
-
-def get_token():
-    return (
-        os.environ.get('API_TOKEN') or
-        os.environ.get('MAX_TOKEN') or
-        os.environ.get('MAX_BOT_TOKEN')
-    )
-
-app = Flask(__name__)
-
-# Заглушка для БД и FileManager (замените на свои)
-class Database:
-    def add_publication(self, user_id, folder_name, chat_id):
-        logger.info(f"📝 Добавлена публикация: {folder_name} -> {chat_id}")
-class FileManager:
-    def get_user_folder(self, user_id):
-        folder = f"/app/data/user_{user_id}"
-        os.makedirs(folder, exist_ok=True)
-        return folder
-    def get_subfolders(self, user_id):
-        return []
-
+# ========== ИНИЦИАЛИЗАЦИЯ МОДУЛЕЙ ==========
 db = Database()
-fm = FileManager()
+fm = FileManager(DATA_DIR)
 
-# API - будем использовать прямые HTTP запросы
-api = None  # Не используем maxapi
+class APIClient:
+    def __init__(self):
+        self.token = TOKEN
+        self.base_url = BASE_URL
 
+    def send_message(self, user_id, text, attachments=None):
+        """Отправляет сообщение пользователю"""
+        if not self.token:
+            logger.error("❌ Токен не установлен!")
+            return False
+        try:
+            payload = {"text": text, "format": "markdown"}
+            if attachments:
+                payload["attachments"] = attachments
+            response = requests.post(
+                f"{self.base_url}/messages",
+                headers={"Authorization": self.token, "Content-Type": "application/json"},
+                params={"user_id": user_id},
+                json=payload,
+                timeout=30,
+                verify=False
+            )
+            logger.info(f"📤 Отправка сообщения пользователю {user_id}, статус: {response.status_code}")
+            if response.status_code != 200:
+                logger.error(f"❌ Ошибка отправки: {response.text}")
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки: {e}")
+            return False
+
+    def send_message_to_chat(self, chat_id, text):
+        """Отправляет сообщение в чат по ID группы (с дефисом)"""
+        if not self.token:
+            logger.error("❌ Токен не установлен!")
+            return False
+        try:
+            payload = {"text": text, "format": "markdown"}
+            response = requests.post(
+                f"{self.base_url}/messages",
+                headers={"Authorization": self.token, "Content-Type": "application/json"},
+                params={"chat_id": chat_id},
+                json=payload,
+                timeout=30,
+                verify=False
+            )
+            logger.info(f"📤 Отправка сообщения в чат {chat_id}, статус: {response.status_code}")
+            if response.status_code != 200:
+                logger.error(f"❌ Ошибка отправки в чат: {response.text}")
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки в чат: {e}")
+            return False
+
+    def send_photos_to_chat(self, chat_id, photo_files, text=None, caption=None):
+        """Отправляет фото в чат вместе с текстом объявления одним сообщением."""
+        if not self.token:
+            logger.error("❌ Токен не установлен!")
+            return False
+        try:
+            files = []
+            for filename, data in photo_files:
+                files.append(('file', (filename, data, 'image/jpeg')))
+
+            data = {"chat_id": chat_id}
+            if text:
+                data["text"] = text
+            if caption:
+                data["caption"] = caption
+
+            response = requests.post(
+                f"{self.base_url}/messages",
+                headers={"Authorization": self.token},
+                data=data,
+                files=files,
+                timeout=120,
+                verify=False
+            )
+
+            logger.info(f"📤 Отправка {len(photo_files)} фото в чат {chat_id}, статус: {response.status_code}")
+            if response.status_code != 200:
+                logger.error(f"❌ Ошибка отправки фото: {response.status_code} {response.text[:300]}")
+            else:
+                resp_json = response.json()
+                logger.info(f"✅ Ответ API: {resp_json}")
+            return response.status_code == 200
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки фото: {e}")
+            return False
+
+api = APIClient()
 publisher = Publisher(api, fm, db)
+web = WebInterface(fm, publisher)
 
-# Храним ID последнего обработанного обновления
-last_update_id = 0
+# ========== ХРАНИЛИЩЕ ДЛЯ ВРЕМЕННЫХ ДАННЫХ ==========
+user_temp_data = {}
 
-# ========== ОТПРАВКА СООБЩЕНИЙ ==========
+# ========== HTML СТРАНИЦА ==========
+UPLOAD_PAGE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Загрузка объявлений</title>
+    <style>
+        body { font-family: Arial; max-width: 800px; margin: 50px auto; padding: 20px; background: #f5f5f5; }
+        .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #333; margin-top: 0; }
+        .drop-zone { border: 2px dashed #007bff; padding: 40px; margin: 20px 0; border-radius: 10px; background: #f8f9fa; text-align: center; cursor: pointer; transition: all 0.3s; }
+        .drop-zone:hover { background: #e3f2fd; }
+        .drop-zone.dragover { background: #d4edda; border-color: #28a745; }
+        .drop-zone p { margin: 0; color: #666; }
+        .drop-zone .icon { font-size: 48px; display: block; margin-bottom: 10px; }
+        input[type="file"] { display: none; }
+        .btn { padding: 12px 30px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; font-weight: bold; transition: all 0.3s; }
+        .btn-primary { background: #007bff; color: white; }
+        .btn-primary:hover { background: #0056b3; }
+        .btn-success { background: #28a745; color: white; }
+        .btn-success:hover { background: #218838; }
+        .btn-danger { background: #dc3545; color: white; }
+        .btn-danger:hover { background: #c82333; }
+        .status { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
+        .status.success { background: #d4edda; color: #155724; display: block; border-left: 4px solid #28a745; }
+        .status.error { background: #f8d7da; color: #721c24; display: block; border-left: 4px solid #dc3545; }
+        .status.info { background: #d1ecf1; color: #0c5460; display: block; border-left: 4px solid #17a2b8; }
+        .file-list { text-align: left; margin: 20px 0; padding: 0; list-style: none; }
+        .file-list li { background: #f8f9fa; padding: 10px 15px; margin: 5px 0; border-radius: 5px; border-left: 3px solid #007bff; display: flex; justify-content: space-between; align-items: center; }
+        .file-list li .count { background: #007bff; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
+        .progress-bar { width: 100%; height: 25px; background: #e9ecef; border-radius: 10px; overflow: hidden; margin: 10px 0; display: none; }
+        .progress-bar .progress { height: 100%; background: linear-gradient(90deg, #28a745, #20c997); transition: width 0.3s; width: 0%; display: flex; align-items: center; justify-content: center; color: white; font-size: 12px; font-weight: bold; }
+        .instructions { background: #fff3cd; padding: 15px 20px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107; }
+        .instructions code { background: #f8f9fa; padding: 2px 8px; border-radius: 3px; font-size: 14px; color: #d63384; }
+        #log { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; font-family: 'Courier New', monospace; font-size: 12px; max-height: 300px; overflow-y: auto; margin: 20px 0; display: none; white-space: pre-wrap; line-height: 1.5; }
+        .button-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px; }
+        .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
+        .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📤 Загрузка объявлений</h1>
+        
+        <div class="instructions">
+            <strong>📌 Как подготовить папку:</strong><br>
+            1️⃣ Создайте папку с названием, например: <code>Мои объявления</code><br>
+            2️⃣ Внутри создайте подпапки: <code>Квартиры -123456789</code>, <code>Машины -987654321</code><br>
+            3️⃣ В каждой подпапке положите: <code>info.txt</code> (текст объявления) и фото<br>
+            4️⃣ Перетащите папку в поле ниже или выберите через кнопку
+        </div>
+        
+        <div class="drop-zone" id="dropZone">
+            <span class="icon">📂</span>
+            <p><strong>Перетащите папку сюда</strong></p>
+            <p style="color: #999; font-size: 14px;">или нажмите кнопку ниже</p>
+            <button class="btn btn-primary" onclick="document.getElementById('folderInput').click()">Выбрать папку</button>
+            <input type="file" id="folderInput" webkitdirectory multiple>
+        </div>
+        
+        <div id="fileList" style="display:none;">
+            <div class="selected-info" id="selectedInfo"></div>
+            <ul class="file-list" id="fileListContent"></ul>
+            <div class="button-group">
+                <button class="btn btn-success" onclick="uploadFolder()">🚀 Загрузить</button>
+                <button class="btn btn-danger" onclick="clearFiles()">🗑️ Очистить</button>
+            </div>
+        </div>
+        
+        <div class="progress-bar" id="progressBar">
+            <div class="progress" id="progress">0%</div>
+        </div>
+        
+        <div id="status" class="status"></div>
+        <div id="log"></div>
+        
+        <div class="footer">
+            ⚡ MAX Bot | Загрузка объявлений
+        </div>
+    </div>
 
-def send_message(chat_id, text):
-    """Отправка сообщения в чат"""
-    token = get_token()
-    if not token:
-        logger.warning(f"⚠️ Токен не найден!")
-        return False
-    
-    try:
-        url = "https://platform-api2.max.ru/messages"
-        headers = {
-            "Authorization": token,
-            "Content-Type": "application/json",
+    <script>
+        let selectedFiles = [];
+        let userId = 151296248;
+
+        const dropZone = document.getElementById('dropZone');
+        const folderInput = document.getElementById('folderInput');
+        const fileList = document.getElementById('fileList');
+        const fileListContent = document.getElementById('fileListContent');
+        const selectedInfo = document.getElementById('selectedInfo');
+        const statusDiv = document.getElementById('status');
+        const logDiv = document.getElementById('log');
+        const progressBar = document.getElementById('progressBar');
+        const progress = document.getElementById('progress');
+
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            const items = e.dataTransfer.items;
+            const files = [];
+            for (let item of items) {
+                if (item.kind === 'file') {
+                    const entry = item.webkitGetAsEntry();
+                    if (entry && entry.isDirectory) {
+                        readDirectory(entry, files, '');
+                    }
+                }
+            }
+            if (files.length > 0) {
+                selectedFiles = files;
+                displayFiles(selectedFiles);
+            }
+        });
+
+        folderInput.addEventListener('change', (e) => {
+            const files = Array.from(e.target.files);
+            if (files.length > 0) {
+                selectedFiles = files;
+                displayFiles(selectedFiles);
+            }
+        });
+
+        function readDirectory(entry, files, path) {
+            const reader = entry.createReader();
+            reader.readEntries((entries) => {
+                for (let e of entries) {
+                    if (e.isDirectory) {
+                        readDirectory(e, files, path + e.name + '/');
+                    } else {
+                        e.file((file) => {
+                            file.webkitRelativePath = path + file.name;
+                            files.push(file);
+                        });
+                    }
+                }
+            });
         }
-        json_data = {
-            "chat_id": chat_id,
-            "text": text,
+
+        function displayFiles(files) {
+            fileListContent.innerHTML = '';
+            const folders = new Set();
+            const fileCount = {};
+            
+            files.forEach(f => {
+                const parts = f.webkitRelativePath.split('/');
+                if (parts.length > 1) {
+                    const folder = parts[0];
+                    folders.add(folder);
+                    if (!fileCount[folder]) fileCount[folder] = 0;
+                    fileCount[folder]++;
+                }
+            });
+            
+            folders.forEach(folder => {
+                const li = document.createElement('li');
+                const count = fileCount[folder] || 0;
+                li.innerHTML = `
+                    <span>📁 <strong>${folder}</strong></span>
+                    <span class="count">${count} файлов</span>
+                `;
+                fileListContent.appendChild(li);
+            });
+            
+            selectedInfo.textContent = `✅ Выбрано ${folders.size} папок, всего ${files.length} файлов`;
+            fileList.style.display = 'block';
+            showStatus('info', '📦 Готово к загрузке! Нажмите "Загрузить"');
+        }
+
+        function clearFiles() {
+            selectedFiles = [];
+            fileList.style.display = 'none';
+            statusDiv.style.display = 'none';
+            progressBar.style.display = 'none';
+            logDiv.style.display = 'none';
+            progress.style.width = '0%';
+            progress.textContent = '0%';
+            folderInput.value = '';
+        }
+
+        function addLog(message) {
+            logDiv.style.display = 'block';
+            logDiv.textContent += message + '\\n';
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        function uploadFolder() {
+            if (selectedFiles.length === 0) {
+                showStatus('error', '❌ Выберите папку для загрузки');
+                return;
+            }
+
+            const formData = new FormData();
+            selectedFiles.forEach(file => {
+                formData.append('files[]', file, file.webkitRelativePath);
+            });
+            formData.append('user_id', userId);
+
+            showStatus('info', '⏳ Загрузка началась...');
+            progressBar.style.display = 'block';
+            progress.style.width = '0%';
+            progress.textContent = '0%';
+            logDiv.textContent = '';
+            addLog('🚀 Начинаем загрузку...');
+            addLog(`📁 Файлов: ${selectedFiles.length}`);
+
+            try {
+                const xhr = new XMLHttpRequest();
+                
+                xhr.upload.addEventListener('progress', (e) => {
+                    if (e.lengthComputable) {
+                        const percent = Math.round((e.loaded / e.total) * 100);
+                        progress.style.width = percent + '%';
+                        progress.textContent = percent + '%';
+                        if (percent % 10 === 0) {
+                            addLog(`📥 Загружено: ${(e.loaded / 1024 / 1024).toFixed(1)} МБ из ${(e.total / 1024 / 1024).toFixed(1)} МБ (${percent}%)`);
+                        }
+                    }
+                });
+
+                xhr.onload = function() {
+                    if (xhr.status === 200) {
+                        try {
+                            const response = JSON.parse(xhr.responseText);
+                            if (response.success) {
+                                showStatus('success', '✅ ' + response.message);
+                                addLog('✅ ' + response.message);
+                                progress.style.width = '100%';
+                                progress.textContent = '100%';
+                                if (response.result) {
+                                    if (response.result.valid_folders && response.result.valid_folders.length > 0) {
+                                        addLog(`✅ Готовы к публикации: ${response.result.valid_folders.join(', ')}`);
+                                    }
+                                    if (response.result.invalid_folders && response.result.invalid_folders.length > 0) {
+                                        addLog(`❌ Пропущены: ${response.result.invalid_folders.join(', ')}`);
+                                    }
+                                }
+                            } else {
+                                showStatus('error', '❌ ' + response.message);
+                                addLog('❌ Ошибка: ' + response.message);
+                            }
+                        } catch (e) {
+                            showStatus('error', '❌ Ошибка обработки ответа');
+                            addLog('❌ Ошибка: ' + e.message);
+                        }
+                    } else {
+                        showStatus('error', '❌ Ошибка загрузки: ' + xhr.status);
+                        addLog('❌ Ошибка сервера: ' + xhr.status);
+                    }
+                };
+
+                xhr.onerror = function() {
+                    showStatus('error', '❌ Ошибка соединения');
+                    addLog('❌ Ошибка соединения с сервером');
+                };
+
+                xhr.open('POST', '/upload_folder');
+                xhr.send(formData);
+                
+            } catch (error) {
+                showStatus('error', '❌ Ошибка: ' + error.message);
+                addLog('❌ Ошибка: ' + error.message);
+            }
+        }
+
+        function showStatus(type, message) {
+            statusDiv.className = 'status ' + type;
+            statusDiv.textContent = message;
+            statusDiv.style.display = 'block';
+        }
+    </script>
+</body>
+</html>
+"""
+
+# ========== ФУНКЦИЯ ДЛЯ ОТПРАВКИ КНОПОК ==========
+def send_confirmation_buttons(user_id):
+    """Отправляет кнопки подтверждения в MAX"""
+    if not TOKEN:
+        logger.error("❌ Токен не установлен!")
+        return False
+    try:
+        attachments = [{
+            "type": "keyboard",
+            "buttons": [
+                [
+                    {
+                        "text": "✅ Да, публиковать",
+                        "payload": json.dumps({"action": "confirm_publish", "user_id": user_id})
+                    },
+                    {
+                        "text": "❌ Нет, отменить",
+                        "payload": json.dumps({"action": "cancel_publish", "user_id": user_id})
+                    }
+                ]
+            ]
+        }]
+        
+        payload = {
+            "text": "Выберите действие:",
+            "format": "markdown",
+            "attachments": attachments
         }
         
-        logger.info(f"📤 Отправка в чат {chat_id}: {text[:30]}...")
-        response = requests.post(url, headers=headers, json=json_data, timeout=30, verify=False)
+        response = requests.post(
+            f"{BASE_URL}/messages",
+            headers={"Authorization": TOKEN, "Content-Type": "application/json"},
+            params={"user_id": user_id},
+            json=payload,
+            timeout=30,
+            verify=False
+        )
         
         if response.status_code == 200:
-            logger.info(f"✅ Сообщение отправлено в чат {chat_id}")
+            logger.info(f"✅ Кнопки отправлены пользователю {user_id}")
             return True
         else:
-            logger.error(f"❌ Ошибка API: {response.status_code} - {response.text}")
+            logger.error(f"❌ Ошибка отправки кнопок: {response.text}")
+            send_text_fallback(user_id)
             return False
+            
     except Exception as e:
-        logger.error(f"❌ Ошибка отправки: {e}")
+        logger.error(f"❌ Ошибка отправки кнопок: {e}")
+        send_text_fallback(user_id)
         return False
 
-# ========== ОБРАБОТКА КОМАНД ==========
+def send_text_fallback(user_id):
+    """Отправляет текстовое сообщение вместо кнопок"""
+    api.send_message(
+        user_id,
+        "⚠️ Кнопки временно недоступны. Пожалуйста, напишите:\n"
+        "• `Да` - чтобы начать публикацию\n"
+        "• `Нет` - чтобы отменить"
+    )
 
-def handle_command(chat_id, text):
-    """Обработка команд"""
-    logger.info(f"📩 Обработка команды от {chat_id}: {text}")
-    
-    if text.startswith('/start'):
-        return "👋 Привет! Я бот для публикации объявлений.\nИспользуйте /help для списка команд."
-    
-    elif text.startswith('/help'):
-        return (
-            "🤖 Команды:\n"
-            "/start - Приветствие\n"
-            "/publish - ОДНОКРАТНАЯ публикация\n"
-            "/stop - Остановить публикацию\n"
-            "/status - Статус бота\n"
-            "/stop_global - Глобальная остановка\n"
-            "/reset_global - Сброс стопа"
-        )
-    
-    elif text.startswith('/publish'):
-        send_message(chat_id, "📢 Начинаю однократную публикацию...")
-        threading.Thread(target=publisher.start, args=(chat_id,)).start()
-        return None
-    
-    elif text.startswith('/stop'):
-        send_message(chat_id, "⏹️ Останавливаю публикацию...")
-        publisher.stop(chat_id)
-        return None
-    
-    elif text.startswith('/stop_global'):
-        publisher.stop_global()
-        return "🛑 Глобальная остановка ВСЕХ публикаций"
-    
-    elif text.startswith('/reset_global'):
-        publisher.reset_global_stop()
-        return "🔄 Глобальный стоп сброшен"
-    
-    elif text.startswith('/status'):
-        status = (
-            f"📊 Статус:\n"
-            f"• Глобальный стоп: {'❌ ВКЛ' if publisher.global_stop else '✅ ВЫКЛ'}\n"
-            f"• Публикация: {'🔄 активна' if publisher.running else '⏸️ не активна'}\n"
-            f"• Автоматическая публикация: ⏸️ ОТКЛЮЧЕНА"
-        )
-        return status
-    
-    else:
-        return f"❓ Неизвестная команда. Используйте /help"
-
-# ========== LONG POLLING ==========
-
-def poll_updates():
-    """Основной цикл Long Polling"""
-    global last_update_id
-    
-    logger.info("🔄 Запущен цикл Long Polling через /updates...")
-    
-    while True:
-        try:
-            token = get_token()
-            if not token:
-                logger.error("❌ Токен не найден!")
-                time.sleep(10)
-                continue
-            
-            url = "https://platform-api2.max.ru/updates"
-            headers = {"Authorization": token}
-            params = {
-                "offset": last_update_id + 1,
-                "limit": 10,
-                "timeout": 30,
-            }
-            
-            response = requests.get(url, headers=headers, params=params, timeout=35, verify=False)
-            
-            if response.status_code == 200:
-                data = response.json()
-                updates = data.get('updates', [])
-                
-                if updates:
-                    logger.info(f"📨 Получено {len(updates)} обновлений")
-                    for update in updates:
-                        update_id = update.get('update_id')
-                        update_type = update.get('update_type')
-                        
-                        if update_type == 'message_created':
-                            message = update.get('message', {})
-                            recipient = message.get('recipient', {})
-                            body = message.get('body', {})
-                            chat_id = recipient.get('chat_id')
-                            text = body.get('text', '')
-                            
-                            if chat_id and text:
-                                logger.info(f"📩 Новое сообщение от {chat_id}: {text}")
-                                response_text = handle_command(chat_id, text)
-                                if response_text:
-                                    send_message(chat_id, response_text)
-                        elif update_type == 'bot_started':
-                            chat_id = update.get('chat_id')
-                            payload = update.get('payload')
-                            logger.info(f"🚀 Бот запущен пользователем {chat_id}, payload: {payload}")
-                            if chat_id:
-                                send_message(chat_id, "👋 Привет! Я бот для публикации объявлений.")
-                        
-                        if update_id:
-                            last_update_id = max(last_update_id, update_id)
-                else:
-                    logger.debug("📭 Новых обновлений нет")
-            else:
-                logger.error(f"❌ Ошибка получения обновлений: {response.status_code} - {response.text}")
-            
-            time.sleep(1)
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка в Long Polling: {e}")
-            import traceback
-            traceback.print_exc()
-            time.sleep(5)
-
-# ========== ВЕБ-ИНТЕРФЕЙС ==========
+# ========== МАРШРУТЫ ==========
 
 @app.route('/')
 def index():
-    return """
-    <h1>📤 Бот для публикации объявлений</h1>
-    <p>Бот работает в режиме Long Polling</p>
-    <p>Отправьте команду /start в диалоге с ботом</p>
-    """
+    return "🤖 MAX Bot is running!"
 
-@app.route('/status')
-def status():
-    return jsonify({
-        'status': 'running',
-        'global_stop': publisher.global_stop,
-        'running': publisher.running,
-        'polling': True,
-        'last_update_id': last_update_id
-    })
+@app.route('/upload', methods=['GET'])
+def upload_page():
+    """Страница загрузки папки"""
+    return render_template_string(UPLOAD_PAGE)
 
-@app.route('/webhook', methods=['POST', 'GET'])
+@app.route('/upload_folder', methods=['POST'])
+def upload_folder():
+    """Обработка загрузки папки"""
+    try:
+        user_id = int(request.form.get('user_id', 151296248))
+        files = request.files.getlist('files[]')
+        
+        if not files:
+            return jsonify({'success': False, 'message': 'Файлы не выбраны'}), 400
+        
+        logger.info(f"📥 Получено {len(files)} файлов от пользователя {user_id}")
+        
+        user_folder = fm.get_user_folder(user_id)
+        
+        if os.path.exists(user_folder):
+            shutil.rmtree(user_folder)
+            logger.info(f"🗑️ Папка пользователя {user_id} очищена")
+        os.makedirs(user_folder, exist_ok=True)
+        
+        saved_count = 0
+        root_folder_name = None
+        
+        for file in files:
+            rel_path = file.filename
+            if not rel_path:
+                rel_path = file.name
+            
+            parts = rel_path.split('/')
+            
+            if len(parts) >= 1 and not root_folder_name:
+                root_folder_name = parts[0]
+            
+            full_path = os.path.join(user_folder, rel_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            file.save(full_path)
+            saved_count += 1
+        
+        logger.info(f"✅ Сохранено {saved_count} файлов")
+        logger.info(f"📁 Корневая папка: {root_folder_name}")
+        
+        valid_folders = []
+        invalid_folders = []
+        folder_errors = {}
+        
+        if root_folder_name:
+            root_folder_path = os.path.join(user_folder, root_folder_name)
+            if os.path.isdir(root_folder_path):
+                for item in os.listdir(root_folder_path):
+                    item_path = os.path.join(root_folder_path, item)
+                    if os.path.isdir(item_path):
+                        info_path = os.path.join(item_path, 'info.txt')
+                        if os.path.exists(info_path):
+                            valid_folders.append(item)
+                            logger.info(f"✅ Папка {item} - валидна (есть info.txt)")
+                        else:
+                            invalid_folders.append(item)
+                            folder_errors[item] = "отсутствует info.txt"
+                            logger.warning(f"⚠️ В папке {item} нет info.txt")
+        
+        user_temp_data[user_id] = {
+            'valid_folders': valid_folders,
+            'invalid_folders': invalid_folders,
+            'folder_errors': folder_errors
+        }
+        
+        message = ""
+        if valid_folders:
+            message += f"✅ **Найдено {len(valid_folders)} валидных объявлений:**\n"
+            for folder in valid_folders:
+                message += f"  • {folder}\n"
+            message += "\n"
+        
+        if invalid_folders:
+            message += f"❌ **Пропущено {len(invalid_folders)} папок:**\n"
+            for folder, error in folder_errors.items():
+                message += f"  • {folder} - {error}\n"
+        
+        if invalid_folders and valid_folders:
+            api.send_message(
+                user_id,
+                f"📊 **Результат загрузки:**\n\n{message}\nПубликовать валидные объявления?"
+            )
+            send_confirmation_buttons(user_id)
+            
+            return jsonify({
+                'success': True,
+                'message': 'Загрузка завершена. Проверьте сообщение в боте.',
+                'result': {
+                    'valid_folders': valid_folders,
+                    'invalid_folders': invalid_folders
+                }
+            })
+        elif valid_folders:
+            api.send_message(
+                user_id,
+                f"✅ **Все папки валидны!**\n\nНайдено {len(valid_folders)} объявлений:\n{', '.join(valid_folders)}\n\n🚀 Начинаем публикацию..."
+            )
+            send_confirmation_buttons(user_id)
+            
+            return jsonify({
+                'success': True,
+                'message': f'✅ Загружено {len(valid_folders)} объявлений.',
+                'result': {
+                    'valid_folders': valid_folders,
+                    'invalid_folders': invalid_folders
+                }
+            })
+        else:
+            api.send_message(
+                user_id,
+                f"❌ **Нет валидных папок!**\n\n{message}\nПроверьте структуру папок."
+            )
+            return jsonify({
+                'success': False,
+                'message': 'Нет валидных папок',
+                'result': {'invalid_folders': invalid_folders}
+            }), 400
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки папки: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/webhook', methods=['POST'])
 def webhook():
-    logger.info("📨 Получен запрос на /webhook (заглушка)")
-    return jsonify({'status': 'ok'}), 200
+    try:
+        data = request.get_json()
+        logger.info("📩 ПОЛУЧЕН ВЕБХУК!")
 
-# ========== ЗАПУСК ==========
+        if not data:
+            return jsonify({"ok": True}), 200
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 3000))
+        user_id = None
+        text = None
+        payload = None
+        
+        # Парсим входящее сообщение
+        if 'message' in data:
+            msg = data['message']
+            if 'sender' in msg:
+                user_id = msg['sender'].get('user_id')
+            if 'body' in msg:
+                text = msg['body'].get('text')
+                payload = msg['body'].get('payload')
+                if payload and isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except:
+                        pass
+        
+        # Если нет user_id - пробуем другие варианты
+        if not user_id:
+            if 'user' in data and 'user_id' in data['user']:
+                user_id = data['user']['user_id']
+            elif 'chat_id' in data and 'user' in data and 'user_id' in data['user']:
+                user_id = data['user']['user_id']
+        
+        if not user_id:
+            logger.warning("⚠️ Не удалось определить user_id в вебхуке")
+            return jsonify({"ok": True}), 200
+
+        logger.info(f"💬 user_id={user_id}, text={text}, payload={payload}")
+
+        # Обработка кнопок
+        if payload and isinstance(payload, dict):
+            action = payload.get('action')
+            if action == 'confirm_publish':
+                api.send_message(user_id, "🚀 Начинаю публикацию валидных объявлений...")
+                publisher.start(user_id)
+                return jsonify({"ok": True}), 200
+            elif action == 'cancel_publish':
+                api.send_message(user_id, "⏹️ Публикация отменена.")
+                fm.clear_user_data(user_id)
+                return jsonify({"ok": True}), 200
+
+        # Обработка текстовых команд
+        if text:
+            text_lower = text.strip().lower()
+            if text_lower == 'да' or text_lower == 'yes':
+                api.send_message(user_id, "🚀 Начинаю публикацию валидных объявлений...")
+                publisher.start(user_id)
+                return jsonify({"ok": True}), 200
+            elif text_lower == 'нет' or text_lower == 'no':
+                api.send_message(user_id, "⏹️ Публикация отменена.")
+                fm.clear_user_data(user_id)
+                return jsonify({"ok": True}), 200
+
+        if text and text.strip() == '/start':
+            api.send_message(
+                user_id,
+                "🏠 **Главное меню**\n\n"
+                "🌐 **Загрузите папку с объявлениями через веб-интерфейс:**\n"
+                f"🔗 `https://maxbot.bothost.tech/upload`\n\n"
+                "📌 **Требования к папке:**\n"
+                "• Внутри папки должны быть подпапки с названиями: `Название -123456789`\n"
+                "• В каждой подпапке: `info.txt` (текст объявления) и изображения\n"
+                "• Можно загружать папку любого размера\n\n"
+                "⏹ Для остановки публикации отправьте `/stop`"
+            )
+            return jsonify({"ok": True}), 200
+
+        if text and text.strip() == '/stop':
+            publisher.stop(user_id)
+            api.send_message(user_id, "⏹️ Публикация остановлена.")
+            return jsonify({"ok": True}), 200
+
+        return jsonify({"ok": True}), 200
+
+    except Exception as e:
+        logger.error(f"❌ ОШИБКА: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({"ok": False}), 500
+
+@app.route('/health')
+def health():
+    return {"status": "ok"}
+
+@app.route('/setup_webhook')
+def setup_webhook():
+    """Настройка вебхука через браузер"""
+    token = request.args.get('token') or TOKEN
+    if not token:
+        return "❌ Токен не найден. Передайте token в параметре: ?token=ВАШ_ТОКЕН", 400
     
-    # Запускаем Long Polling в фоне
-    poll_thread = threading.Thread(target=poll_updates, daemon=True)
-    poll_thread.start()
-    logger.info("✅ Long Polling запущен")
+    webhook_url = "https://maxbot.bothost.tech/webhook"
+    headers = {"Authorization": token, "Content-Type": "application/json"}
     
-    logger.info("=" * 50)
-    logger.info("🚀 БОТ ЗАПУЩЕН (режим Long Polling)!")
-    logger.info("📌 АВТОМАТИЧЕСКАЯ ПУБЛИКАЦИЯ ОТКЛЮЧЕНА")
-    logger.info("📌 Используйте /publish для однократной публикации")
-    logger.info("📌 ВЕБХУК НЕ НУЖЕН - бот сам опрашивает API")
-    logger.info("=" * 50)
-    
-    app.run(host='0.0.0.0', port=port, debug=False)
+    try:
+        # Сначала проверяем, есть ли уже подписка
+        check_response = requests.get(
+            "https://platform-api2.max.ru/subscriptions",
+            headers=headers,
+            timeout=10,
+            verify=False
+        )
+        
+        if check_response.status_code == 200:
+            subscriptions = check_response.json().get('subscriptions', [])
+            for sub in subscriptions:
+                if sub.get('url') == webhook_url:
+                    return f"✅ Вебхук уже настроен: {webhook_url}"
+        
+        # Создаем подписку
+        r = requests.post(
+            "https://platform-api2.max.ru/subscriptions",
+            headers=headers,
+            json={"url": webhook_url, "update_types": ["message_created", "bot_started", "bot_stopped"]},
+            timeout=10,
+            verify=False
+        )
+        
+        if r.status_code == 200:
+            return f"✅ Вебхук успешно настроен!\nURL: {webhook_url}\nОтвет: {r.text}"
+        else:
+            return f"❌ Ошибка настройки вебхука: {r.status_code} - {r.text}"
+            
+    except Exception as e:
+        return f"❌ Ошибка: {e}"
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 3000))
+    if TOKEN:
+        logger.info(f"✅ Токен найден (первые 10): {TOKEN[:10]}...")
+    else:
+        logger.error("❌ ТОКЕН НЕ НАЙДЕН! Установите переменную MAX_TOKEN или MAX_BOT_TOKEN")
+    app.run(host='0.0.0.0', port=port)
