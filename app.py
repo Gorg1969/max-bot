@@ -65,7 +65,7 @@ web_interface = WebInterface(fm, publisher)
 # ========== ФУНКЦИИ ОТПРАВКИ (ИСПРАВЛЕНА) ==========
 
 def send_message(chat_id, text):
-    """Отправка сообщения - с поддержкой асинхронных методов"""
+    """Отправка сообщения с поддержкой асинхронных методов"""
     if not api:
         logger.warning(f"⚠️ API не инициализирован!")
         return False
