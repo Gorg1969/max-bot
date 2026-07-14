@@ -14,7 +14,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 МБ
+# УВЕЛИЧИВАЕМ ЛИМИТ ДО 2 ГБ
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2 ГБ
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -103,7 +104,7 @@ api = APIClient()
 publisher = Publisher(api, fm, db)
 report_gen = ReportGenerator(fm, db)
 
-# ========== HTML СТРАНИЦА ==========
+# ========== HTML СТРАНИЦА (С РАЗБИВКОЙ НА КЛИЕНТЕ) ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -142,6 +143,7 @@ UPLOAD_PAGE = """
         .button-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px; }
         .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
         .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; }
+        .chunk-info { background: #d1ecf1; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 4px solid #17a2b8; }
     </style>
 </head>
 <body>
@@ -185,6 +187,7 @@ UPLOAD_PAGE = """
     <script>
         let selectedFiles = [];
         let userId = 151296248;
+        const CHUNK_SIZE = 20;
         
         const dropZone = document.getElementById('dropZone');
         const folderInput = document.getElementById('folderInput');
@@ -288,124 +291,106 @@ UPLOAD_PAGE = """
             statusDiv.style.display = 'block';
         }
 
-        function uploadFolder() {
+        async function uploadFolder() {
             if (selectedFiles.length === 0) {
                 showStatus('error', '❌ Выберите папку для загрузки');
                 return;
             }
             
-            const formData = new FormData();
-            selectedFiles.forEach(file => {
-                formData.append('files[]', file, file.webkitRelativePath);
-            });
-            formData.append('user_id', userId);
+            const totalFiles = selectedFiles.length;
+            const totalChunks = Math.ceil(totalFiles / CHUNK_SIZE);
             
-            showStatus('info', '⏳ Загрузка началась...');
+            showStatus('info', `⏳ Загрузка ${totalFiles} файлов (${totalChunks} пачек по ${CHUNK_SIZE})...`);
             progressBar.style.display = 'block';
             progress.style.width = '0%';
             progress.textContent = '0%';
             logDiv.textContent = '';
-            addLog('🚀 Начинаем загрузку...');
-            addLog(`📁 Файлов: ${selectedFiles.length}`);
+            addLog(`🚀 Начинаем загрузку ${totalFiles} файлов...`);
+            addLog(`📦 Разбито на ${totalChunks} пачек по ${CHUNK_SIZE} файлов`);
             
-            try {
-                const xhr = new XMLHttpRequest();
-                xhr.upload.addEventListener('progress', (e) => {
-                    if (e.lengthComputable) {
-                        const percent = Math.round((e.loaded / e.total) * 100);
-                        progress.style.width = percent + '%';
-                        progress.textContent = percent + '%';
-                    }
+            let uploaded = 0;
+            let failedChunks = 0;
+            
+            for (let i = 0; i < totalFiles; i += CHUNK_SIZE) {
+                const chunk = selectedFiles.slice(i, i + CHUNK_SIZE);
+                const chunkNum = Math.floor(i / CHUNK_SIZE) + 1;
+                
+                addLog(`📤 Загрузка пачки ${chunkNum}/${totalChunks} (${chunk.length} файлов)...`);
+                
+                const formData = new FormData();
+                chunk.forEach(file => {
+                    formData.append('files[]', file, file.webkitRelativePath);
                 });
-                xhr.onload = function() {
-                    if (xhr.status === 200) {
-                        try {
-                            const response = JSON.parse(xhr.responseText);
-                            if (response.success) {
-                                showStatus('success', '✅ ' + response.message);
-                                addLog('✅ ' + response.message);
-                                progress.style.width = '100%';
-                                progress.textContent = '100%';
-                            } else {
-                                showStatus('error', '❌ ' + response.message);
-                                addLog('❌ Ошибка: ' + response.message);
-                            }
-                        } catch (e) {
-                            showStatus('error', '❌ Ошибка обработки ответа');
-                            addLog('❌ Ошибка: ' + e.message);
-                        }
+                formData.append('user_id', userId);
+                formData.append('chunk_num', chunkNum);
+                formData.append('total_chunks', totalChunks);
+                formData.append('append', i > 0 ? 'true' : 'false');
+                
+                try {
+                    const response = await fetch('/upload_chunk', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        uploaded += result.saved_count || chunk.length;
+                        addLog(`✅ Пачка ${chunkNum} загружена (${result.saved_count || chunk.length} файлов)`);
                     } else {
-                        showStatus('error', '❌ Ошибка загрузки: ' + xhr.status);
-                        addLog('❌ Ошибка сервера: ' + xhr.status);
+                        failedChunks++;
+                        addLog(`❌ Ошибка пачки ${chunkNum}: ${result.message}`);
                     }
-                };
-                xhr.onerror = function() {
-                    showStatus('error', '❌ Ошибка соединения');
-                    addLog('❌ Ошибка соединения с сервером');
-                };
-                xhr.open('POST', '/upload_folder');
-                xhr.send(formData);
-            } catch (error) {
-                showStatus('error', '❌ Ошибка: ' + error.message);
-                addLog('❌ Ошибка: ' + error.message);
+                } catch (error) {
+                    failedChunks++;
+                    addLog(`❌ Ошибка пачки ${chunkNum}: ${error.message}`);
+                }
+                
+                // Обновляем прогресс
+                const progressPercent = Math.min(100, Math.round(((i + chunk.length) / totalFiles) * 100));
+                progress.style.width = progressPercent + '%';
+                progress.textContent = progressPercent + '%';
+                
+                // Пауза между пачками
+                if (i + CHUNK_SIZE < totalFiles) {
+                    await new Promise(r => setTimeout(r, 500));
+                }
+            }
+            
+            if (failedChunks === 0) {
+                showStatus('success', `✅ Загружено ${uploaded} файлов! Публикация запущена.`);
+                addLog(`✅ ВСЕ ${uploaded} файлов загружены!`);
+                progress.style.width = '100%';
+                progress.textContent = '100%';
+            } else {
+                showStatus('warning', `⚠️ Загружено ${uploaded} файлов, ${failedChunks} пачек с ошибками`);
+                addLog(`⚠️ Загружено ${uploaded} файлов, ${failedChunks} пачек с ошибками`);
+            }
+            
+            // Запускаем публикацию
+            if (uploaded > 0) {
+                addLog('🚀 Запускаем публикацию...');
+                try {
+                    const response = await fetch('/start_publish', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({user_id: userId})
+                    });
+                    const result = await response.json();
+                    if (result.success) {
+                        addLog('✅ Публикация запущена в фоне!');
+                    } else {
+                        addLog('❌ Ошибка запуска публикации: ' + result.message);
+                    }
+                } catch (error) {
+                    addLog('❌ Ошибка запуска публикации: ' + error.message);
+                }
             }
         }
     </script>
 </body>
 </html>
 """
-
-# ========== ФУНКЦИЯ ДЛЯ ПОТОКОВОЙ ЗАГРУЗКИ ПО 20 ФАЙЛОВ ==========
-
-def chunked_upload(user_id, files, chunk_size=20):
-    """
-    Загружает файлы пачками по chunk_size штук.
-    """
-    total_saved = 0
-    total_files = len(files)
-    
-    # Очищаем папку перед загрузкой
-    user_folder = fm.get_user_folder(user_id)
-    if os.path.exists(user_folder):
-        shutil.rmtree(user_folder)
-    os.makedirs(user_folder, exist_ok=True)
-    
-    for i in range(0, total_files, chunk_size):
-        chunk = files[i:i + chunk_size]
-        chunk_num = i // chunk_size + 1
-        total_chunks = (total_files + chunk_size - 1) // chunk_size
-        
-        logger.info(f"📦 Загрузка пачки {chunk_num}/{total_chunks} ({len(chunk)} файлов)")
-        
-        saved = 0
-        for file in chunk:
-            if not file.filename:
-                continue
-            if file.filename.startswith('.'):
-                continue
-            
-            rel_path = file.filename
-            full_path = os.path.join(user_folder, rel_path)
-            os.makedirs(os.path.dirname(full_path), exist_ok=True)
-            
-            try:
-                with open(full_path, 'wb') as f:
-                    while True:
-                        data = file.stream.read(64 * 1024)
-                        if not data:
-                            break
-                        f.write(data)
-                saved += 1
-            except Exception as e:
-                logger.error(f"❌ Ошибка сохранения {rel_path}: {e}")
-        
-        total_saved += saved
-        logger.info(f"✅ Пачка {chunk_num} сохранена ({saved} файлов)")
-        
-        if i + chunk_size < total_files:
-            time.sleep(1)
-    
-    return total_saved
 
 # ========== МАРШРУТЫ ==========
 
@@ -417,8 +402,9 @@ def index():
 def upload_page():
     return render_template_string(UPLOAD_PAGE)
 
-@app.route('/upload_folder', methods=['POST'])
-def upload_folder():
+@app.route('/upload_chunk', methods=['POST'])
+def upload_chunk():
+    """Загружает одну пачку файлов (до 20 штук)"""
     try:
         if 'files[]' not in request.files:
             return jsonify({'success': False, 'message': 'Файлы не найдены'}), 400
@@ -436,27 +422,44 @@ def upload_folder():
         except ValueError:
             return jsonify({'success': False, 'message': 'Неверный user_id'}), 400
         
-        logger.info(f"📥 Пользователь {user_id}: загружает {len(files)} файлов")
+        append = request.form.get('append', 'false').lower() == 'true'
+        chunk_num = request.form.get('chunk_num', '1')
+        total_chunks = request.form.get('total_chunks', '1')
         
-        total_saved = chunked_upload(user_id, files, chunk_size=20)
+        logger.info(f"📦 Пачка {chunk_num}/{total_chunks}: {len(files)} файлов для пользователя {user_id}")
         
-        logger.info(f"✅ Пользователь {user_id}: сохранено {total_saved} файлов")
+        # Сохраняем пачку
+        result = fm.save_uploaded_files_stream(files, user_id, append=append)
         
-        if total_saved > 0:
-            api.send_message(user_id, f"✅ Загружено {total_saved} файлов! Начинаю публикацию...")
-            threading.Thread(target=publisher.start, args=(user_id,)).start()
-        else:
-            api.send_message(user_id, "❌ Не удалось загрузить файлы. Проверьте структуру папки.")
+        if not result['success']:
+            return jsonify({'success': False, 'message': result.get('error', 'Ошибка сохранения')}), 500
         
         return jsonify({
             'success': True,
-            'message': f'Загружено {total_saved} файлов. Публикация запущена в фоне.'
+            'saved_count': result['saved_count'],
+            'message': f'Сохранено {result["saved_count"]} файлов'
         })
         
     except Exception as e:
-        logger.error(f"❌ Ошибка загрузки: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"❌ Ошибка загрузки пачки: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/start_publish', methods=['POST'])
+def start_publish():
+    """Запускает публикацию"""
+    try:
+        data = request.get_json()
+        user_id = data.get('user_id')
+        if not user_id:
+            return jsonify({'success': False, 'message': 'user_id не указан'}), 400
+        
+        api.send_message(user_id, f"📢 Начинаю публикацию объявлений...")
+        threading.Thread(target=publisher.start, args=(user_id,)).start()
+        
+        return jsonify({'success': True, 'message': 'Публикация запущена'})
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка запуска публикации: {e}")
         return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/webhook', methods=['POST'])
