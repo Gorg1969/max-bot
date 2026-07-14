@@ -6,8 +6,6 @@ import shutil
 import urllib3
 import json
 import threading
-import sys
-import platform
 from modules import Database, FileManager, Publisher, WebInterface
 from modules.max_client import ReportGenerator
 
@@ -442,21 +440,32 @@ def upload_folder():
         os.makedirs(user_folder, exist_ok=True)
         
         saved_count = 0
+        # ПОТОКОВОЕ СОХРАНЕНИЕ - НЕ ДЕРЖИМ В ПАМЯТИ
         for file in files:
             if not file.filename:
                 continue
             rel_path = file.filename
             full_path = os.path.join(user_folder, rel_path)
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
-            file.save(full_path)
+            
+            # Сохраняем чанками по 64KB
+            with open(full_path, 'wb') as f:
+                while True:
+                    chunk = file.stream.read(64 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
             saved_count += 1
         
         logger.info(f"✅ Сохранено {saved_count} файлов")
         
-        threading.Thread(target=publisher.start, args=(user_id,)).start()
+        # ОТПРАВЛЯЕМ СООБЩЕНИЕ В БОТ
         api.send_message(user_id, f"✅ Загружено {saved_count} файлов! Начинаю публикацию...")
         
-        return jsonify({'success': True, 'message': f'Загружено {saved_count} файлов'})
+        # ЗАПУСКАЕМ ПУБЛИКАЦИЮ В ФОНОВОМ ПОТОКЕ
+        threading.Thread(target=publisher.start, args=(user_id,)).start()
+        
+        return jsonify({'success': True, 'message': f'Загружено {saved_count} файлов. Публикация запущена в фоне.'})
         
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки: {e}")
@@ -604,79 +613,10 @@ def setup_webhook():
     except Exception as e:
         return f"❌ Ошибка: {e}"
 
-# ========== ДИАГНОСТИКА ==========
-
-@app.route('/test')
-def test():
-    """Диагностика бота через браузер - упрощенная версия"""
-    result = {
-        'status': 'ok',
-        'system': {
-            'os': platform.system(),
-            'python': sys.version,
-        },
-        'imports': {},
-        'files': {},
-        'api': {},
-        'env': {}
-    }
-    
-    # Проверка импортов
-    modules = ['flask', 'requests', 'PIL', 'pandas', 'numpy', 'openpyxl', 'pytz', 'maxapi']
-    for mod in modules:
-        try:
-            __import__(mod)
-            result['imports'][mod] = '✅ OK'
-        except ImportError as e:
-            result['imports'][mod] = f'❌ {str(e)}'
-    
-    # Проверка файлов
-    files = ['app.py', 'requirements.txt', 
-             'modules/__init__.py', 'modules/database.py', 
-             'modules/file_manager.py', 'modules/publisher.py', 
-             'modules/web_interface.py', 'modules/max_client.py']
-    for file in files:
-        if os.path.exists(file):
-            result['files'][file] = f'✅ ({os.path.getsize(file)} байт)'
-        else:
-            result['files'][file] = '❌ НЕ НАЙДЕН'
-    
-    # Проверка токена
-    token = os.environ.get('MAX_TOKEN') or os.environ.get('MAX_BOT_TOKEN') or os.environ.get('TOKEN')
-    if token:
-        result['env']['token'] = f'✅ найден (первые 10: {token[:10]}...)'
-    else:
-        result['env']['token'] = '❌ НЕ НАЙДЕН!'
-    
-    # Проверка API
-    if token:
-        try:
-            r = requests.get('https://platform-api2.max.ru/me', 
-                           headers={'Authorization': token}, 
-                           timeout=10, 
-                           verify=False)
-            result['api']['status'] = r.status_code
-            if r.status_code == 200:
-                data = r.json()
-                result['api']['bot_name'] = data.get('first_name', 'Unknown')
-                result['api']['message'] = '✅ API доступен'
-            else:
-                result['api']['message'] = f'❌ Ошибка: {r.text[:100]}'
-        except Exception as e:
-            result['api']['message'] = f'❌ {str(e)}'
-    else:
-        result['api']['message'] = '❌ Токен отсутствует'
-    
-    # Переменные окружения
-    result['env']['PORT'] = os.environ.get('PORT', 'не установлен')
-    result['env']['BASE_URL'] = os.environ.get('BASE_URL', 'не установлен')
-    
-    return jsonify(result)
-
 # ========== ЗАПУСК ==========
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
     if TOKEN:
         logger.info(f"✅ Токен найден (первые 10): {TOKEN[:10]}...")
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, threaded=True)
