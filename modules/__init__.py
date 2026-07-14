@@ -8,7 +8,7 @@ from .process_links import (
     download_file_from_drive,
     process_google_drive_link
 )
-from .max_client import ReportGenerator
+from .report_generator import ReportGenerator
 
 __all__ = [
     'Database',
