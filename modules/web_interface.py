@@ -1,11 +1,11 @@
 import os
 import logging
-from flask import render_template_string, request, jsonify, send_file, abort
-from download_handler import DownloadHandler
+from flask import render_template_string, request, jsonify, send_file
+from .download_handler import DownloadHandler
 
 logger = logging.getLogger(__name__)
 
-# HTML шаблон для загрузки папок (упрощённая версия)
+# HTML шаблон для загрузки папок
 UPLOAD_TEMPLATE = """
 <!DOCTYPE html>
 <html>
