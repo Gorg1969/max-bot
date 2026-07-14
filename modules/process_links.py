@@ -1,285 +1,252 @@
-import logging
+import requests
+import re
 import os
 import time
-import re
-import json
-import threading
-import hashlib
-from enum import Enum
-from PIL import Image, ExifTags
-import io
+from urllib.parse import urlparse, parse_qs
 
-logger = logging.getLogger(__name__)
+def extract_file_id_from_url(url):
+    """
+    Извлекает file_id из ссылки Google Drive
+    """
+    # Пробуем найти ID в пути
+    match = re.search(r'/d/([a-zA-Z0-9_-]+)', url)
+    if match:
+        return match.group(1)
+    
+    # Пробуем найти ID в параметрах
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+    if 'id' in params:
+        return params['id'][0]
+    
+    return None
 
-class UserState(Enum):
-    IDLE = "idle"
-    PUBLISHING = "publishing"
-    STOPPED = "stopped"
+def convert_to_direct_link(url):
+    """
+    Конвертирует ссылку Google Drive в прямую ссылку для скачивания
+    """
+    file_id = extract_file_id_from_url(url)
+    if not file_id:
+        return None, None
+    
+    direct_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    return direct_url, file_id
 
-class Publisher:
-    def __init__(self, api, file_manager, db):
-        self.api = api
-        self.fm = file_manager
-        self.db = db
-        self.user_states = {}  # user_id -> UserState
+def download_file_from_drive(url, destination_path):
+    """
+    Скачивает файл с Google Drive (альтернативный метод с cookies)
+    """
+    try:
+        # Извлекаем ID файла
+        file_id = extract_file_id_from_url(url)
+        if not file_id:
+            print(f"❌ Не удалось извлечь ID из ссылки: {url}")
+            return False
         
-        # Флаги для реальной остановки
-        self.running = False
-        self.stop_requested = False
-        self.publish_thread = None
+        print(f"🔑 ID файла: {file_id}")
         
-        # Защита от дубликатов
-        self.published_hashes = set()
-        self.hash_file = "published_hashes.json"
-        self._load_published_hashes()
+        # Создаём сессию с cookies
+        session = requests.Session()
         
-        # Состояние глобального стопа
-        self.global_stop_file = "global_stop.json"
-        self._load_global_stop_state()
-    
-    def _load_published_hashes(self):
-        """Загружает хэши опубликованных объявлений"""
-        try:
-            if os.path.exists(self.hash_file):
-                with open(self.hash_file, 'r') as f:
-                    data = json.load(f)
-                    self.published_hashes = set(data.get('hashes', []))
-                logger.info(f"🔓 Загружено {len(self.published_hashes)} хэшей опубликованных объявлений")
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки хэшей: {e}")
-            self.published_hashes = set()
-    
-    def _save_published_hashes(self):
-        """Сохраняет хэши опубликованных объявлений"""
-        try:
-            with open(self.hash_file, 'w') as f:
-                json.dump({'hashes': list(self.published_hashes)}, f)
-        except Exception as e:
-            logger.error(f"❌ Ошибка сохранения хэшей: {e}")
-    
-    def _load_global_stop_state(self):
-        """Загружает состояние глобального стопа"""
-        try:
-            if os.path.exists(self.global_stop_file):
-                with open(self.global_stop_file, 'r') as f:
-                    data = json.load(f)
-                    self.global_stop = data.get('global_stop', False)
-                logger.info(f"🔓 Загружено состояние глобального стопа: {self.global_stop}")
-            else:
-                self.global_stop = False
-                self._save_global_stop_state()
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки состояния: {e}")
-            self.global_stop = False
-    
-    def _save_global_stop_state(self):
-        """Сохраняет состояние глобального стопа"""
-        try:
-            with open(self.global_stop_file, 'w') as f:
-                json.dump({'global_stop': self.global_stop}, f)
-        except Exception as e:
-            logger.error(f"❌ Ошибка сохранения состояния: {e}")
-    
-    def _get_ad_hash(self, folder_path):
-        """Создает уникальный хэш объявления"""
-        hasher = hashlib.md5()
-        try:
-            # Хэшируем содержимое info.txt
-            info_path = os.path.join(folder_path, 'info.txt')
-            if os.path.exists(info_path):
-                with open(info_path, 'rb') as f:
-                    hasher.update(f.read())
-            
-            # Хэшируем имена файлов изображений
-            files = sorted(os.listdir(folder_path))
-            for f in files:
-                if f.lower().endswith(('.jpg', '.jpeg', '.png')):
-                    hasher.update(f.encode())
-                    # Добавляем размер файла для надежности
-                    file_path = os.path.join(folder_path, f)
-                    if os.path.exists(file_path):
-                        hasher.update(str(os.path.getsize(file_path)).encode())
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания хэша: {e}")
-            return str(time.time())
+        # Заголовки для имитации браузера
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+        }
         
-        return hasher.hexdigest()
-    
-    def extract_chat_id(self, folder_name):
-        match = re.search(r'-\s*(\d+)', folder_name)
-        if match:
-            return f"-{match.group(1)}"
-        return None
-    
-    def fix_image_orientation(self, img):
-        """Исправляет ориентацию изображения на основе EXIF-данных"""
-        try:
-            for orientation in ExifTags.TAGS.keys():
-                if ExifTags.TAGS[orientation] == 'Orientation':
+        # ШАГ 1: Получаем страницу с подтверждением
+        initial_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        print(f"🔄 Шаг 1: Запрос к {initial_url}")
+        
+        response = session.get(initial_url, headers=headers, allow_redirects=True, timeout=30)
+        response.raise_for_status()
+        
+        print(f"📊 Статус: {response.status_code}")
+        print(f"📊 URL после редиректа: {response.url}")
+        
+        # ШАГ 2: Ищем параметр confirm
+        confirm_param = None
+        
+        # Проверяем URL на наличие confirm
+        if 'confirm=' in response.url:
+            match = re.search(r'confirm=([^&]+)', response.url)
+            if match:
+                confirm_param = match.group(1)
+                print(f"✅ Найден confirm в URL: {confirm_param}")
+        
+        # Если не нашли в URL, ищем в HTML
+        if not confirm_param:
+            html_content = response.text
+            # Ищем confirm в разных форматах
+            patterns = [
+                r'confirm=([^&"\']+)',
+                r'"confirm":"([^"]+)"',
+                r'confirm=([a-zA-Z0-9_-]+)',
+                r'confirm=([^&]+)',
+                r'uc\?export=download&amp;confirm=([^&]+)',
+                r'confirm=([a-z0-9]+)',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, html_content)
+                if match:
+                    confirm_param = match.group(1)
+                    print(f"✅ Найден confirm в HTML: {confirm_param}")
                     break
-            
-            exif = img._getexif()
-            if exif and orientation in exif:
-                orientation_value = exif[orientation]
-                if orientation_value == 3:
-                    img = img.rotate(180, expand=True)
-                elif orientation_value == 6:
-                    img = img.rotate(270, expand=True)
-                elif orientation_value == 8:
-                    img = img.rotate(90, expand=True)
-        except Exception as e:
-            logger.debug(f"⚠️ Ошибка исправления ориентации: {e}")
-        return img
-    
-    def compress_image(self, image_path, max_size_mb=0.8, quality=75):
-        """Сжимает изображение с исправлением ориентации и очисткой EXIF"""
-        try:
-            with Image.open(image_path) as img:
-                img = self.fix_image_orientation(img)
-                
-                if img.mode in ('RGBA', 'P'):
-                    img = img.convert('RGB')
-                
-                max_dimension = 1280
-                if img.width > max_dimension or img.height > max_dimension:
-                    ratio = min(max_dimension / img.width, max_dimension / img.height)
-                    new_size = (int(img.width * ratio), int(img.height * ratio))
-                    img = img.resize(new_size, Image.Resampling.LANCZOS)
-                
-                buffer = io.BytesIO()
-                img.save(buffer, format='JPEG', quality=quality, optimize=True, progressive=True)
-                compressed_data = buffer.getvalue()
-                
-                if len(compressed_data) > max_size_mb * 1024 * 1024:
-                    buffer = io.BytesIO()
-                    img.save(buffer, format='JPEG', quality=50, optimize=True, progressive=True)
-                    compressed_data = buffer.getvalue()
-                
-                return compressed_data
-        except Exception as e:
-            logger.error(f"❌ Ошибка сжатия: {e}")
-            with open(image_path, 'rb') as f:
-                return f.read()
-    
-    def get_sorted_images(self, folder_path, max_count=10):
-        """Возвращает отсортированный список изображений (до 10)"""
-        images = []
-        if not os.path.exists(folder_path):
-            return images
-            
-        for file in os.listdir(folder_path):
-            if file.lower().endswith(('.jpg', '.jpeg', '.png')):
-                if file.startswith('.'):
-                    continue
-                images.append(file)
         
-        images.sort()
-        return images[:max_count]
-    
-    def stop_global(self):
-        """Глобальная остановка всех публикаций"""
-        self.global_stop = True
-        self._save_global_stop_state()
-        logger.info("🛑 ГЛОБАЛЬНАЯ ОСТАНОВКА ВСЕХ ПУБЛИКАЦИЙ")
+        # ШАГ 3: Формируем ссылку для скачивания
+        if confirm_param:
+            download_url = f"https://drive.google.com/uc?export=download&confirm={confirm_param}&id={file_id}"
+        else:
+            # Если confirm не найден, пробуем стандартные варианты
+            print("⚠️ Confirm не найден, пробуем стандартные варианты...")
+            download_url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t"
         
-        # Останавливаем цикл публикации
-        self.stop_publishing_loop()
+        print(f"🔄 Шаг 2: Скачивание по {download_url}")
         
-        # Останавливаем всех пользователей
-        for user_id in list(self.user_states.keys()):
-            if self.user_states[user_id] == UserState.PUBLISHING:
-                self.user_states[user_id] = UserState.STOPPED
-                self.api.send_message(user_id, "⏹️ Публикация остановлена глобальной командой.")
-        
-        return True
-    
-    def reset_global_stop(self):
-        """Сброс глобального флага остановки"""
-        self.global_stop = False
-        self._save_global_stop_state()
-        logger.info("🔄 Глобальный флаг остановки сброшен")
-        return True
-    
-    def start_publishing_loop(self, user_id, check_interval=60):
-        """Запускает непрерывный цикл публикации новых объявлений"""
-        if self.running:
-            logger.warning("⚠️ Цикл публикации уже запущен")
-            return False
-        
-        if self.global_stop:
-            logger.warning(f"⚠️ Глобальная остановка активна! Публикация для {user_id} невозможна")
-            self.api.send_message(user_id, "⚠️ Публикация запрещена глобальной остановкой. Выполните /reset_global")
-            return False
-        
-        self.running = True
-        self.stop_requested = False
-        
-        self.publish_thread = threading.Thread(
-            target=self._publishing_loop,
-            args=(user_id, check_interval)
+        # ШАГ 4: Скачиваем файл с правильными cookies
+        response = session.get(
+            download_url,
+            headers=headers,
+            stream=True,
+            allow_redirects=True,
+            timeout=60
         )
-        self.publish_thread.daemon = True
-        self.publish_thread.start()
+        response.raise_for_status()
         
-        logger.info(f"🚀 Запущен цикл публикации для пользователя {user_id}")
-        self.api.send_message(user_id, f"🔄 Запущен автоматический поиск новых объявлений (проверка каждые {check_interval} сек)")
-        return True
-    
-    def stop_publishing_loop(self):
-        """Останавливает цикл публикации"""
-        if not self.running:
-            logger.info("ℹ️ Цикл публикации не запущен")
-            return False
+        # Проверяем, что это файл
+        content_type = response.headers.get('content-type', '').lower()
+        content_disposition = response.headers.get('content-disposition', '')
         
-        logger.info("⏹️ Остановка цикла публикации...")
-        self.stop_requested = True
-        self.running = False
+        print(f"📊 Content-Type: {content_type}")
+        print(f"📊 Content-Disposition: {content_disposition}")
         
-        if self.publish_thread and self.publish_thread.is_alive():
-            self.publish_thread.join(timeout=5)
-        
-        logger.info("✅ Цикл публикации остановлен")
-        return True
-    
-    def _publishing_loop(self, user_id, check_interval):
-        """Основной цикл публикации"""
-        logger.info(f"🔄 Запущен цикл проверки для {user_id}")
-        
-        while not self.stop_requested and self.running:
-            try:
-                # Проверяем глобальный стоп
-                if self.global_stop:
-                    logger.info(f"⏹️ Глобальная остановка! Цикл прерван для {user_id}")
-                    self.api.send_message(user_id, "⏹️ Цикл публикации прерван глобальной остановкой.")
-                    break
+        # Если получили HTML - пробуем другой метод
+        if 'text/html' in content_type and 'filename' not in content_disposition:
+            print("⚠️ Получен HTML вместо файла, пробуем альтернативный метод...")
+            
+            # Пробуем с confirm=1
+            alt_url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm=1"
+            print(f"🔄 Альтернативный запрос: {alt_url}")
+            
+            response = session.get(alt_url, headers=headers, stream=True, allow_redirects=True, timeout=60)
+            response.raise_for_status()
+            
+            content_type = response.headers.get('content-type', '').lower()
+            content_disposition = response.headers.get('content-disposition', '')
+            
+            if 'text/html' in content_type and 'filename' not in content_disposition:
+                # Если всё равно HTML, пытаемся скачать через другой метод
+                print("⚠️ Всё ещё HTML, пробуем через drive.google.com...")
                 
-                # Проверяем новые объявления
-                new_ads = self._check_new_ads(user_id)
+                # Пробуем через страницу просмотра
+                view_url = f"https://drive.google.com/file/d/{file_id}/view"
+                response = session.get(view_url, headers=headers, allow_redirects=True, timeout=30)
                 
-                if new_ads:
-                    logger.info(f"📢 Найдено {len(new_ads)} новых объявлений для {user_id}")
-                    self.api.send_message(user_id, f"📢 Найдено {len(new_ads)} новых объявлений. Начинаю публикацию...")
-                    
-                    for ad in new_ads:
-                        if self.stop_requested or not self.running or self.global_stop:
-                            break
-                        self._publish_ad(user_id, ad)
-                        time.sleep(2)  # Задержка между отправками
+                # Ищем ссылку на скачивание в HTML
+                html_content = response.text
+                download_patterns = [
+                    r'https://drive\.google\.com/uc\?export=download[^"\']+',
+                    r'https://drive\.google\.com/u/0/uc\?export=download[^"\']+',
+                ]
                 
-                # Ждем следующую проверку
-                for _ in range(check_interval):
-                    if self.stop_requested or not self.running or self.global_stop:
+                for pattern in download_patterns:
+                    match = re.search(pattern, html_content)
+                    if match:
+                        download_link = match.group(0)
+                        print(f"✅ Найдена ссылка на скачивание: {download_link}")
+                        
+                        # Добавляем confirm если нужно
+                        if 'confirm' not in download_link:
+                            download_link += '&confirm=t'
+                        
+                        response = session.get(download_link, headers=headers, stream=True, allow_redirects=True, timeout=60)
+                        response.raise_for_status()
                         break
-                    time.sleep(1)
-                    
-            except Exception as e:
-                logger.error(f"❌ Ошибка в цикле публикации: {e}")
-                time.sleep(10)  # Пауза при ошибке
         
-        self.running = False
-        self.api.send_message(user_id, "⏹️ Цикл публикации завершен")
-        logger.info(f"⏹️ Цикл публикации для {user_id} завершен")
+        # Проверяем финальный результат
+        content_type = response.headers.get('content-type', '').lower()
+        content_disposition = response.headers.get('content-disposition', '')
+        
+        if 'text/html' in content_type and 'filename' not in content_disposition:
+            raise Exception("Не удалось получить файл. Возможно, файл приватный или требует входа в аккаунт.")
+        
+        # ШАГ 5: Сохраняем файл
+        total_size = int(response.headers.get('content-length', 0))
+        if total_size > 0:
+            print(f"📦 Размер файла: {total_size / (1024*1024):.2f} МБ")
+        else:
+            print("📦 Размер файла неизвестен")
+        
+        downloaded = 0
+        with open(destination_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    
+                    # Показываем прогресс каждые 5 МБ
+                    if downloaded % (5 * 1024 * 1024) < 8192:
+                        if total_size > 0:
+                            progress = (downloaded / total_size) * 100
+                            print(f"📥 Скачано: {downloaded / (1024*1024):.1f} МБ ({progress:.1f}%)")
+                        else:
+                            print(f"📥 Скачано: {downloaded / (1024*1024):.1f} МБ")
+        
+        print(f"✅ Файл успешно скачан: {destination_path}")
+        return True
+        
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Ошибка сети: {e}")
+        return False
+    except Exception as e:
+        print(f"❌ Ошибка скачивания: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def process_google_drive_link(link, download_dir="downloads"):
+    """
+    Основная функция для обработки ссылки Google Drive
+    """
+    # Создаём папку для загрузок
+    os.makedirs(download_dir, exist_ok=True)
     
-    def _check_new_ads(self, user_id):
-        """Проверяет новые объявления для публи
+    # Извлекаем ID файла
+    file_id = extract_file_id_from_url(link)
+    if not file_id:
+        raise ValueError("❌ Не удалось извлечь ID файла из ссылки")
+    
+    print(f"🔑 ID файла: {file_id}")
+    
+    # Формируем имя для сохранения
+    filename = f"file_{file_id}.zip"
+    destination = os.path.join(download_dir, filename)
+    
+    # Удаляем старый файл, если есть
+    if os.path.exists(destination):
+        os.remove(destination)
+    
+    # Скачиваем файл
+    success = download_file_from_drive(link, destination)
+    
+    if success and os.path.exists(destination):
+        return destination
+    else:
+        raise Exception("❌ Не удалось скачать файл")
+
+# Экспортируем все необходимые функции
+__all__ = [
+    'extract_file_id_from_url',
+    'convert_to_direct_link',
+    'download_file_from_drive',
+    'process_google_drive_link'
+]
