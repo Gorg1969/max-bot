@@ -2,6 +2,7 @@ import logging
 import os
 import time
 import threading
+import asyncio
 from flask import Flask, request, jsonify, render_template_string
 
 # Импорты из modules
@@ -18,11 +19,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================
+# ГЛОБАЛЬНЫЙ EVENT LOOP (СОЗДАЕМ 1 РАЗ)
+# ============================================
+
+# Создаем event loop при старте
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
+# ============================================
 # ИНИЦИАЛИЗАЦИЯ MAX API
 # ============================================
 
 def init_max_api():
-    """Инициализация MAX API - используем SyncBot!"""
+    """Инициализация MAX API"""
     token = (
         os.environ.get('API_TOKEN') or
         os.environ.get('MAX_TOKEN') or
@@ -38,17 +47,17 @@ def init_max_api():
     try:
         import maxapi
         
-        # Пробуем SyncBot - СИНХРОННАЯ ВЕРСИЯ!
+        # Пробуем SyncBot
         if hasattr(maxapi, 'SyncBot'):
             api = maxapi.SyncBot(token=token)
-            logger.info("✅ MAX API инициализирован через класс: SyncBot (СИНХРОННЫЙ)")
+            logger.info("✅ MAX API инициализирован через SyncBot")
             return api
         
-        # Если SyncBot нет - пробуем Bot (но он асинхронный)
+        # Используем Bot с event loop
         elif hasattr(maxapi, 'Bot'):
-            logger.error("❌ SyncBot не найден в maxapi!")
-            logger.warning("⚠️ Bot - асинхронный, НЕ БУДЕТ РАБОТАТЬ!")
-            return None
+            api = maxapi.Bot(token=token)
+            logger.info("✅ MAX API инициализирован через Bot (с event loop)")
+            return api
         
         else:
             logger.error("❌ Не найден подходящий класс в maxapi")
@@ -72,7 +81,7 @@ web_interface = WebInterface(fm, publisher)
 # ========== ФУНКЦИИ ОТПРАВКИ ==========
 
 def send_message(chat_id, text):
-    """Отправка сообщения"""
+    """Отправка сообщения через event loop"""
     if not api:
         logger.warning(f"⚠️ API не инициализирован!")
         return False
@@ -80,9 +89,18 @@ def send_message(chat_id, text):
     try:
         # Проверяем, есть ли метод send_message
         if hasattr(api, 'send_message'):
-            api.send_message(chat_id, text)
+            # Запускаем через event loop
+            future = asyncio.run_coroutine_threadsafe(
+                api.send_message(chat_id, text),
+                loop
+            )
+            future.result(timeout=30)
         elif hasattr(api, 'sendMessage'):
-            api.sendMessage(chat_id, text)
+            future = asyncio.run_coroutine_threadsafe(
+                api.sendMessage(chat_id, text),
+                loop
+            )
+            future.result(timeout=30)
         else:
             logger.error(f"❌ Нет метода отправки!")
             return False
@@ -91,8 +109,6 @@ def send_message(chat_id, text):
         return True
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
-        import traceback
-        traceback.print_exc()
         return False
 
 # ========== ВЕБХУК ==========
@@ -218,4 +234,6 @@ if __name__ == '__main__':
     logger.info("📌 АВТОМАТИЧЕСКАЯ ПУБЛИКАЦИЯ ОТКЛЮЧЕНА")
     logger.info("📌 Используйте /publish для однократной публикации")
     logger.info("=" * 50)
+    
+    # Запускаем Flask
     app.run(host='0.0.0.0', port=port, debug=False)
