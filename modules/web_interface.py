@@ -1,11 +1,10 @@
 import os
 import logging
-from flask import render_template_string, request, jsonify, send_file
-from .download_handler import DownloadHandler
+from flask import render_template_string, request, jsonify
 
 logger = logging.getLogger(__name__)
 
-# HTML шаблон для загрузки папок
+# HTML шаблон для загрузки папок (упрощённая версия)
 UPLOAD_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -247,17 +246,16 @@ UPLOAD_TEMPLATE = """
 """
 
 class WebInterface:
-    def __init__(self, file_manager, publisher, download_handler):
+    def __init__(self, file_manager, publisher):
         self.fm = file_manager
         self.publisher = publisher
-        self.download_handler = download_handler
     
     def upload_page(self):
         """Возвращает HTML страницу для загрузки папок"""
         return render_template_string(UPLOAD_TEMPLATE)
     
     def upload_file(self, request, user_id):
-        """Обработка загрузки папки"""
+        """Обработка загрузки папки (для обратной совместимости)"""
         try:
             files = request.files.getlist('files[]')
             if not files:
@@ -273,23 +271,3 @@ class WebInterface:
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки: {e}")
             return {'success': False, 'message': str(e)}
-    
-    def download_report(self, user_id, filename):
-        """Обработка скачивания отчета"""
-        try:
-            filepath, error = self.download_handler.download_file(user_id, filename)
-            
-            if error:
-                return jsonify({'success': False, 'message': error}), 404
-            
-            # Отправляем файл
-            return send_file(
-                filepath,
-                as_attachment=True,
-                download_name=filename,
-                mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-            )
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка скачивания: {e}")
-            return jsonify({'success': False, 'message': str(e)}), 500
