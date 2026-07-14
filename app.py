@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 # ГЛОБАЛЬНЫЙ EVENT LOOP
 # ============================================
 
+# Создаем event loop при старте
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
@@ -74,22 +75,25 @@ app = Flask(__name__)
 db = Database()
 fm = FileManager()
 api = init_max_api()
-publisher = Publisher(api, fm, db)  # ← Ваш publisher.py с _call_api
+
+# Передаем loop в Publisher
+publisher = Publisher(api, fm, db, loop=loop)
 web_interface = WebInterface(fm, publisher)
 
 # ========== ФУНКЦИИ ОТПРАВКИ ==========
 
 def send_message(chat_id, text):
-    """Отправка сообщения"""
+    """Отправка сообщения через publisher"""
     if not api:
         logger.warning(f"⚠️ API не инициализирован!")
         return False
     
     try:
-        # Используем метод из publisher
         return publisher.send_message(chat_id, text)
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 # ========== ВЕБХУК ==========
