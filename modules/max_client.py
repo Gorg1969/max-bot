@@ -6,6 +6,7 @@ from datetime import datetime
 import pytz
 import logging
 import shutil
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -16,12 +17,17 @@ class ReportGenerator:
 
     def parse_info_file(self, info_path):
         """Парсит info.txt и извлекает нужные поля для отчета"""
-        data = {}
+        data = {
+            'Название': '',
+            'Ссылка': '',
+            'Код предложения': '',
+            'ad_text': ''
+        }
         try:
             with open(info_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            # Ищем поля по маркерам
+            # Поля для отчета
             fields = {
                 'Название': r'Название:\s*(.+)',
                 'Ссылка': r'Ссылка:\s*(.+)',
@@ -32,10 +38,8 @@ class ReportGenerator:
                 match = re.search(pattern, content)
                 if match:
                     data[key] = match.group(1).strip()
-                else:
-                    data[key] = ''
             
-            # Если есть разделитель "#изъятая", можно взять текст до него
+            # Текст объявления до разделителя
             if '#изъятая' in content:
                 data['ad_text'] = content.split('#изъятая')[0].strip()
             else:
@@ -43,7 +47,6 @@ class ReportGenerator:
                 
         except Exception as e:
             logger.error(f"❌ Ошибка парсинга {info_path}: {e}")
-            data = {'Название': '', 'Ссылка': '', 'Код предложения': '', 'ad_text': ''}
         
         return data
 
@@ -67,20 +70,19 @@ class ReportGenerator:
                 if not os.path.exists(info_path):
                     continue
                 
-                # Парсим данные из info.txt
+                # Парсим данные
                 info = self.parse_info_file(info_path)
                 
-                # Получаем время публикации из БД
+                # Время публикации из БД или текущее
                 pub_time = self.db.get_publication_time(user_id, folder_name)
                 if pub_time:
-                    # Конвертируем в московское время
                     pub_time = pub_time.astimezone(moscow_tz)
                     time_str = pub_time.strftime('%Y-%m-%d %H:%M:%S')
                 else:
                     time_str = datetime.now(moscow_tz).strftime('%Y-%m-%d %H:%M:%S')
                 
-                # Формируем ссылку на пост (заглушка, можно доработать)
-                chat_id = self.fm.extract_chat_id(folder_name)
+                # Ссылка на пост
+                chat_id = self.fm.extract_chat_id_from_name(folder_name)
                 post_link = f"https://max.ru/post/{chat_id}" if chat_id else ""
                 
                 report_data.append({
@@ -124,16 +126,17 @@ class ReportGenerator:
             
         except Exception as e:
             logger.error(f"❌ Ошибка создания отчета: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
-    def cleanup_user_data(self, user_id, keep_report=False):
-        """Удаляет временные папки и файлы пользователя, кроме отчета"""
+    def cleanup_user_data(self, user_id, keep_report=True):
+        """Удаляет временные папки и файлы пользователя"""
         try:
             user_folder = self.fm.get_user_folder(user_id)
             if not os.path.exists(user_folder):
                 return
             
-            # Если нужно сохранить отчеты
             if keep_report:
                 # Удаляем всё, кроме файлов отчетов
                 for item in os.listdir(user_folder):
@@ -144,6 +147,8 @@ class ReportGenerator:
                     elif not item.startswith('Отчет_'):
                         os.remove(item_path)
                         logger.info(f"🗑️ Удален файл: {item}")
+                    else:
+                        logger.info(f"ℹ️ Отчет сохранен: {item}")
             else:
                 # Удаляем всё
                 shutil.rmtree(user_folder)
@@ -151,4 +156,4 @@ class ReportGenerator:
                 logger.info(f"🗑️ Все данные пользователя {user_id} удалены")
                 
         except Exception as e:
-            logger.error(f"❌ Ошибка очистки данных пользователя {user_id}: {e}")
+            logger.error(f"❌ Ошибка очистки данных: {e}")
