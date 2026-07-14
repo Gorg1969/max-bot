@@ -125,7 +125,6 @@ class Publisher:
                 ad_text = parts[0].strip()
                 metadata_part = parts[1].strip() if len(parts) > 1 else ""
             else:
-                # Если разделителя нет, все содержимое - текст объявления
                 ad_text = content.strip()
                 metadata_part = ""
             
@@ -141,7 +140,6 @@ class Publisher:
                         value = value.strip()
                         # Убираем маркдаун ссылки если есть
                         if '[' in value and ']' in value and '(' in value and ')' in value:
-                            # Извлекаем URL из [текст](url)
                             import re
                             url_match = re.search(r'\(([^)]+)\)', value)
                             if url_match:
@@ -241,13 +239,10 @@ class Publisher:
         self.publish_counter += 1
         
         if self.publish_counter == 1:
-            # Первое объявление - сразу
             delay = 0
         elif self.publish_counter % 5 == 0:
-            # Каждое 5-е - 5 секунд
             delay = 5
         else:
-            # Остальные - случайно от 1 до 3 секунд
             import random
             delay = random.uniform(1, 3)
         
@@ -340,11 +335,9 @@ class Publisher:
                         if self.stop_requested or not self.running or self.global_stop:
                             break
                         
-                        # Публикуем с задержкой по паттерну
                         self.wait_with_pattern()
                         self._publish_ad(user_id, ad)
                 
-                # Ждем следующую проверку
                 for _ in range(check_interval):
                     if self.stop_requested or not self.running or self.global_stop:
                         break
@@ -395,7 +388,6 @@ class Publisher:
             
             info_path = os.path.join(folder_path, 'info.txt')
             
-            # Парсим info.txt
             parsed = self.parse_info_file(info_path)
             ad_text = parsed['ad_text']
             metadata = parsed['metadata']
@@ -422,7 +414,6 @@ class Publisher:
                     except Exception as e:
                         logger.error(f"❌ Ошибка сжатия {img_name}: {e}")
             
-            # Отправляем
             if photo_files:
                 success = self.api.send_photos_to_chat(
                     chat_id=chat_id,
@@ -433,10 +424,7 @@ class Publisher:
                 success = self.api.send_message_to_chat(chat_id, ad_text)
             
             if success:
-                # Сохраняем в БД
                 self.db.add_publication(user_id, folder_name, chat_id)
-                
-                # Сохраняем метаданные для отчета
                 self.db.save_ad_metadata(
                     user_id=user_id,
                     folder_name=folder_name,
@@ -454,6 +442,16 @@ class Publisher:
         except Exception as e:
             logger.error(f"❌ Ошибка публикации {folder_name}: {e}")
             return False
+    
+    def _delete_report_file(self, filepath, user_id):
+        """Удаляет файл отчета через 10 минут"""
+        try:
+            time.sleep(600)  # 10 минут
+            if os.path.exists(filepath):
+                os.remove(filepath)
+                logger.info(f"🗑️ Отчет удален: {filepath}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка удаления отчета: {e}")
     
     def start(self, user_id):
         """Запускает однократную публикацию всех объявлений"""
@@ -576,7 +574,6 @@ class Publisher:
                     published += 1
                     logger.info(f"✅ Опубликовано: {folder_name}")
                     
-                    # Задержка по паттерну
                     self.wait_with_pattern()
                     
                 except Exception as e:
@@ -587,8 +584,31 @@ class Publisher:
             
             if published > 0:
                 self.api.send_message(user_id, f"✅ Публикация завершена! Опубликовано {published} объявлений.")
-                # Создаем отчет
-                self.db.generate_report(user_id)
+                
+                # СОЗДАЕМ ОТЧЕТ
+                report_path = self.db.generate_report(user_id)
+                
+                if report_path and os.path.exists(report_path):
+                    # Формируем ссылку для скачивания
+                    base_url = os.environ.get('BASE_URL', 'http://localhost:5000')
+                    filename = os.path.basename(report_path)
+                    download_url = f"{base_url}/download_report/{user_id}/{filename}"
+                    
+                    self.api.send_message(
+                        user_id, 
+                        f"📊 **Отчет создан!**\n\n"
+                        f"📄 Файл: {filename}\n"
+                        f"🔗 Скачать: {download_url}\n\n"
+                        f"⚠️ Ссылка действительна 10 минут"
+                    )
+                    
+                    # Запускаем таймер для удаления файла через 10 минут
+                    timer = threading.Timer(600, self._delete_report_file, args=(report_path, user_id))
+                    timer.daemon = True
+                    timer.start()
+                    
+                else:
+                    self.api.send_message(user_id, "❌ Не удалось создать отчет")
             else:
                 self.api.send_message(user_id, "❌ Не удалось опубликовать ни одного объявления.")
             
