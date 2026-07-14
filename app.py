@@ -7,7 +7,7 @@ import urllib3
 import json
 import threading
 from modules import Database, FileManager, Publisher, WebInterface
-from modules.max_client import ReportGenerator
+from modules.report_generator import ReportGenerator
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -124,8 +124,6 @@ UPLOAD_PAGE = """
         .btn-primary:hover { background: #0056b3; }
         .btn-success { background: #28a745; color: white; }
         .btn-success:hover { background: #218838; }
-        .btn-warning { background: #ffc107; color: #333; }
-        .btn-warning:hover { background: #e0a800; }
         .btn-danger { background: #dc3545; color: white; }
         .btn-danger:hover { background: #c82333; }
         .status { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
@@ -143,8 +141,6 @@ UPLOAD_PAGE = """
         .button-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px; }
         .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
         .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; }
-        .report-section { margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; border: 1px solid #dee2e6; }
-        .report-section h3 { margin-top: 0; }
     </style>
 </head>
 <body>
@@ -171,7 +167,6 @@ UPLOAD_PAGE = """
             <ul class="file-list" id="fileListContent"></ul>
             <div class="button-group">
                 <button class="btn btn-success" onclick="uploadFolder()">🚀 Загрузить</button>
-                <button class="btn btn-warning" onclick="getReport()">📊 Получить отчет</button>
                 <button class="btn btn-danger" onclick="clearFiles()">🗑️ Очистить</button>
             </div>
         </div>
@@ -182,14 +177,6 @@ UPLOAD_PAGE = """
         
         <div id="status" class="status"></div>
         <div id="log"></div>
-        
-        <div class="report-section">
-            <h3>📊 Отчеты</h3>
-            <p>После публикации вы можете скачать отчет в формате Excel.</p>
-            <button class="btn btn-warning" onclick="getReport()">📥 Скачать отчет</button>
-            <button class="btn btn-danger" onclick="cleanupData()">🗑️ Очистить данные</button>
-            <div id="reportStatus" style="margin-top: 10px;"></div>
-        </div>
         
         <div class="footer">⚡ MAX Bot | Загрузка объявлений</div>
     </div>
@@ -358,49 +345,6 @@ UPLOAD_PAGE = """
                 addLog('❌ Ошибка: ' + error.message);
             }
         }
-
-        function getReport() {
-            const reportStatus = document.getElementById('reportStatus');
-            reportStatus.innerHTML = '⏳ Создаю отчет...';
-            
-            fetch(`/get_report/${userId}`)
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        reportStatus.innerHTML = `✅ Отчет создан! <a href="${data.download_url}" download>Скачать</a>`;
-                        addLog('✅ Отчет создан: ' + data.download_url);
-                        window.location.href = data.download_url;
-                    } else {
-                        reportStatus.innerHTML = '❌ ' + data.message;
-                        addLog('❌ Ошибка: ' + data.message);
-                    }
-                })
-                .catch(error => {
-                    reportStatus.innerHTML = '❌ Ошибка соединения';
-                    addLog('❌ Ошибка: ' + error.message);
-                });
-        }
-
-        function cleanupData() {
-            const reportStatus = document.getElementById('reportStatus');
-            reportStatus.innerHTML = '⏳ Очищаю данные...';
-            
-            fetch(`/cleanup/${userId}`, { method: 'POST' })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        reportStatus.innerHTML = '✅ ' + data.message;
-                        addLog('✅ ' + data.message);
-                    } else {
-                        reportStatus.innerHTML = '❌ ' + data.message;
-                        addLog('❌ Ошибка: ' + data.message);
-                    }
-                })
-                .catch(error => {
-                    reportStatus.innerHTML = '❌ Ошибка соединения';
-                    addLog('❌ Ошибка: ' + error.message);
-                });
-        }
     </script>
 </body>
 </html>
@@ -426,46 +370,35 @@ def upload_folder():
         if not files:
             return jsonify({'success': False, 'message': 'Файлы не выбраны'}), 400
         
-        user_id = request.form.get('user_id', '151296248')
+        user_id = request.form.get('user_id')
+        if not user_id:
+            return jsonify({'success': False, 'message': 'user_id не указан'}), 400
+        
         try:
             user_id = int(user_id)
         except ValueError:
-            user_id = 151296248
+            return jsonify({'success': False, 'message': 'Неверный user_id'}), 400
         
-        logger.info(f"📥 Получено {len(files)} файлов")
+        logger.info(f"📥 Пользователь {user_id}: загружает {len(files)} файлов")
         
-        user_folder = fm.get_user_folder(user_id)
-        if os.path.exists(user_folder):
-            shutil.rmtree(user_folder)
-        os.makedirs(user_folder, exist_ok=True)
+        # ПОТОКОВОЕ СОХРАНЕНИЕ
+        result = fm.save_uploaded_files_stream(files, user_id)
+        if not result['success']:
+            return jsonify({'success': False, 'message': result.get('error', 'Ошибка сохранения')}), 500
         
-        saved_count = 0
-        # ПОТОКОВОЕ СОХРАНЕНИЕ - НЕ ДЕРЖИМ В ПАМЯТИ
-        for file in files:
-            if not file.filename:
-                continue
-            rel_path = file.filename
-            full_path = os.path.join(user_folder, rel_path)
-            os.makedirs(os.path.dirname(full_path), exist_ok=True)
-            
-            # Сохраняем чанками по 64KB
-            with open(full_path, 'wb') as f:
-                while True:
-                    chunk = file.stream.read(64 * 1024)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-            saved_count += 1
+        saved_count = result['saved_count']
+        logger.info(f"✅ Пользователь {user_id}: сохранено {saved_count} файлов")
         
-        logger.info(f"✅ Сохранено {saved_count} файлов")
-        
-        # ОТПРАВЛЯЕМ СООБЩЕНИЕ В БОТ
+        # Отправляем сообщение пользователю
         api.send_message(user_id, f"✅ Загружено {saved_count} файлов! Начинаю публикацию...")
         
-        # ЗАПУСКАЕМ ПУБЛИКАЦИЮ В ФОНОВОМ ПОТОКЕ
+        # Запускаем публикацию в фоне
         threading.Thread(target=publisher.start, args=(user_id,)).start()
         
-        return jsonify({'success': True, 'message': f'Загружено {saved_count} файлов. Публикация запущена в фоне.'})
+        return jsonify({
+            'success': True, 
+            'message': f'Загружено {saved_count} файлов. Публикация запущена в фоне.'
+        })
         
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки: {e}")
@@ -501,11 +434,9 @@ def webhook():
                 user_id,
                 "🏠 **Главное меню**\n\n"
                 "🌐 **Загрузить папку:**\n"
-                f"🔗 https://maxbot.bothost.tech/upload\n\n"
+                f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
                 "📊 **Получить отчет:**\n"
-                f"🔗 https://maxbot.bothost.tech/get_report/{user_id}\n\n"
-                "🗑️ **Очистить данные:**\n"
-                f"🔗 https://maxbot.bothost.tech/cleanup/{user_id}\n\n"
+                f"🔗 https://maxbot.bothost.tech/report/{user_id}\n\n"
                 "⏹ **Остановить публикацию:** `/stop`"
             )
             return jsonify({"ok": True}), 200
@@ -536,52 +467,47 @@ def webhook():
         logger.error(f"❌ ОШИБКА: {e}")
         return jsonify({"ok": False}), 500
 
-@app.route('/get_report/<int:user_id>', methods=['GET'])
-def get_report(user_id):
-    try:
-        report_path = report_gen.generate_report(user_id)
-        if not report_path:
-            return jsonify({'success': False, 'message': 'Нет данных для отчета'}), 404
-        
-        filename = os.path.basename(report_path)
-        download_url = f"/download_report/{user_id}/{filename}"
-        
-        return jsonify({
-            'success': True,
-            'message': 'Отчет создан',
-            'download_url': download_url
-        })
-    except Exception as e:
-        logger.error(f"❌ Ошибка создания отчета: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
+@app.route('/report/<int:user_id>')
+def report_page(user_id):
+    """Страница с отчетом"""
+    report_path = report_gen.generate_report(user_id)
+    if not report_path:
+        return "❌ Нет данных для отчета", 404
+    
+    filename = os.path.basename(report_path)
+    download_url = f"/download_report/{user_id}/{filename}"
+    
+    return f"""
+    <html>
+    <head><title>Отчет</title></head>
+    <body style="font-family: Arial; max-width: 600px; margin: 50px auto; text-align: center;">
+        <h1>📊 Отчет готов!</h1>
+        <p><a href="{download_url}" style="display: inline-block; padding: 12px 30px; background: #28a745; color: white; text-decoration: none; border-radius: 5px;">📥 Скачать отчет</a></p>
+        <p>⚠️ После скачивания данные будут очищены.</p>
+        <p><a href="/upload">⬅️ Вернуться к загрузке</a></p>
+    </body>
+    </html>
+    """
 
-@app.route('/download_report/<int:user_id>/<path:filename>', methods=['GET'])
+@app.route('/download_report/<int:user_id>/<path:filename>')
 def download_report(user_id, filename):
     try:
         user_folder = fm.get_user_folder(user_id)
         file_path = os.path.join(user_folder, filename)
         
         if not os.path.exists(file_path):
-            return jsonify({'success': False, 'message': 'Файл не найден'}), 404
+            return "❌ Файл не найден", 404
         
         response = send_file(file_path, as_attachment=True, download_name=filename)
         
+        # Очищаем данные после скачивания
         threading.Thread(target=report_gen.cleanup_user_data, args=(user_id, True)).start()
         
         return response
         
     except Exception as e:
-        logger.error(f"❌ Ошибка скачивания отчета: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-@app.route('/cleanup/<int:user_id>', methods=['POST', 'GET'])
-def cleanup_user(user_id):
-    try:
-        report_gen.cleanup_user_data(user_id, keep_report=True)
-        return jsonify({'success': True, 'message': 'Данные очищены'})
-    except Exception as e:
-        logger.error(f"❌ Ошибка очистки: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
+        logger.error(f"❌ Ошибка скачивания: {e}")
+        return str(e), 500
 
 @app.route('/health')
 def health():
