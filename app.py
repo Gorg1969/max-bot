@@ -49,8 +49,8 @@ web_interface = WebInterface(fm, publisher)
 
 # ========== ОТПРАВКА СООБЩЕНИЙ ==========
 
-def send_message(chat_id, text):
-    """Отправка сообщения через прямой HTTP запрос (с отключенной проверкой SSL)"""
+def send_message(user_id, text):
+    """Отправка сообщения пользователю (используем user_id)"""
     token = get_token()
     if not token:
         logger.warning(f"⚠️ Токен не найден!")
@@ -62,17 +62,17 @@ def send_message(chat_id, text):
             "Authorization": token,
             "Content-Type": "application/json",
         }
+        # Используем user_id!
         json_data = {
-            "chat_id": chat_id,
+            "user_id": user_id,  # ← user_id, НЕ chat_id!
             "text": text,
         }
         
-        logger.info(f"📤 Отправка в {chat_id}: {text[:30]}...")
-        # verify=False - отключаем проверку SSL сертификата
+        logger.info(f"📤 Отправка пользователю {user_id}: {text[:30]}...")
         response = requests.post(url, headers=headers, json=json_data, timeout=30, verify=False)
         
         if response.status_code == 200:
-            logger.info(f"✅ Сообщение отправлено в {chat_id}")
+            logger.info(f"✅ Сообщение отправлено пользователю {user_id}")
             return True
         else:
             logger.error(f"❌ Ошибка API: {response.status_code} - {response.text}")
@@ -101,14 +101,20 @@ def webhook():
         message = data.get('message', {})
         recipient = message.get('recipient', {})
         body = message.get('body', {})
+        sender = message.get('sender', {})
         
-        chat_id = recipient.get('chat_id')
+        # Берем user_id из sender
+        user_id = sender.get('user_id')
+        # Или из recipient если нет sender
+        if not user_id:
+            user_id = recipient.get('user_id')
+        
         text = body.get('text', '')
         
-        if not chat_id or not text:
+        if not user_id or not text:
             return jsonify({'status': 'ok'}), 200
         
-        logger.info(f"📩 Сообщение от {chat_id}: {text}")
+        logger.info(f"📩 Сообщение от {user_id}: {text}")
         
         response = None
         
@@ -116,13 +122,13 @@ def webhook():
             response = "👋 Привет! Я бот для публикации объявлений.\nИспользуйте /help для списка команд."
         
         elif text.startswith('/publish'):
-            send_message(chat_id, "📢 Начинаю однократную публикацию...")
-            threading.Thread(target=publisher.start, args=(chat_id,)).start()
+            send_message(user_id, "📢 Начинаю однократную публикацию...")
+            threading.Thread(target=publisher.start, args=(user_id,)).start()
             return jsonify({'status': 'ok'}), 200
         
         elif text.startswith('/stop'):
-            send_message(chat_id, "⏹️ Останавливаю публикацию...")
-            publisher.stop(chat_id)
+            send_message(user_id, "⏹️ Останавливаю публикацию...")
+            publisher.stop(user_id)
             return jsonify({'status': 'ok'}), 200
         
         elif text.startswith('/stop_global'):
@@ -153,7 +159,7 @@ def webhook():
             response = f"❓ Неизвестная команда. Используйте /help"
         
         if response:
-            send_message(chat_id, response)
+            send_message(user_id, response)
         
         return jsonify({'status': 'ok'}), 200
         
