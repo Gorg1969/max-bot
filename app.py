@@ -608,22 +608,12 @@ def setup_webhook():
 
 @app.route('/test')
 def test():
-    """Диагностика бота через браузер"""
-    import platform
-    import sys
-    import psutil
-    import requests
-    
+    """Диагностика бота через браузер - упрощенная версия"""
     result = {
         'status': 'ok',
         'system': {
             'os': platform.system(),
             'python': sys.version,
-            'ram_total_gb': round(psutil.virtual_memory().total / (1024**3), 2),
-            'ram_available_gb': round(psutil.virtual_memory().available / (1024**3), 2),
-            'ram_percent': psutil.virtual_memory().percent,
-            'disk_free_gb': round(psutil.disk_usage('/').free / (1024**3), 2),
-            'disk_percent': psutil.disk_usage('/').percent,
         },
         'imports': {},
         'files': {},
@@ -632,7 +622,8 @@ def test():
     }
     
     # Проверка импортов
-    for mod in ['flask', 'requests', 'PIL', 'pandas', 'numpy', 'openpyxl', 'pytz', 'maxapi']:
+    modules = ['flask', 'requests', 'PIL', 'pandas', 'numpy', 'openpyxl', 'pytz', 'maxapi']
+    for mod in modules:
         try:
             __import__(mod)
             result['imports'][mod] = '✅ OK'
@@ -640,10 +631,11 @@ def test():
             result['imports'][mod] = f'❌ {str(e)}'
     
     # Проверка файлов
-    for file in ['app.py', 'requirements.txt', 
-                 'modules/__init__.py', 'modules/database.py', 
-                 'modules/file_manager.py', 'modules/publisher.py', 
-                 'modules/web_interface.py', 'modules/max_client.py']:
+    files = ['app.py', 'requirements.txt', 
+             'modules/__init__.py', 'modules/database.py', 
+             'modules/file_manager.py', 'modules/publisher.py', 
+             'modules/web_interface.py', 'modules/max_client.py']
+    for file in files:
         if os.path.exists(file):
             result['files'][file] = f'✅ ({os.path.getsize(file)} байт)'
         else:
@@ -667,7 +659,6 @@ def test():
             if r.status_code == 200:
                 data = r.json()
                 result['api']['bot_name'] = data.get('first_name', 'Unknown')
-                result['api']['bot_id'] = data.get('user_id', 'Unknown')
                 result['api']['message'] = '✅ API доступен'
             else:
                 result['api']['message'] = f'❌ Ошибка: {r.text[:100]}'
