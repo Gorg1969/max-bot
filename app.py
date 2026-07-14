@@ -1,11 +1,13 @@
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, send_file
 import requests
 import logging
 import os
 import shutil
 import urllib3
 import json
+import threading
 from modules import Database, FileManager, Publisher, WebInterface
+from modules.max_client import ReportGenerator
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -98,7 +100,7 @@ class APIClient:
 
 api = APIClient()
 publisher = Publisher(api, fm, db)
-web = WebInterface(fm, publisher)
+report_gen = ReportGenerator(fm, db)
 
 # ========== HTML СТРАНИЦА ==========
 UPLOAD_PAGE = """
@@ -122,6 +124,8 @@ UPLOAD_PAGE = """
         .btn-primary:hover { background: #0056b3; }
         .btn-success { background: #28a745; color: white; }
         .btn-success:hover { background: #218838; }
+        .btn-warning { background: #ffc107; color: #333; }
+        .btn-warning:hover { background: #e0a800; }
         .btn-danger { background: #dc3545; color: white; }
         .btn-danger:hover { background: #c82333; }
         .status { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
@@ -139,11 +143,14 @@ UPLOAD_PAGE = """
         .button-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px; }
         .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
         .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; }
+        .report-section { margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; border: 1px solid #dee2e6; }
+        .report-section h3 { margin-top: 0; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>📤 Загрузка объявлений</h1>
+        
         <div class="instructions">
             <strong>📌 Как подготовить папку:</strong><br>
             1️⃣ Создайте папку с названием<br>
@@ -151,27 +158,42 @@ UPLOAD_PAGE = """
             3️⃣ В каждой подпапке: <code>info.txt</code> и фото<br>
             4️⃣ Перетащите папку в поле ниже
         </div>
+        
         <div class="drop-zone" id="dropZone">
             <span class="icon">📂</span>
             <p><strong>Перетащите папку сюда</strong></p>
             <button class="btn btn-primary" onclick="document.getElementById('folderInput').click()">Выбрать папку</button>
             <input type="file" id="folderInput" webkitdirectory multiple>
         </div>
+        
         <div id="fileList" style="display:none;">
             <div class="selected-info" id="selectedInfo"></div>
             <ul class="file-list" id="fileListContent"></ul>
             <div class="button-group">
                 <button class="btn btn-success" onclick="uploadFolder()">🚀 Загрузить</button>
+                <button class="btn btn-warning" onclick="getReport()">📊 Получить отчет</button>
                 <button class="btn btn-danger" onclick="clearFiles()">🗑️ Очистить</button>
             </div>
         </div>
+        
         <div class="progress-bar" id="progressBar">
             <div class="progress" id="progress">0%</div>
         </div>
+        
         <div id="status" class="status"></div>
         <div id="log"></div>
+        
+        <div class="report-section">
+            <h3>📊 Отчеты</h3>
+            <p>После публикации вы можете скачать отчет в формате Excel.</p>
+            <button class="btn btn-warning" onclick="getReport()">📥 Скачать отчет</button>
+            <button class="btn btn-danger" onclick="cleanupData()">🗑️ Очистить данные</button>
+            <div id="reportStatus" style="margin-top: 10px;"></div>
+        </div>
+        
         <div class="footer">⚡ MAX Bot | Загрузка объявлений</div>
     </div>
+
     <script>
         let selectedFiles = [];
         let userId = 151296248;
@@ -271,6 +293,12 @@ UPLOAD_PAGE = """
             logDiv.scrollTop = logDiv.scrollHeight;
         }
 
+        function showStatus(type, message) {
+            statusDiv.className = 'status ' + type;
+            statusDiv.textContent = message;
+            statusDiv.style.display = 'block';
+        }
+
         function uploadFolder() {
             if (selectedFiles.length === 0) {
                 showStatus('error', '❌ Выберите папку для загрузки');
@@ -331,15 +359,55 @@ UPLOAD_PAGE = """
             }
         }
 
-        function showStatus(type, message) {
-            statusDiv.className = 'status ' + type;
-            statusDiv.textContent = message;
-            statusDiv.style.display = 'block';
+        function getReport() {
+            const reportStatus = document.getElementById('reportStatus');
+            reportStatus.innerHTML = '⏳ Создаю отчет...';
+            
+            fetch(`/get_report/${userId}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        reportStatus.innerHTML = `✅ Отчет создан! <a href="${data.download_url}" download>Скачать</a>`;
+                        addLog('✅ Отчет создан: ' + data.download_url);
+                        // Автоматически скачиваем
+                        window.location.href = data.download_url;
+                    } else {
+                        reportStatus.innerHTML = '❌ ' + data.message;
+                        addLog('❌ Ошибка: ' + data.message);
+                    }
+                })
+                .catch(error => {
+                    reportStatus.innerHTML = '❌ Ошибка соединения';
+                    addLog('❌ Ошибка: ' + error.message);
+                });
+        }
+
+        function cleanupData() {
+            const reportStatus = document.getElementById('reportStatus');
+            reportStatus.innerHTML = '⏳ Очищаю данные...';
+            
+            fetch(`/cleanup/${userId}`, { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        reportStatus.innerHTML = '✅ ' + data.message;
+                        addLog('✅ ' + data.message);
+                    } else {
+                        reportStatus.innerHTML = '❌ ' + data.message;
+                        addLog('❌ Ошибка: ' + data.message);
+                    }
+                })
+                .catch(error => {
+                    reportStatus.innerHTML = '❌ Ошибка соединения';
+                    addLog('❌ Ошибка: ' + error.message);
+                });
         }
     </script>
 </body>
 </html>
 """
+
+# ========== МАРШРУТЫ ==========
 
 @app.route('/')
 def index():
@@ -352,22 +420,20 @@ def upload_page():
 @app.route('/upload_folder', methods=['POST'])
 def upload_folder():
     try:
-        # Проверяем наличие файлов
         if 'files[]' not in request.files:
             return jsonify({'success': False, 'message': 'Файлы не найдены'}), 400
         
         files = request.files.getlist('files[]')
-        if not files or all(f.filename == '' for f in files):
+        if not files:
             return jsonify({'success': False, 'message': 'Файлы не выбраны'}), 400
         
-        # Получаем user_id
         user_id = request.form.get('user_id', '151296248')
         try:
             user_id = int(user_id)
         except ValueError:
             user_id = 151296248
         
-        logger.info(f"📥 Получено {len(files)} файлов от пользователя {user_id}")
+        logger.info(f"📥 Получено {len(files)} файлов")
         
         user_folder = fm.get_user_folder(user_id)
         if os.path.exists(user_folder):
@@ -376,23 +442,27 @@ def upload_folder():
         
         saved_count = 0
         for file in files:
-            if file.filename:
-                rel_path = file.filename
-                full_path = os.path.join(user_folder, rel_path)
-                os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                file.save(full_path)
-                saved_count += 1
+            if not file.filename:
+                continue
+            rel_path = file.filename
+            full_path = os.path.join(user_folder, rel_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            file.save(full_path)
+            saved_count += 1
         
         logger.info(f"✅ Сохранено {saved_count} файлов")
+        
+        # Запускаем публикацию в фоне
+        threading.Thread(target=publisher.start, args=(user_id,)).start()
+        
+        # Отправляем сообщение в бот
         api.send_message(user_id, f"✅ Загружено {saved_count} файлов! Начинаю публикацию...")
-        publisher.start(user_id)
+        
         return jsonify({'success': True, 'message': f'Загружено {saved_count} файлов'})
         
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return jsonify({'success': False, 'message': f'Ошибка: {str(e)}'}), 500
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -417,10 +487,20 @@ def webhook():
         if not user_id:
             return jsonify({"ok": True}), 200
         
-        logger.info(f"💬 user_id={user_id}, text={text}, payload={payload}")
+        logger.info(f"💬 user_id={user_id}, text={text}")
         
         if text and text.strip() == '/start':
-            api.send_message(user_id, "🏠 **Главное меню**\n\n🌐 Загрузите папку: https://maxbot.bothost.tech/upload")
+            api.send_message(
+                user_id,
+                "🏠 **Главное меню**\n\n"
+                "🌐 **Загрузить папку:**\n"
+                f"🔗 https://maxbot.bothost.tech/upload\n\n"
+                "📊 **Получить отчет:**\n"
+                f"🔗 https://maxbot.bothost.tech/get_report/{user_id}\n\n"
+                "🗑️ **Очистить данные:**\n"
+                f"🔗 https://maxbot.bothost.tech/cleanup/{user_id}\n\n"
+                "⏹ **Остановить публикацию:** `/stop`"
+            )
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/stop':
@@ -428,10 +508,78 @@ def webhook():
             api.send_message(user_id, "⏹️ Публикация остановлена.")
             return jsonify({"ok": True}), 200
         
+        if text and text.strip() == '/report':
+            api.send_message(user_id, "📊 Создаю отчет...")
+            report_path = report_gen.generate_report(user_id)
+            if report_path:
+                filename = os.path.basename(report_path)
+                download_url = f"https://maxbot.bothost.tech/download_report/{user_id}/{filename}"
+                api.send_message(
+                    user_id,
+                    f"📊 **Отчет создан!**\n\n"
+                    f"🔗 [Скачать отчет]({download_url})\n\n"
+                    f"⚠️ После скачивания данные будут очищены."
+                )
+            else:
+                api.send_message(user_id, "❌ Нет данных для отчета.")
+            return jsonify({"ok": True}), 200
+        
         return jsonify({"ok": True}), 200
     except Exception as e:
         logger.error(f"❌ ОШИБКА: {e}")
         return jsonify({"ok": False}), 500
+
+@app.route('/get_report/<int:user_id>', methods=['GET'])
+def get_report(user_id):
+    """Генерирует отчет и возвращает ссылку на скачивание"""
+    try:
+        report_path = report_gen.generate_report(user_id)
+        if not report_path:
+            return jsonify({'success': False, 'message': 'Нет данных для отчета'}), 404
+        
+        filename = os.path.basename(report_path)
+        download_url = f"/download_report/{user_id}/{filename}"
+        
+        return jsonify({
+            'success': True,
+            'message': 'Отчет создан',
+            'download_url': download_url
+        })
+    except Exception as e:
+        logger.error(f"❌ Ошибка создания отчета: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/download_report/<int:user_id>/<path:filename>', methods=['GET'])
+def download_report(user_id, filename):
+    """Скачивает отчет и очищает данные пользователя"""
+    try:
+        user_folder = fm.get_user_folder(user_id)
+        file_path = os.path.join(user_folder, filename)
+        
+        if not os.path.exists(file_path):
+            return jsonify({'success': False, 'message': 'Файл не найден'}), 404
+        
+        # Отправляем файл
+        response = send_file(file_path, as_attachment=True, download_name=filename)
+        
+        # После отправки очищаем данные пользователя в фоне
+        threading.Thread(target=report_gen.cleanup_user_data, args=(user_id, True)).start()
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка скачивания отчета: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/cleanup/<int:user_id>', methods=['POST', 'GET'])
+def cleanup_user(user_id):
+    """Очищает данные пользователя"""
+    try:
+        report_gen.cleanup_user_data(user_id, keep_report=True)
+        return jsonify({'success': True, 'message': 'Данные очищены'})
+    except Exception as e:
+        logger.error(f"❌ Ошибка очистки: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/health')
 def health():
