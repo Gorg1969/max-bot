@@ -41,13 +41,13 @@ fm = FileManager()
 publisher = Publisher(None, fm, db)
 web_interface = WebInterface(fm, publisher)
 
-# Храним ID последнего обработанного сообщения
-last_processed_mid = None
+# Храним ID последнего обработанного обновления
+last_update_id = 0
 
 # ========== ОТПРАВКА СООБЩЕНИЙ ==========
 
 def send_message(chat_id, text):
-    """Отправка сообщения в чат (используем chat_id)"""
+    """Отправка сообщения в чат"""
     token = get_token()
     if not token:
         logger.warning(f"⚠️ Токен не найден!")
@@ -127,16 +127,13 @@ def handle_command(chat_id, text):
     else:
         return f"❓ Неизвестная команда. Используйте /help"
 
-# ========== LONG POLLING ==========
+# ========== LONG POLLING (ПРАВИЛЬНЫЙ) ==========
 
-def poll_messages():
-    """Основной цикл Long Polling - опрашивает API на наличие новых сообщений"""
-    global last_processed_mid
+def poll_updates():
+    """Основной цикл Long Polling - используем /updates"""
+    global last_update_id
     
-    logger.info("🔄 Запущен цикл Long Polling...")
-    
-    # Ваш USER_ID (из логов: 151296248)
-    user_id = 151296248
+    logger.info("🔄 Запущен цикл Long Polling через /updates...")
     
     while True:
         try:
@@ -146,47 +143,60 @@ def poll_messages():
                 time.sleep(10)
                 continue
             
-            # Получаем сообщения для пользователя
-            url = f"https://platform-api2.max.ru/messages?user_id={user_id}&count=10"
+            # Используем /updates для Long Polling
+            url = "https://platform-api2.max.ru/updates"
             headers = {
                 "Authorization": token,
             }
+            params = {
+                "offset": last_update_id + 1,
+                "limit": 10,
+                "timeout": 30,
+            }
             
-            response = requests.get(url, headers=headers, timeout=30, verify=False)
+            logger.debug(f"📥 Запрос обновлений с offset={last_update_id + 1}")
+            response = requests.get(url, headers=headers, params=params, timeout=35, verify=False)
             
             if response.status_code == 200:
                 data = response.json()
-                messages = data.get('messages', [])
+                updates = data.get('updates', [])
                 
-                if messages:
-                    logger.info(f"📨 Получено {len(messages)} сообщений")
-                    # Обрабатываем в обратном порядке (от старых к новым)
-                    for msg in reversed(messages):
-                        mid = msg.get('body', {}).get('mid')
-                        text = msg.get('body', {}).get('text', '')
-                        chat_id = msg.get('recipient', {}).get('chat_id')
+                if updates:
+                    logger.info(f"📨 Получено {len(updates)} обновлений")
+                    for update in updates:
+                        update_id = update.get('update_id')
+                        update_type = update.get('update_type')
                         
-                        # Пропускаем уже обработанные
-                        if mid == last_processed_mid:
-                            continue
-                        
-                        if text and text.startswith('/'):
-                            logger.info(f"📩 Новое сообщение: {text}")
+                        # Обрабатываем только новые сообщения
+                        if update_type == 'message_created':
+                            message = update.get('message', {})
+                            recipient = message.get('recipient', {})
+                            body = message.get('body', {})
+                            chat_id = recipient.get('chat_id')
+                            text = body.get('text', '')
                             
-                            # Обрабатываем команду
-                            response_text = handle_command(chat_id, text)
-                            if response_text:
-                                send_message(chat_id, response_text)
+                            if chat_id and text:
+                                logger.info(f"📩 Новое сообщение от {chat_id}: {text}")
+                                response_text = handle_command(chat_id, text)
+                                if response_text:
+                                    send_message(chat_id, response_text)
+                        elif update_type == 'bot_started':
+                            # Запуск бота через диплинк
+                            chat_id = update.get('chat_id')
+                            payload = update.get('payload')
+                            logger.info(f"🚀 Бот запущен пользователем {chat_id}, payload: {payload}")
+                            if chat_id:
+                                send_message(chat_id, "👋 Привет! Я бот для публикации объявлений.")
                         
-                        # Запоминаем ID последнего обработанного
-                        if mid:
-                            last_processed_mid = mid
+                        # Обновляем ID последнего обработанного обновления
+                        if update_id:
+                            last_update_id = max(last_update_id, update_id)
                 else:
-                    logger.debug("📭 Новых сообщений нет")
+                    logger.debug("📭 Новых обновлений нет")
             else:
-                logger.error(f"❌ Ошибка получения сообщений: {response.status_code} - {response.text}")
+                logger.error(f"❌ Ошибка получения обновлений: {response.status_code} - {response.text}")
             
-            time.sleep(2)  # Пауза между опросами
+            time.sleep(1)
             
         except Exception as e:
             logger.error(f"❌ Ошибка в Long Polling: {e}")
@@ -196,7 +206,7 @@ def poll_messages():
 
 # Запускаем Long Polling в фоновом потоке
 def start_polling():
-    poll_thread = threading.Thread(target=poll_messages, daemon=True)
+    poll_thread = threading.Thread(target=poll_updates, daemon=True)
     poll_thread.start()
     logger.info("✅ Long Polling запущен")
 
@@ -225,7 +235,8 @@ def status():
         'status': 'running',
         'global_stop': publisher.global_stop,
         'running': publisher.running,
-        'polling': True
+        'polling': True,
+        'last_update_id': last_update_id
     })
 
 # ========== ЗАПУСК ==========
@@ -240,7 +251,7 @@ if __name__ == '__main__':
     logger.info("🚀 БОТ ЗАПУЩЕН (режим Long Polling)!")
     logger.info("📌 АВТОМАТИЧЕСКАЯ ПУБЛИКАЦИЯ ОТКЛЮЧЕНА")
     logger.info("📌 Используйте /publish для однократной публикации")
-    logger.info("📌 ВЕБХУК НЕ НУЖЕН - бот сам опрашивает API")
+    logger.info("📌 ВЕБХУК НЕ НУЖЕН - бот сам опрашивает API через /updates")
     logger.info("=" * 50)
     
     app.run(host='0.0.0.0', port=port, debug=False)
