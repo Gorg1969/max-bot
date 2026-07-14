@@ -152,9 +152,9 @@ UPLOAD_PAGE = """
             <strong>📌 Как подготовить папку:</strong><br>
             1️⃣ Создайте головную папку (любое название)<br>
             2️⃣ Внутри создайте подпапки объявлений: <code>1 -123456789</code>, <code>2 -987654321</code><br>
-            3️⃣ В каждой подпапке: <code>info.txt</code> (текст) и фото<br>
+            3️⃣ В каждой подпапке: <code>info.txt</code> (текст) и фото (1-10 шт)<br>
             4️⃣ Перетащите головную папку в поле ниже<br>
-            5️⃣ Скрипт загружает по 2 подпапки за раз
+            5️⃣ Скрипт загружает по 2 ПАПКИ за раз (целиком)
         </div>
         
         <div class="drop-zone" id="dropZone">
@@ -247,22 +247,37 @@ UPLOAD_PAGE = """
             fileListContent.innerHTML = '';
             const folders = new Set();
             const fileCount = {};
+            
+            // Определяем структуру папок
             files.forEach(f => {
                 const parts = f.webkitRelativePath.split('/');
-                if (parts.length > 1) {
+                // parts[0] - головная папка, parts[1] - подпапка
+                if (parts.length >= 2) {
+                    const folder = parts[0] + '/' + parts[1];  // Головная/Подпапка
+                    folders.add(folder);
+                    if (!fileCount[folder]) fileCount[folder] = 0;
+                    fileCount[folder]++;
+                } else if (parts.length === 1) {
+                    // Если файлы прямо в головной папке (без подпапок)
                     const folder = parts[0];
                     folders.add(folder);
                     if (!fileCount[folder]) fileCount[folder] = 0;
                     fileCount[folder]++;
                 }
             });
-            folders.forEach(folder => {
+            
+            // Сортируем папки
+            const sortedFolders = Array.from(folders).sort();
+            
+            sortedFolders.forEach(folder => {
                 const li = document.createElement('li');
                 const count = fileCount[folder] || 0;
-                li.innerHTML = `<span>📁 <strong>${folder}</strong></span><span class="count">${count} файлов</span>`;
+                const displayName = folder.includes('/') ? folder.split('/')[1] : folder;
+                li.innerHTML = `<span>📁 <strong>${displayName}</strong></span><span class="count">${count} файлов</span>`;
                 fileListContent.appendChild(li);
             });
-            selectedInfo.textContent = `✅ Выбрано ${folders.size} папок, всего ${files.length} файлов (загрузка по 2 папки)`;
+            
+            selectedInfo.textContent = `✅ Выбрано ${sortedFolders.length} папок, всего ${files.length} файлов (загрузка по 2 папки)`;
             fileList.style.display = 'block';
             showStatus('info', '📦 Готово к загрузке!');
         }
@@ -291,11 +306,19 @@ UPLOAD_PAGE = """
         }
 
         function getFolderStructure(files) {
-            // Группируем файлы по папкам
+            // Группируем файлы по подпапкам (учитываем головную папку)
             const folders = {};
             files.forEach(file => {
                 const parts = file.webkitRelativePath.split('/');
+                // Если есть головная папка и подпапка
                 if (parts.length >= 2) {
+                    const folderName = parts[1];  // Берем только подпапку (без головной)
+                    if (!folders[folderName]) {
+                        folders[folderName] = [];
+                    }
+                    folders[folderName].push(file);
+                } else if (parts.length === 1) {
+                    // Если файлы прямо в головной папке
                     const folderName = parts[0];
                     if (!folders[folderName]) {
                         folders[folderName] = [];
@@ -312,7 +335,7 @@ UPLOAD_PAGE = """
                 return;
             }
             
-            // Группируем файлы по папкам
+            // Группируем файлы по подпапкам
             const folders = getFolderStructure(selectedFiles);
             const folderNames = Object.keys(folders);
             const totalFolders = folderNames.length;
