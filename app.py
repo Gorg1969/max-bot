@@ -7,6 +7,7 @@ import urllib3
 import json
 import threading
 import time
+from werkzeug.exceptions import ClientDisconnected
 from modules import Database, FileManager, Publisher, WebInterface
 from modules.report_generator import ReportGenerator
 
@@ -103,7 +104,7 @@ api = APIClient()
 publisher = Publisher(api, fm, db)
 report_gen = ReportGenerator(fm, db)
 
-# ========== HTML СТРАНИЦА ==========
+# ========== HTML СТРАНИЦА (С КЛИЕНТСКИМ СЖАТИЕМ) ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -154,7 +155,7 @@ UPLOAD_PAGE = """
             2️⃣ Внутри создайте подпапки объявлений: <code>1 -123456789</code>, <code>2 -987654321</code><br>
             3️⃣ В каждой подпапке: <code>info.txt</code> (текст) и фото (1-10 шт)<br>
             4️⃣ Перетащите головную папку в поле ниже<br>
-            5️⃣ Скрипт загружает по 1 ПАПКЕ за раз (надёжно)
+            5️⃣ Фото сжимаются на вашем компьютере перед отправкой!
         </div>
         
         <div class="drop-zone" id="dropZone">
@@ -186,7 +187,10 @@ UPLOAD_PAGE = """
     <script>
         let selectedFiles = [];
         let userId = 151296248;
-        const CHUNK_SIZE = 1;  // ПО 1 ПАПКЕ ЗА РАЗ!
+        const CHUNK_SIZE = 1;
+        const RETRY_DELAY = 1000;
+        const MAX_WIDTH = 800;
+        const QUALITY = 0.6;
         
         const dropZone = document.getElementById('dropZone');
         const folderInput = document.getElementById('folderInput');
@@ -197,6 +201,92 @@ UPLOAD_PAGE = """
         const logDiv = document.getElementById('log');
         const progressBar = document.getElementById('progressBar');
         const progress = document.getElementById('progress');
+
+        // ========== СЖАТИЕ ФОТО НА КЛИЕНТЕ ==========
+        
+        async function compressImage(file, maxWidth=MAX_WIDTH, quality=QUALITY) {
+            return new Promise((resolve, reject) => {
+                // Если файл уже маленький - не сжимаем
+                if (file.size < 100 * 1024) {
+                    resolve(file);
+                    return;
+                }
+                
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const img = new Image();
+                    img.onload = function() {
+                        const canvas = document.createElement('canvas');
+                        let width = img.width;
+                        let height = img.height;
+                        
+                        if (width > maxWidth || height > maxWidth) {
+                            const ratio = Math.min(maxWidth / width, maxWidth / height);
+                            width = Math.round(width * ratio);
+                            height = Math.round(height * ratio);
+                        }
+                        
+                        canvas.width = width;
+                        canvas.height = height;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, width, height);
+                        
+                        canvas.toBlob(function(blob) {
+                            const newName = file.name.replace(/\.[^.]+$/, '.jpg');
+                            const compressedFile = new File([blob], newName, { type: 'image/jpeg' });
+                            compressedFile.webkitRelativePath = file.webkitRelativePath;
+                            resolve(compressedFile);
+                        }, 'image/jpeg', quality);
+                    };
+                    img.onerror = function() {
+                        reject(new Error('Не удалось загрузить изображение'));
+                    };
+                    img.src = e.target.result;
+                };
+                reader.onerror = function() {
+                    reject(new Error('Не удалось прочитать файл'));
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+
+        // ========== ОБРАБОТКА ВСЕХ ФАЙЛОВ ==========
+        
+        async function processAllFiles(files) {
+            const processed = [];
+            const total = files.length;
+            let processedCount = 0;
+            
+            for (const file of files) {
+                const ext = file.name.split('.').pop().toLowerCase();
+                
+                if (['jpg', 'jpeg', 'png'].includes(ext)) {
+                    try {
+                        const compressed = await compressImage(file);
+                        processed.push(compressed);
+                        if (compressed.size < file.size) {
+                            addLog(`✅ Сжато: ${file.name} (${(file.size/1024).toFixed(0)} КБ → ${(compressed.size/1024).toFixed(0)} КБ)`);
+                        } else {
+                            addLog(`ℹ️ ${file.name} уже сжат (${(file.size/1024).toFixed(0)} КБ)`);
+                        }
+                    } catch (e) {
+                        addLog(`⚠️ Ошибка сжатия ${file.name}: ${e.message}`);
+                        processed.push(file);
+                    }
+                } else {
+                    processed.push(file);
+                }
+                
+                processedCount++;
+                const progressPercent = Math.round((processedCount / total) * 100);
+                progress.style.width = progressPercent + '%';
+                progress.textContent = progressPercent + '%';
+            }
+            
+            return processed;
+        }
+
+        // ========== ОСТАЛЬНЫЕ ФУНКЦИИ ==========
 
         dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
         dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('dragover'); });
@@ -273,9 +363,9 @@ UPLOAD_PAGE = """
                 fileListContent.appendChild(li);
             });
             
-            selectedInfo.textContent = `✅ Выбрано ${sortedFolders.length} папок, всего ${files.length} файлов (загрузка по 1 папке)`;
+            selectedInfo.textContent = `✅ Выбрано ${sortedFolders.length} папок, всего ${files.length} файлов`;
             fileList.style.display = 'block';
-            showStatus('info', '📦 Готово к загрузке!');
+            showStatus('info', '📦 Нажмите "Загрузить" для обработки и отправки');
         }
 
         function clearFiles() {
@@ -322,24 +412,55 @@ UPLOAD_PAGE = """
             return folders;
         }
 
+        async function uploadChunk(formData, chunkNum, totalChunks, retries = 3) {
+            for (let attempt = 1; attempt <= retries; attempt++) {
+                try {
+                    const response = await fetch('/upload_chunk', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    if (response.ok) {
+                        return await response.json();
+                    } else {
+                        const text = await response.text();
+                        throw new Error(`HTTP ${response.status}: ${text.substring(0, 100)}`);
+                    }
+                } catch (error) {
+                    if (attempt < retries) {
+                        addLog(`⚠️ Повторная попытка ${attempt}/${retries}...`);
+                        await new Promise(r => setTimeout(r, RETRY_DELAY * attempt));
+                    } else {
+                        throw error;
+                    }
+                }
+            }
+        }
+
         async function uploadFolder() {
             if (selectedFiles.length === 0) {
                 showStatus('error', '❌ Выберите папку для загрузки');
                 return;
             }
             
-            const folders = getFolderStructure(selectedFiles);
-            const folderNames = Object.keys(folders);
-            const totalFolders = folderNames.length;
-            const totalChunks = Math.ceil(totalFolders / CHUNK_SIZE);
-            
-            showStatus('info', `⏳ Загрузка ${totalFolders} папок (${totalChunks} пачек по ${CHUNK_SIZE})...`);
+            showStatus('info', '⏳ Сжатие и обработка файлов...');
             progressBar.style.display = 'block';
             progress.style.width = '0%';
             progress.textContent = '0%';
             logDiv.textContent = '';
-            addLog(`🚀 Начинаем загрузку ${totalFolders} папок...`);
-            addLog(`📦 Разбито на ${totalChunks} пачек по ${CHUNK_SIZE} папке`);
+            addLog('🚀 Начинаем обработку файлов...');
+            addLog('📦 Сжатие фото на клиенте (не на сервере!)');
+            
+            const processedFiles = await processAllFiles(selectedFiles);
+            addLog(`✅ Обработано ${processedFiles.length} файлов`);
+            
+            const folders = getFolderStructure(processedFiles);
+            const folderNames = Object.keys(folders);
+            const totalFolders = folderNames.length;
+            const totalChunks = Math.ceil(totalFolders / CHUNK_SIZE);
+            
+            showStatus('info', `⏳ Загрузка ${totalFolders} папок...`);
+            addLog(`📦 Загрузка ${totalFolders} папок (${totalChunks} пачек)`);
             
             let uploadedFolders = 0;
             let failedChunks = 0;
@@ -356,7 +477,7 @@ UPLOAD_PAGE = """
                     });
                 });
                 
-                addLog(`📤 Загрузка пачки ${chunkNum}/${totalChunks} (${chunkFolders.length} папок, ${chunkFiles.length} файлов)...`);
+                addLog(`📤 Пачка ${chunkNum}/${totalChunks} (${chunkFolders.length} папок, ${chunkFiles.length} файлов)...`);
                 
                 const formData = new FormData();
                 chunkFiles.forEach(file => {
@@ -368,12 +489,7 @@ UPLOAD_PAGE = """
                 formData.append('append', i > 0 ? 'true' : 'false');
                 
                 try {
-                    const response = await fetch('/upload_chunk', {
-                        method: 'POST',
-                        body: formData
-                    });
-                    
-                    const result = await response.json();
+                    const result = await uploadChunk(formData, chunkNum, totalChunks);
                     
                     if (result.success) {
                         uploadedFolders += chunkFolders.length;
@@ -393,7 +509,7 @@ UPLOAD_PAGE = """
                 progress.textContent = progressPercent + '%';
                 
                 if (i + CHUNK_SIZE < totalFolders) {
-                    await new Promise(r => setTimeout(r, 500));
+                    await new Promise(r => setTimeout(r, 300));
                 }
             }
             
@@ -443,7 +559,6 @@ def upload_page():
 
 @app.route('/upload_chunk', methods=['POST'])
 def upload_chunk():
-    """Загружает одну пачку (1 папка)"""
     try:
         if 'files[]' not in request.files:
             return jsonify({'success': False, 'message': 'Файлы не найдены'}), 400
@@ -465,7 +580,7 @@ def upload_chunk():
         chunk_num = request.form.get('chunk_num', '1')
         total_chunks = request.form.get('total_chunks', '1')
         
-        logger.info(f"📦 Пачка {chunk_num}/{total_chunks}: {len(files)} файлов для пользователя {user_id}")
+        logger.info(f"📦 Пачка {chunk_num}/{total_chunks}: {len(files)} файлов")
         
         result = fm.save_uploaded_files_stream(files, user_id, append=append)
         
@@ -478,6 +593,9 @@ def upload_chunk():
             'message': f'Сохранено {result["saved_count"]} файлов'
         })
         
+    except ClientDisconnected:
+        logger.warning("⚠️ Клиент разорвал соединение")
+        return jsonify({'success': False, 'message': 'Соединение прервано'}), 400
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки пачки: {e}")
         import traceback
