@@ -6,6 +6,7 @@ import json
 import threading
 import hashlib
 from enum import Enum
+from datetime import datetime
 from PIL import Image, ExifTags
 import io
 
@@ -36,6 +37,9 @@ class Publisher:
         # Состояние глобального стопа
         self.global_stop_file = "global_stop.json"
         self._load_global_stop_state()
+        
+        # Счетчик для интервалов
+        self.publish_counter = 0
     
     def _load_published_hashes(self):
         """Загружает хэши опубликованных объявлений"""
@@ -84,18 +88,15 @@ class Publisher:
         """Создает уникальный хэш объявления"""
         hasher = hashlib.md5()
         try:
-            # Хэшируем содержимое info.txt
             info_path = os.path.join(folder_path, 'info.txt')
             if os.path.exists(info_path):
                 with open(info_path, 'rb') as f:
                     hasher.update(f.read())
             
-            # Хэшируем имена файлов изображений
             files = sorted(os.listdir(folder_path))
             for f in files:
                 if f.lower().endswith(('.jpg', '.jpeg', '.png')):
                     hasher.update(f.encode())
-                    # Добавляем размер файла для надежности
                     file_path = os.path.join(folder_path, f)
                     if os.path.exists(file_path):
                         hasher.update(str(os.path.getsize(file_path)).encode())
@@ -105,6 +106,59 @@ class Publisher:
             return str(time.time())
         
         return hasher.hexdigest()
+    
+    def parse_info_file(self, info_path):
+        """
+        Парсит info.txt:
+        - До разделителя "#изъятая" - тело объявления
+        - После - метаданные для отчета
+        """
+        try:
+            with open(info_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Разделитель
+            delimiter = "#изъятая"
+            
+            if delimiter in content:
+                parts = content.split(delimiter, 1)
+                ad_text = parts[0].strip()
+                metadata_part = parts[1].strip() if len(parts) > 1 else ""
+            else:
+                # Если разделителя нет, все содержимое - текст объявления
+                ad_text = content.strip()
+                metadata_part = ""
+            
+            # Парсим метаданные
+            metadata = {}
+            if metadata_part:
+                lines = metadata_part.split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if ':' in line:
+                        key, value = line.split(':', 1)
+                        key = key.strip()
+                        value = value.strip()
+                        # Убираем маркдаун ссылки если есть
+                        if '[' in value and ']' in value and '(' in value and ')' in value:
+                            # Извлекаем URL из [текст](url)
+                            import re
+                            url_match = re.search(r'\(([^)]+)\)', value)
+                            if url_match:
+                                value = url_match.group(1)
+                        metadata[key] = value
+            
+            return {
+                'ad_text': ad_text,
+                'metadata': metadata
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка парсинга info.txt: {e}")
+            return {
+                'ad_text': content,
+                'metadata': {}
+            }
     
     def extract_chat_id(self, folder_name):
         match = re.search(r'-\s*(\d+)', folder_name)
@@ -177,16 +231,38 @@ class Publisher:
         images.sort()
         return images[:max_count]
     
+    def wait_with_pattern(self):
+        """
+        Задержка по паттерну:
+        - Первое объявление - сразу
+        - Последующие - до 3 сек
+        - После каждого 5 - 5 сек
+        """
+        self.publish_counter += 1
+        
+        if self.publish_counter == 1:
+            # Первое объявление - сразу
+            delay = 0
+        elif self.publish_counter % 5 == 0:
+            # Каждое 5-е - 5 секунд
+            delay = 5
+        else:
+            # Остальные - случайно от 1 до 3 секунд
+            import random
+            delay = random.uniform(1, 3)
+        
+        if delay > 0:
+            logger.info(f"⏳ Пауза {delay:.1f} сек (объявление #{self.publish_counter})")
+            time.sleep(delay)
+    
     def stop_global(self):
         """Глобальная остановка всех публикаций"""
         self.global_stop = True
         self._save_global_stop_state()
         logger.info("🛑 ГЛОБАЛЬНАЯ ОСТАНОВКА ВСЕХ ПУБЛИКАЦИЙ")
         
-        # Останавливаем цикл публикации
         self.stop_publishing_loop()
         
-        # Останавливаем всех пользователей
         for user_id in list(self.user_states.keys()):
             if self.user_states[user_id] == UserState.PUBLISHING:
                 self.user_states[user_id] = UserState.STOPPED
@@ -214,6 +290,7 @@ class Publisher:
         
         self.running = True
         self.stop_requested = False
+        self.publish_counter = 0
         
         self.publish_thread = threading.Thread(
             target=self._publishing_loop,
@@ -248,13 +325,11 @@ class Publisher:
         
         while not self.stop_requested and self.running:
             try:
-                # Проверяем глобальный стоп
                 if self.global_stop:
                     logger.info(f"⏹️ Глобальная остановка! Цикл прерван для {user_id}")
                     self.api.send_message(user_id, "⏹️ Цикл публикации прерван глобальной остановкой.")
                     break
                 
-                # Проверяем новые объявления
                 new_ads = self._check_new_ads(user_id)
                 
                 if new_ads:
@@ -264,8 +339,10 @@ class Publisher:
                     for ad in new_ads:
                         if self.stop_requested or not self.running or self.global_stop:
                             break
+                        
+                        # Публикуем с задержкой по паттерну
+                        self.wait_with_pattern()
                         self._publish_ad(user_id, ad)
-                        time.sleep(2)  # Задержка между отправками
                 
                 # Ждем следующую проверку
                 for _ in range(check_interval):
@@ -275,7 +352,7 @@ class Publisher:
                     
             except Exception as e:
                 logger.error(f"❌ Ошибка в цикле публикации: {e}")
-                time.sleep(10)  # Пауза при ошибке
+                time.sleep(10)
         
         self.running = False
         self.api.send_message(user_id, "⏹️ Цикл публикации завершен")
@@ -295,11 +372,9 @@ class Publisher:
                     if os.path.isdir(folder_path):
                         info_path = os.path.join(folder_path, 'info.txt')
                         if os.path.exists(info_path):
-                            # Проверяем, не опубликовано ли уже
                             ad_hash = self._get_ad_hash(folder_path)
                             if ad_hash not in self.published_hashes:
                                 new_ads.append(folder_name)
-                                # Сразу добавляем в опубликованные, чтобы не дублировать
                                 self.published_hashes.add(ad_hash)
                                 self._save_published_hashes()
             
@@ -318,22 +393,21 @@ class Publisher:
             if not os.path.exists(folder_path):
                 return False
             
-            # Читаем текст
             info_path = os.path.join(folder_path, 'info.txt')
-            with open(info_path, 'r', encoding='utf-8') as f:
-                text = f.read()
             
-            # Извлекаем chat_id
+            # Парсим info.txt
+            parsed = self.parse_info_file(info_path)
+            ad_text = parsed['ad_text']
+            metadata = parsed['metadata']
+            
             chat_id = self.extract_chat_id(folder_name)
             if not chat_id:
                 logger.warning(f"⚠️ Не удалось извлечь ID чата из {folder_name}")
                 return False
             
-            # Получаем фото
             images = self.get_sorted_images(folder_path, max_count=10)
             logger.info(f"📤 Публикация в чат {chat_id}: {folder_name}, фото: {len(images)}")
             
-            # Проверяем остановку перед отправкой
             if self.stop_requested or not self.running or self.global_stop:
                 logger.info(f"⏹️ Публикация прервана для {folder_name}")
                 return False
@@ -353,13 +427,24 @@ class Publisher:
                 success = self.api.send_photos_to_chat(
                     chat_id=chat_id,
                     photo_files=photo_files,
-                    text=text
+                    text=ad_text
                 )
             else:
-                success = self.api.send_message_to_chat(chat_id, text)
+                success = self.api.send_message_to_chat(chat_id, ad_text)
             
             if success:
+                # Сохраняем в БД
                 self.db.add_publication(user_id, folder_name, chat_id)
+                
+                # Сохраняем метаданные для отчета
+                self.db.save_ad_metadata(
+                    user_id=user_id,
+                    folder_name=folder_name,
+                    chat_id=chat_id,
+                    metadata=metadata,
+                    published_at=datetime.now()
+                )
+                
                 logger.info(f"✅ Опубликовано: {folder_name}")
                 return True
             else:
@@ -371,31 +456,25 @@ class Publisher:
             return False
     
     def start(self, user_id):
-        """Запускает однократную публикацию всех объявлений (существующий метод)"""
-        global GLOBAL_STOP
-        
+        """Запускает однократную публикацию всех объявлений"""
         try:
-            # Проверяем глобальный стоп
             if self.global_stop:
                 logger.warning(f"⚠️ Глобальная остановка активна! Публикация для {user_id} невозможна")
                 self.api.send_message(user_id, "⚠️ Публикация запрещена глобальной остановкой. Выполните /reset_global")
                 return False
             
-            # Проверяем, не запущена ли уже публикация
             if self.user_states.get(user_id) == UserState.PUBLISHING:
                 logger.warning(f"⚠️ Публикация уже запущена для пользователя {user_id}")
                 self.api.send_message(user_id, "⚠️ Публикация уже запущена. Дождитесь завершения.")
                 return False
             
             logger.info(f"🚀 Запуск публикации для пользователя {user_id}")
-            
-            # Устанавливаем состояние PUBLISHING
             self.user_states[user_id] = UserState.PUBLISHING
+            self.publish_counter = 0
             
             user_folder = self.fm.get_user_folder(user_id)
             samosvaly_path = os.path.join(user_folder, "Самосвалы")
             
-            # Получаем список подпапок
             if os.path.exists(samosvaly_path) and os.path.isdir(samosvaly_path):
                 subfolders = []
                 for item in os.listdir(samosvaly_path):
@@ -416,20 +495,17 @@ class Publisher:
             published = 0
             
             for folder_name in subfolders:
-                # Проверяем глобальный стоп
                 if self.global_stop:
                     logger.info(f"⏹️ ГЛОБАЛЬНАЯ ОСТАНОВКА! Публикация прервана для {user_id}")
                     self.api.send_message(user_id, "⏹️ Публикация прервана глобальной остановкой.")
                     self.user_states[user_id] = UserState.STOPPED
                     break
                 
-                # Проверяем состояние пользователя
                 if self.user_states.get(user_id) == UserState.STOPPED:
                     logger.info(f"⏹️ Публикация остановлена пользователем {user_id}")
                     break
                 
                 try:
-                    # Проверяем, не опубликовано ли уже
                     folder_path = os.path.join(samosvaly_path, folder_name)
                     ad_hash = self._get_ad_hash(folder_path)
                     if ad_hash in self.published_hashes:
@@ -440,30 +516,27 @@ class Publisher:
                     if not os.path.exists(info_path):
                         continue
                     
-                    with open(info_path, 'r', encoding='utf-8') as f:
-                        text = f.read()
+                    parsed = self.parse_info_file(info_path)
+                    ad_text = parsed['ad_text']
+                    metadata = parsed['metadata']
                     
                     chat_id = self.extract_chat_id(folder_name)
                     if not chat_id:
                         logger.warning(f"⚠️ Не удалось извлечь ID чата из {folder_name}")
                         continue
                     
-                    # Получаем до 10 изображений
                     images = self.get_sorted_images(folder_path, max_count=10)
                     logger.info(f"📤 Публикация в чат {chat_id}: {folder_name}, фото: {len(images)}")
                     
-                    # Проверяем глобальный стоп
                     if self.global_stop:
                         logger.info(f"⏹️ ГЛОБАЛЬНАЯ ОСТАНОВКА! Публикация прервана для {user_id}")
                         self.api.send_message(user_id, "⏹️ Публикация прервана глобальной остановкой.")
                         self.user_states[user_id] = UserState.STOPPED
                         break
                     
-                    # Проверяем состояние пользователя
                     if self.user_states.get(user_id) == UserState.STOPPED:
                         break
                     
-                    # Подготавливаем фото
                     photo_files = []
                     for img_name in images:
                         img_path = os.path.join(folder_path, img_name)
@@ -475,39 +548,47 @@ class Publisher:
                         except Exception as e:
                             logger.error(f"❌ Ошибка сжатия {img_name}: {e}")
                     
-                    # Отправляем
                     if photo_files:
                         success = self.api.send_photos_to_chat(
                             chat_id=chat_id,
                             photo_files=photo_files,
-                            text=text
+                            text=ad_text
                         )
                     else:
-                        success = self.api.send_message_to_chat(chat_id, text)
+                        success = self.api.send_message_to_chat(chat_id, ad_text)
                     
                     if not success:
                         logger.error(f"❌ Не удалось отправить объявление в {chat_id}")
                         continue
                     
-                    # Добавляем в опубликованные
                     self.published_hashes.add(ad_hash)
                     self._save_published_hashes()
                     
-                    # Запись в БД и задержка
                     self.db.add_publication(user_id, folder_name, chat_id)
+                    self.db.save_ad_metadata(
+                        user_id=user_id,
+                        folder_name=folder_name,
+                        chat_id=chat_id,
+                        metadata=metadata,
+                        published_at=datetime.now()
+                    )
+                    
                     published += 1
                     logger.info(f"✅ Опубликовано: {folder_name}")
-                    time.sleep(2)
+                    
+                    # Задержка по паттерну
+                    self.wait_with_pattern()
                     
                 except Exception as e:
                     logger.error(f"❌ Ошибка при публикации {folder_name}: {e}")
                     continue
             
-            # Завершаем публикацию
             self.user_states[user_id] = UserState.IDLE
             
             if published > 0:
                 self.api.send_message(user_id, f"✅ Публикация завершена! Опубликовано {published} объявлений.")
+                # Создаем отчет
+                self.db.generate_report(user_id)
             else:
                 self.api.send_message(user_id, "❌ Не удалось опубликовать ни одного объявления.")
             
