@@ -30,41 +30,23 @@ def get_token():
         os.environ.get('MAX_BOT_TOKEN')
     )
 
-def init_max_api():
-    """Инициализация MAX API"""
-    token = get_token()
-    
-    if not token:
-        logger.error("❌ Токен не найден!")
-        return None
-    
-    logger.info(f"✅ Токен найден (первые 10): {token[:10]}...")
-    
-    try:
-        import maxapi
-        if hasattr(maxapi, 'Bot'):
-            api = maxapi.Bot(token=token)
-            logger.info("✅ MAX API инициализирован через Bot")
-            return api
-        else:
-            logger.error("❌ Не найден класс Bot в maxapi")
-            return None
-    except Exception as e:
-        logger.error(f"❌ Ошибка инициализации: {e}")
-        return None
+# ============================================
+# ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЯ
+# ============================================
 
 app = Flask(__name__)
 
 db = Database()
 fm = FileManager()
-api = init_max_api()
-publisher = Publisher(api, fm, db)
+
+# Инициализируем Publisher (без API, будем использовать прямые HTTP запросы)
+publisher = Publisher(None, fm, db)  # ← api = None
 web_interface = WebInterface(fm, publisher)
 
-# ========== ОТПРАВКА СООБЩЕНИЙ ==========
+# ========== ОТПРАВКА СООБЩЕНИЙ (ЧЕРЕЗ HTTP) ==========
 
 def send_message(chat_id, text):
-    """Отправка сообщения в чат (ПРАВИЛЬНАЯ ВЕРСИЯ)"""
+    """Отправка сообщения через прямой HTTP запрос (БЕЗ asyncio)"""
     token = get_token()
     if not token:
         logger.warning(f"⚠️ Токен не найден!")
@@ -77,7 +59,7 @@ def send_message(chat_id, text):
             "Content-Type": "application/json",
         }
         json_data = {
-            "chat_id": chat_id,  # ← chat_id из вебхука
+            "chat_id": chat_id,
             "text": text,
         }
         
@@ -101,7 +83,7 @@ def webhook():
     """Обработка вебхуков"""
     try:
         data = request.get_json()
-        logger.info(f"📨 Получен вебхук: {data}")
+        logger.info(f"📨 Получен вебхук")
         
         if not data:
             return jsonify({'status': 'ok'}), 200
@@ -204,7 +186,6 @@ def upload_folder():
 def status():
     return jsonify({
         'status': 'running',
-        'api_available': api is not None,
         'global_stop': publisher.global_stop,
         'running': publisher.running,
         'auto_publish': False
