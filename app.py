@@ -1,19 +1,14 @@
 import logging
 import os
 import time
-import re
-import base64
-from enum import Enum
-from PIL import Image, ExifTags
-import io
+import threading
 from flask import Flask, request, jsonify, render_template_string
 
 # Импорты из modules
 from modules.database import Database
 from modules.file_manager import FileManager
-from modules.publisher import Publisher  # ← ИСПОЛЬЗУЕМ Publisher ИЗ modules
+from modules.publisher import Publisher
 from modules.web_interface import WebInterface
-from modules.process_links import *
 
 # Настройка логирования
 logging.basicConfig(
@@ -42,7 +37,6 @@ def init_max_api():
     
     try:
         import maxapi
-        # Пробуем разные варианты
         if hasattr(maxapi, 'Bot'):
             api = maxapi.Bot(token=token)
             logger.info("✅ MAX API инициализирован через класс: Bot")
@@ -67,7 +61,7 @@ app = Flask(__name__)
 db = Database()
 fm = FileManager()
 api = init_max_api()
-publisher = Publisher(api, fm, db)  # ← ИСПОЛЬЗУЕМ Publisher ИЗ modules
+publisher = Publisher(api, fm, db)
 web_interface = WebInterface(fm, publisher)
 
 # ========== ФУНКЦИИ ОТПРАВКИ ==========
@@ -97,7 +91,7 @@ def send_message(chat_id, text):
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Обработка вебхуков"""
+    """Обработка вебхуков - ТОЛЬКО РУЧНЫЕ КОМАНДЫ, БЕЗ АВТОМАТИЧЕСКОЙ ПУБЛИКАЦИИ"""
     try:
         data = request.get_json()
         
@@ -124,14 +118,19 @@ def webhook():
         
         logger.info(f"📩 Сообщение от {chat_id}: {text}")
         
-        # Обработка команд
+        # ============================================
+        # ОБРАБОТКА КОМАНД - ТОЛЬКО РУЧНЫЕ!
+        # ============================================
+        
         response = None
         
         if text.startswith('/start'):
-            response = "👋 Привет! Я бот для публикации объявлений.\nИспользуйте /help для списка команд."
+            response = "👋 Привет! Я бот для публикации объявлений.\n"
+            response += "Используйте /help для списка команд."
         
         elif text.startswith('/publish'):
-            send_message(chat_id, "📢 Начинаю публикацию...")
+            # ОДНОКРАТНАЯ публикация, НЕ циклическая!
+            send_message(chat_id, "📢 Начинаю однократную публикацию...")
             threading.Thread(target=publisher.start, args=(chat_id,)).start()
             return jsonify({'status': 'ok'}), 200
         
@@ -142,7 +141,7 @@ def webhook():
         
         elif text.startswith('/stop_global'):
             publisher.stop_global()
-            response = "🛑 Глобальная остановка всех публикаций"
+            response = "🛑 Глобальная остановка ВСЕХ публикаций"
         
         elif text.startswith('/reset_global'):
             publisher.reset_global_stop()
@@ -151,17 +150,18 @@ def webhook():
         elif text.startswith('/status'):
             status = f"📊 Статус:\n"
             status += f"• Глобальный стоп: {'❌ ВКЛ' if publisher.global_stop else '✅ ВЫКЛ'}\n"
-            status += f"• Публикация: {'🔄 активна' if publisher.running else '⏸️ не активна'}"
+            status += f"• Публикация: {'🔄 активна' if publisher.running else '⏸️ не активна'}\n"
+            status += f"• Автоматическая публикация: ⏸️ ОТКЛЮЧЕНА (только по команде /publish)"
             response = status
         
         elif text.startswith('/help'):
             response = "🤖 Команды:\n"
             response += "/start - Приветствие\n"
-            response += "/publish - Начать публикацию\n"
-            response += "/stop - Остановить публикацию\n"
+            response += "/publish - ОДНОКРАТНАЯ публикация всех объявлений\n"
+            response += "/stop - Остановить текущую публикацию\n"
             response += "/status - Статус бота\n"
-            response += "/stop_global - Глобальная остановка\n"
-            response += "/reset_global - Сброс стопа"
+            response += "/stop_global - Глобальная остановка (админ)\n"
+            response += "/reset_global - Сброс глобального стопа (админ)"
         
         else:
             response = f"❓ Неизвестная команда. Используйте /help"
@@ -173,13 +173,15 @@ def webhook():
         
     except Exception as e:
         logger.error(f"❌ Ошибка в вебхуке: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'status': 'error'}), 500
 
 @app.route('/webhook', methods=['GET'])
 def webhook_get():
     return jsonify({'status': 'ok'}), 200
 
-# ========== ОСТАЛЬНЫЕ РОУТЫ ==========
+# ========== ВЕБ-ИНТЕРФЕЙС ==========
 
 @app.route('/')
 def index():
@@ -204,12 +206,17 @@ def status():
         'status': 'running',
         'api_available': api is not None,
         'global_stop': publisher.global_stop,
-        'running': publisher.running
+        'running': publisher.running,
+        'auto_publish': False  # Автоматическая публикация ОТКЛЮЧЕНА!
     })
 
 # ========== ЗАПУСК ==========
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 3000))
-    logger.info(f"🚀 Запуск сервера на порту {port}")
+    logger.info("=" * 50)
+    logger.info("🚀 БОТ ЗАПУЩЕН!")
+    logger.info("📌 АВТОМАТИЧЕСКАЯ ПУБЛИКАЦИЯ ОТКЛЮЧЕНА")
+    logger.info("📌 Используйте /publish для однократной публикации")
+    logger.info("=" * 50)
     app.run(host='0.0.0.0', port=port, debug=False)
