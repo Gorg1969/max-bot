@@ -584,7 +584,7 @@ class Publisher:
         else:
             logger.info(f"ℹ️ Публикация не активна для пользователя {user_id}")
             self.send_message(user_id, "ℹ️ Нет активной публикации для остановки.")
-            return Falseimport logging
+            return False
 import os
 import time
 import re
