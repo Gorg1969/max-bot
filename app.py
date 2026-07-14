@@ -2,6 +2,7 @@ import logging
 import os
 import time
 import threading
+import asyncio
 from flask import Flask, request, jsonify, render_template_string
 
 # Импорты из modules
@@ -67,16 +68,27 @@ web_interface = WebInterface(fm, publisher)
 # ========== ФУНКЦИИ ОТПРАВКИ ==========
 
 def send_message(chat_id, text):
-    """Отправка сообщения"""
+    """Отправка сообщения - СИНХРОННАЯ обертка"""
     if not api:
         logger.warning(f"⚠️ API не инициализирован!")
         return False
     
     try:
+        # Проверяем, есть ли метод send_message
         if hasattr(api, 'send_message'):
-            api.send_message(chat_id, text)
+            # Вызываем через asyncio.run() если это корутина
+            import inspect
+            if inspect.iscoroutinefunction(api.send_message):
+                # Это асинхронная функция - запускаем через asyncio
+                asyncio.run(api.send_message(chat_id, text))
+            else:
+                # Синхронная функция - вызываем напрямую
+                api.send_message(chat_id, text)
         elif hasattr(api, 'sendMessage'):
-            api.sendMessage(chat_id, text)
+            if inspect.iscoroutinefunction(api.sendMessage):
+                asyncio.run(api.sendMessage(chat_id, text))
+            else:
+                api.sendMessage(chat_id, text)
         else:
             logger.error(f"❌ Нет метода отправки!")
             return False
@@ -85,13 +97,15 @@ def send_message(chat_id, text):
         return True
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 # ========== ВЕБХУК ==========
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Обработка вебхуков - ТОЛЬКО РУЧНЫЕ КОМАНДЫ, БЕЗ АВТОМАТИЧЕСКОЙ ПУБЛИКАЦИИ"""
+    """Обработка вебхуков"""
     try:
         data = request.get_json()
         
@@ -118,18 +132,12 @@ def webhook():
         
         logger.info(f"📩 Сообщение от {chat_id}: {text}")
         
-        # ============================================
-        # ОБРАБОТКА КОМАНД - ТОЛЬКО РУЧНЫЕ!
-        # ============================================
-        
         response = None
         
         if text.startswith('/start'):
-            response = "👋 Привет! Я бот для публикации объявлений.\n"
-            response += "Используйте /help для списка команд."
+            response = "👋 Привет! Я бот для публикации объявлений.\nИспользуйте /help для списка команд."
         
         elif text.startswith('/publish'):
-            # ОДНОКРАТНАЯ публикация, НЕ циклическая!
             send_message(chat_id, "📢 Начинаю однократную публикацию...")
             threading.Thread(target=publisher.start, args=(chat_id,)).start()
             return jsonify({'status': 'ok'}), 200
@@ -151,17 +159,17 @@ def webhook():
             status = f"📊 Статус:\n"
             status += f"• Глобальный стоп: {'❌ ВКЛ' if publisher.global_stop else '✅ ВЫКЛ'}\n"
             status += f"• Публикация: {'🔄 активна' if publisher.running else '⏸️ не активна'}\n"
-            status += f"• Автоматическая публикация: ⏸️ ОТКЛЮЧЕНА (только по команде /publish)"
+            status += f"• Автоматическая публикация: ⏸️ ОТКЛЮЧЕНА"
             response = status
         
         elif text.startswith('/help'):
             response = "🤖 Команды:\n"
             response += "/start - Приветствие\n"
-            response += "/publish - ОДНОКРАТНАЯ публикация всех объявлений\n"
-            response += "/stop - Остановить текущую публикацию\n"
+            response += "/publish - ОДНОКРАТНАЯ публикация\n"
+            response += "/stop - Остановить публикацию\n"
             response += "/status - Статус бота\n"
-            response += "/stop_global - Глобальная остановка (админ)\n"
-            response += "/reset_global - Сброс глобального стопа (админ)"
+            response += "/stop_global - Глобальная остановка\n"
+            response += "/reset_global - Сброс стопа"
         
         else:
             response = f"❓ Неизвестная команда. Используйте /help"
@@ -207,7 +215,7 @@ def status():
         'api_available': api is not None,
         'global_stop': publisher.global_stop,
         'running': publisher.running,
-        'auto_publish': False  # Автоматическая публикация ОТКЛЮЧЕНА!
+        'auto_publish': False
     })
 
 # ========== ЗАПУСК ==========
