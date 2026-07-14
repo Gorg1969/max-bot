@@ -143,7 +143,6 @@ UPLOAD_PAGE = """
         .button-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px; }
         .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
         .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; }
-        .chunk-info { background: #d1ecf1; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 4px solid #17a2b8; }
     </style>
 </head>
 <body>
@@ -155,7 +154,7 @@ UPLOAD_PAGE = """
             1️⃣ Создайте папку с названием<br>
             2️⃣ Внутри создайте подпапки: <code>Название -123456789</code><br>
             3️⃣ В каждой подпапке: <code>info.txt</code> и фото<br>
-            4️⃣ Перетащите папку в поле ниже
+            4️⃣ Перетащите папку в поле ниже (скрипт сам разобьет на пачки по 20 файлов)
         </div>
         
         <div class="drop-zone" id="dropZone">
@@ -263,7 +262,7 @@ UPLOAD_PAGE = """
                 li.innerHTML = `<span>📁 <strong>${folder}</strong></span><span class="count">${count} файлов</span>`;
                 fileListContent.appendChild(li);
             });
-            selectedInfo.textContent = `✅ Выбрано ${folders.size} папок, всего ${files.length} файлов`;
+            selectedInfo.textContent = `✅ Выбрано ${folders.size} папок, всего ${files.length} файлов (будет разбито на пачки по ${CHUNK_SIZE})`;
             fileList.style.display = 'block';
             showStatus('info', '📦 Готово к загрузке!');
         }
