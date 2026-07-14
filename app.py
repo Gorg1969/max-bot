@@ -3,6 +3,7 @@ import os
 import time
 import threading
 import requests
+import urllib3
 from flask import Flask, request, jsonify, render_template_string
 
 # Импорты из modules
@@ -10,6 +11,9 @@ from modules.database import Database
 from modules.file_manager import FileManager
 from modules.publisher import Publisher
 from modules.web_interface import WebInterface
+
+# Отключаем предупреждения о SSL
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Настройка логирования
 logging.basicConfig(
@@ -40,13 +44,13 @@ db = Database()
 fm = FileManager()
 
 # Инициализируем Publisher (без API, будем использовать прямые HTTP запросы)
-publisher = Publisher(None, fm, db)  # ← api = None
+publisher = Publisher(None, fm, db)
 web_interface = WebInterface(fm, publisher)
 
-# ========== ОТПРАВКА СООБЩЕНИЙ (ЧЕРЕЗ HTTP) ==========
+# ========== ОТПРАВКА СООБЩЕНИЙ ==========
 
 def send_message(chat_id, text):
-    """Отправка сообщения через прямой HTTP запрос (БЕЗ asyncio)"""
+    """Отправка сообщения через прямой HTTP запрос (с отключенной проверкой SSL)"""
     token = get_token()
     if not token:
         logger.warning(f"⚠️ Токен не найден!")
@@ -64,7 +68,8 @@ def send_message(chat_id, text):
         }
         
         logger.info(f"📤 Отправка в {chat_id}: {text[:30]}...")
-        response = requests.post(url, headers=headers, json=json_data, timeout=30)
+        # verify=False - отключаем проверку SSL сертификата
+        response = requests.post(url, headers=headers, json=json_data, timeout=30, verify=False)
         
         if response.status_code == 200:
             logger.info(f"✅ Сообщение отправлено в {chat_id}")
@@ -90,7 +95,6 @@ def webhook():
         
         update_type = data.get('update_type')
         
-        # Пропускаем не-сообщения
         if update_type != 'message_created':
             return jsonify({'status': 'ok'}), 200
         
