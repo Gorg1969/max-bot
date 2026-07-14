@@ -2,6 +2,8 @@ import logging
 import os
 import time
 import threading
+import asyncio
+import inspect
 from flask import Flask, request, jsonify, render_template_string
 
 # Импорты из modules
@@ -18,11 +20,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================
-# ИНИЦИАЛИЗАЦИЯ MAX API (КАК ВЧЕРА)
+# ИНИЦИАЛИЗАЦИЯ MAX API
 # ============================================
 
 def init_max_api():
-    """Инициализация MAX API - как вчера"""
+    """Инициализация MAX API"""
     token = (
         os.environ.get('API_TOKEN') or
         os.environ.get('MAX_TOKEN') or
@@ -37,7 +39,6 @@ def init_max_api():
     
     try:
         import maxapi
-        # Используем Bot как вчера
         if hasattr(maxapi, 'Bot'):
             api = maxapi.Bot(token=token)
             logger.info("✅ MAX API инициализирован через Bot")
@@ -61,17 +62,22 @@ api = init_max_api()
 publisher = Publisher(api, fm, db)
 web_interface = WebInterface(fm, publisher)
 
-# ========== ФУНКЦИИ ОТПРАВКИ ==========
+# ========== ФУНКЦИИ ОТПРАВКИ (ИСПРАВЛЕНА) ==========
 
 def send_message(chat_id, text):
-    """Отправка сообщения - как вчера"""
+    """Отправка сообщения - с поддержкой асинхронных методов"""
     if not api:
         logger.warning(f"⚠️ API не инициализирован!")
         return False
     
     try:
-        # Простой вызов как вчера
-        api.send_message(chat_id, text)
+        # Проверяем, является ли метод асинхронным
+        if inspect.iscoroutinefunction(api.send_message):
+            # Если асинхронный - запускаем через asyncio
+            asyncio.run(api.send_message(chat_id, text))
+        else:
+            # Если синхронный - вызываем напрямую
+            api.send_message(chat_id, text)
         logger.info(f"✅ Сообщение отправлено в {chat_id}")
         return True
     except Exception as e:
@@ -82,7 +88,7 @@ def send_message(chat_id, text):
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Обработка вебхуков - как вчера"""
+    """Обработка вебхуков"""
     try:
         data = request.get_json()
         logger.info(f"📨 Получен вебхук: {data}")
@@ -93,6 +99,7 @@ def webhook():
         # Проверяем тип обновления
         update_type = data.get('update_type')
         
+        # Пропускаем не-сообщения
         if update_type != 'message_created':
             return jsonify({'status': 'ok'}), 200
         
