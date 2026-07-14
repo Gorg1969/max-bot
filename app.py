@@ -6,6 +6,8 @@ import shutil
 import urllib3
 import json
 import threading
+import sys
+import platform
 from modules import Database, FileManager, Publisher, WebInterface
 from modules.max_client import ReportGenerator
 
@@ -369,7 +371,6 @@ UPLOAD_PAGE = """
                     if (data.success) {
                         reportStatus.innerHTML = `✅ Отчет создан! <a href="${data.download_url}" download>Скачать</a>`;
                         addLog('✅ Отчет создан: ' + data.download_url);
-                        // Автоматически скачиваем
                         window.location.href = data.download_url;
                     } else {
                         reportStatus.innerHTML = '❌ ' + data.message;
@@ -452,10 +453,7 @@ def upload_folder():
         
         logger.info(f"✅ Сохранено {saved_count} файлов")
         
-        # Запускаем публикацию в фоне
         threading.Thread(target=publisher.start, args=(user_id,)).start()
-        
-        # Отправляем сообщение в бот
         api.send_message(user_id, f"✅ Загружено {saved_count} файлов! Начинаю публикацию...")
         
         return jsonify({'success': True, 'message': f'Загружено {saved_count} файлов'})
@@ -531,7 +529,6 @@ def webhook():
 
 @app.route('/get_report/<int:user_id>', methods=['GET'])
 def get_report(user_id):
-    """Генерирует отчет и возвращает ссылку на скачивание"""
     try:
         report_path = report_gen.generate_report(user_id)
         if not report_path:
@@ -551,7 +548,6 @@ def get_report(user_id):
 
 @app.route('/download_report/<int:user_id>/<path:filename>', methods=['GET'])
 def download_report(user_id, filename):
-    """Скачивает отчет и очищает данные пользователя"""
     try:
         user_folder = fm.get_user_folder(user_id)
         file_path = os.path.join(user_folder, filename)
@@ -559,10 +555,8 @@ def download_report(user_id, filename):
         if not os.path.exists(file_path):
             return jsonify({'success': False, 'message': 'Файл не найден'}), 404
         
-        # Отправляем файл
         response = send_file(file_path, as_attachment=True, download_name=filename)
         
-        # После отправки очищаем данные пользователя в фоне
         threading.Thread(target=report_gen.cleanup_user_data, args=(user_id, True)).start()
         
         return response
@@ -573,7 +567,6 @@ def download_report(user_id, filename):
 
 @app.route('/cleanup/<int:user_id>', methods=['POST', 'GET'])
 def cleanup_user(user_id):
-    """Очищает данные пользователя"""
     try:
         report_gen.cleanup_user_data(user_id, keep_report=True)
         return jsonify({'success': True, 'message': 'Данные очищены'})
@@ -610,6 +603,9 @@ def setup_webhook():
             return f"❌ Ошибка: {r.status_code} - {r.text}"
     except Exception as e:
         return f"❌ Ошибка: {e}"
+
+# ========== ДИАГНОСТИКА ==========
+
 @app.route('/test')
 def test():
     """Диагностика бота через браузер"""
@@ -685,6 +681,9 @@ def test():
     result['env']['BASE_URL'] = os.environ.get('BASE_URL', 'не установлен')
     
     return jsonify(result)
+
+# ========== ЗАПУСК ==========
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
     if TOKEN:
