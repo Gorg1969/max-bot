@@ -1,4 +1,3 @@
-# modules/publisher.py
 import logging
 import os
 import time
@@ -47,33 +46,44 @@ class Publisher:
             logger.debug(f"⚠️ Ошибка исправления ориентации: {e}")
         return img
     
-    def compress_image(self, image_path, max_size_mb=0.8, quality=75):
-        """Сжимает изображение с исправлением ориентации и очисткой EXIF"""
+    def compress_image_to_bytes(self, image_path, max_size_mb=0.8, quality=75):
+        """
+        Сжимает изображение и возвращает бинарные данные (bytes)
+        БЕЗ СОХРАНЕНИЯ НА ДИСК!
+        """
         try:
             with Image.open(image_path) as img:
+                # Исправляем ориентацию
                 img = self.fix_image_orientation(img)
                 
+                # Конвертируем в RGB (для JPEG)
                 if img.mode in ('RGBA', 'P'):
                     img = img.convert('RGB')
                 
+                # Уменьшаем размер (максимум 1280px)
                 max_dimension = 1280
                 if img.width > max_dimension or img.height > max_dimension:
                     ratio = min(max_dimension / img.width, max_dimension / img.height)
                     new_size = (int(img.width * ratio), int(img.height * ratio))
                     img = img.resize(new_size, Image.Resampling.LANCZOS)
                 
+                # Сохраняем в память (BytesIO)
                 buffer = io.BytesIO()
                 img.save(buffer, format='JPEG', quality=quality, optimize=True, progressive=True)
                 compressed_data = buffer.getvalue()
                 
+                # Если всё ещё слишком большое - сжимаем сильнее
                 if len(compressed_data) > max_size_mb * 1024 * 1024:
                     buffer = io.BytesIO()
                     img.save(buffer, format='JPEG', quality=50, optimize=True, progressive=True)
                     compressed_data = buffer.getvalue()
                 
+                logger.debug(f"✅ Сжато: {image_path} -> {len(compressed_data) / 1024:.1f} КБ")
                 return compressed_data
+                
         except Exception as e:
-            logger.error(f"❌ Ошибка сжатия: {e}")
+            logger.error(f"❌ Ошибка сжатия {image_path}: {e}")
+            # Если сжатие не удалось - читаем файл как есть
             with open(image_path, 'rb') as f:
                 return f.read()
     
@@ -102,25 +112,20 @@ class Publisher:
                 return False
             
             logger.info(f"🚀 Запуск публикации для пользователя {user_id}")
-            
-            # Устанавливаем состояние PUBLISHING
             self.user_states[user_id] = UserState.PUBLISHING
             
             user_folder = self.fm.get_user_folder(user_id)
-            samosvaly_path = os.path.join(user_folder, "Самосвалы")
             
-            # Проверяем папку Самосвалы
-            if os.path.exists(samosvaly_path) and os.path.isdir(samosvaly_path):
-                subfolders = []
-                for item in os.listdir(samosvaly_path):
-                    item_path = os.path.join(samosvaly_path, item)
+            # Ищем папки с info.txt в корне пользовательской папки
+            subfolders = []
+            if os.path.exists(user_folder):
+                for item in os.listdir(user_folder):
+                    item_path = os.path.join(user_folder, item)
                     if os.path.isdir(item_path):
                         info_path = os.path.join(item_path, 'info.txt')
                         if os.path.exists(info_path):
                             subfolders.append(item)
-            else:
-                # Если папки Самосвалы нет - ищем все подпапки с info.txt
-                subfolders = self.fm.get_subfolders(user_id)
+                            logger.info(f"📁 Найдена папка с info.txt: {item}")
             
             if not subfolders:
                 self.api.send_message(user_id, "❌ Нет папок с объявлениями для публикации.")
@@ -137,11 +142,7 @@ class Publisher:
                     break
                 
                 try:
-                    # Определяем путь к папке
-                    if os.path.exists(samosvaly_path):
-                        folder_path = os.path.join(samosvaly_path, folder_name)
-                    else:
-                        folder_path = os.path.join(user_folder, folder_name)
+                    folder_path = os.path.join(user_folder, folder_name)
                     
                     info_path = os.path.join(folder_path, 'info.txt')
                     if not os.path.exists(info_path):
@@ -166,17 +167,19 @@ class Publisher:
                         logger.info(f"⏹️ Публикация остановлена пользователем {user_id}")
                         break
                     
-                    # Подготавливаем фото
+                    # Подготавливаем фото С ЖАТИЕМ В ПАМЯТИ!
                     photo_files = []
                     for img_name in images:
                         img_path = os.path.join(folder_path, img_name)
                         if not os.path.exists(img_path):
                             continue
                         try:
-                            compressed = self.compress_image(img_path)
+                            # Сжимаем в памяти (НЕ СОХРАНЯЕМ НА ДИСК!)
+                            compressed = self.compress_image_to_bytes(img_path)
                             photo_files.append((img_name, compressed))
+                            logger.debug(f"✅ Фото готово: {img_name} ({len(compressed) / 1024:.1f} КБ)")
                         except Exception as e:
-                            logger.error(f"❌ Ошибка сжатия {img_name}: {e}")
+                            logger.error(f"❌ Ошибка подготовки {img_name}: {e}")
                     
                     # Отправляем
                     if photo_files:
@@ -207,28 +210,6 @@ class Publisher:
             
             if published > 0:
                 self.api.send_message(user_id, f"✅ Публикация завершена! Опубликовано {published} объявлений.")
-                
-                # Пытаемся создать отчет
-                try:
-                    from modules.max_client import ReportGenerator
-                    report_gen = ReportGenerator(self.fm, self.db)
-                    report_path = report_gen.generate_report(user_id)
-                    
-                    if report_path:
-                        filename = os.path.basename(report_path)
-                        download_url = f"https://maxbot.bothost.tech/download_report/{user_id}/{filename}"
-                        self.api.send_message(
-                            user_id,
-                            f"📊 **Отчет создан!**\n\n"
-                            f"🔗 [Скачать отчет]({download_url})\n\n"
-                            f"⚠️ После скачивания все временные файлы будут удалены."
-                        )
-                    else:
-                        self.api.send_message(user_id, "ℹ️ Отчет не создан (нет данных).")
-                except ImportError:
-                    logger.warning("⚠️ Модуль max_client не найден, отчет не создан")
-                except Exception as e:
-                    logger.error(f"❌ Ошибка создания отчета: {e}")
             else:
                 self.api.send_message(user_id, "❌ Не удалось опубликовать ни одного объявления.")
             
