@@ -13,7 +13,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")
-app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024 * 2  # 2 ГБ
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 МБ
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -141,18 +141,24 @@ UPLOAD_PAGE = """
         .button-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px; }
         .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
         .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; }
+        .warning { background: #fff3cd; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 4px solid #ffc107; color: #856404; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>📤 Загрузка объявлений</h1>
         
+        <div class="warning">
+            ⚠️ <strong>Ограничение:</strong> Максимум <strong>20 файлов</strong> за одну загрузку. 
+            Если у вас много файлов, загружайте их частями (по 20 файлов).
+        </div>
+        
         <div class="instructions">
             <strong>📌 Как подготовить папку:</strong><br>
             1️⃣ Создайте папку с названием<br>
             2️⃣ Внутри создайте подпапки: <code>Название -123456789</code><br>
             3️⃣ В каждой подпапке: <code>info.txt</code> и фото<br>
-            4️⃣ Перетащите папку в поле ниже
+            4️⃣ Перетащите папку в поле ниже (не более 20 файлов)
         </div>
         
         <div class="drop-zone" id="dropZone">
@@ -184,6 +190,8 @@ UPLOAD_PAGE = """
     <script>
         let selectedFiles = [];
         let userId = 151296248;
+        const MAX_FILES = 20;
+        
         const dropZone = document.getElementById('dropZone');
         const folderInput = document.getElementById('folderInput');
         const fileList = document.getElementById('fileList');
@@ -210,6 +218,10 @@ UPLOAD_PAGE = """
                 }
             }
             if (files.length > 0) {
+                if (files.length > MAX_FILES) {
+                    showStatus('error', `❌ Слишком много файлов! Максимум ${MAX_FILES}. Выбрано ${files.length}.`);
+                    return;
+                }
                 selectedFiles = files;
                 displayFiles(selectedFiles);
             }
@@ -218,6 +230,11 @@ UPLOAD_PAGE = """
         folderInput.addEventListener('change', (e) => {
             const files = Array.from(e.target.files);
             if (files.length > 0) {
+                if (files.length > MAX_FILES) {
+                    showStatus('error', `❌ Слишком много файлов! Максимум ${MAX_FILES}. Выбрано ${files.length}.`);
+                    folderInput.value = '';
+                    return;
+                }
                 selectedFiles = files;
                 displayFiles(selectedFiles);
             }
@@ -258,7 +275,7 @@ UPLOAD_PAGE = """
                 li.innerHTML = `<span>📁 <strong>${folder}</strong></span><span class="count">${count} файлов</span>`;
                 fileListContent.appendChild(li);
             });
-            selectedInfo.textContent = `✅ Выбрано ${folders.size} папок, всего ${files.length} файлов`;
+            selectedInfo.textContent = `✅ Выбрано ${folders.size} папок, всего ${files.length} файлов (макс. ${MAX_FILES})`;
             fileList.style.display = 'block';
             showStatus('info', '📦 Готово к загрузке!');
         }
@@ -291,11 +308,18 @@ UPLOAD_PAGE = """
                 showStatus('error', '❌ Выберите папку для загрузки');
                 return;
             }
+            
+            if (selectedFiles.length > MAX_FILES) {
+                showStatus('error', `❌ Слишком много файлов! Максимум ${MAX_FILES}. Удалите лишние.`);
+                return;
+            }
+            
             const formData = new FormData();
             selectedFiles.forEach(file => {
                 formData.append('files[]', file, file.webkitRelativePath);
             });
             formData.append('user_id', userId);
+            
             showStatus('info', '⏳ Загрузка началась...');
             progressBar.style.display = 'block';
             progress.style.width = '0%';
@@ -303,6 +327,7 @@ UPLOAD_PAGE = """
             logDiv.textContent = '';
             addLog('🚀 Начинаем загрузку...');
             addLog(`📁 Файлов: ${selectedFiles.length}`);
+            
             try {
                 const xhr = new XMLHttpRequest();
                 xhr.upload.addEventListener('progress', (e) => {
@@ -363,6 +388,7 @@ def upload_page():
 @app.route('/upload_folder', methods=['POST'])
 def upload_folder():
     try:
+        # Проверяем наличие файлов
         if 'files[]' not in request.files:
             return jsonify({'success': False, 'message': 'Файлы не найдены'}), 400
         
@@ -370,6 +396,15 @@ def upload_folder():
         if not files:
             return jsonify({'success': False, 'message': 'Файлы не выбраны'}), 400
         
+        # ЛИМИТ: максимум 20 файлов за раз
+        MAX_FILES = 20
+        if len(files) > MAX_FILES:
+            return jsonify({
+                'success': False,
+                'message': f'Слишком много файлов ({len(files)}). Максимум {MAX_FILES}. Загружайте частями.'
+            }), 400
+        
+        # Получаем user_id
         user_id = request.form.get('user_id')
         if not user_id:
             return jsonify({'success': False, 'message': 'user_id не указан'}), 400
@@ -381,27 +416,56 @@ def upload_folder():
         
         logger.info(f"📥 Пользователь {user_id}: загружает {len(files)} файлов")
         
-        # ПОТОКОВОЕ СОХРАНЕНИЕ
-        result = fm.save_uploaded_files_stream(files, user_id)
-        if not result['success']:
-            return jsonify({'success': False, 'message': result.get('error', 'Ошибка сохранения')}), 500
+        # Сохраняем файлы
+        user_folder = fm.get_user_folder(user_id)
+        if os.path.exists(user_folder):
+            shutil.rmtree(user_folder)
+        os.makedirs(user_folder, exist_ok=True)
         
-        saved_count = result['saved_count']
+        saved_count = 0
+        for file in files:
+            if not file.filename:
+                continue
+            
+            # Пропускаем системные файлы
+            if file.filename.startswith('.'):
+                continue
+            
+            rel_path = file.filename
+            full_path = os.path.join(user_folder, rel_path)
+            
+            try:
+                os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                
+                # Сохраняем чанками по 64KB
+                with open(full_path, 'wb') as f:
+                    while True:
+                        chunk = file.stream.read(64 * 1024)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                saved_count += 1
+            except Exception as e:
+                logger.error(f"❌ Ошибка сохранения {rel_path}: {e}")
+                continue
+        
         logger.info(f"✅ Пользователь {user_id}: сохранено {saved_count} файлов")
         
-        # Отправляем сообщение пользователю
+        # Отправляем сообщение в бот
         api.send_message(user_id, f"✅ Загружено {saved_count} файлов! Начинаю публикацию...")
         
-        # Запускаем публикацию в фоне
+        # Запускаем публикацию в фоновом потоке
         threading.Thread(target=publisher.start, args=(user_id,)).start()
         
         return jsonify({
-            'success': True, 
+            'success': True,
             'message': f'Загружено {saved_count} файлов. Публикация запущена в фоне.'
         })
         
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/webhook', methods=['POST'])
@@ -435,6 +499,7 @@ def webhook():
                 "🏠 **Главное меню**\n\n"
                 "🌐 **Загрузить папку:**\n"
                 f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
+                "⚠️ **Ограничение:** 20 файлов за раз\n\n"
                 "📊 **Получить отчет:**\n"
                 f"🔗 https://maxbot.bothost.tech/report/{user_id}\n\n"
                 "⏹ **Остановить публикацию:** `/stop`"
