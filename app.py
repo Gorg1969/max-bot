@@ -2,7 +2,6 @@ import logging
 import os
 import time
 import threading
-import asyncio
 from flask import Flask, request, jsonify, render_template_string
 
 # Импорты из modules
@@ -38,13 +37,15 @@ def init_max_api():
     
     try:
         import maxapi
-        if hasattr(maxapi, 'Bot'):
-            api = maxapi.Bot(token=token)
-            logger.info("✅ MAX API инициализирован через класс: Bot")
+        # Пробуем использовать синхронный клиент
+        if hasattr(maxapi, 'SyncBot'):
+            api = maxapi.SyncBot(token=token)
+            logger.info("✅ MAX API инициализирован через класс: SyncBot (синхронный)")
             return api
-        elif hasattr(maxapi, 'MaxBotAPI'):
-            api = maxapi.MaxBotAPI(token=token)
-            logger.info("✅ MAX API инициализирован через класс: MaxBotAPI")
+        elif hasattr(maxapi, 'Bot'):
+            api = maxapi.Bot(token=token)
+            logger.info("✅ MAX API инициализирован через класс: Bot (асинхронный)")
+            logger.warning("⚠️ Bot - асинхронный, могут быть проблемы с отправкой")
             return api
         else:
             logger.error("❌ Не найден подходящий класс в maxapi")
@@ -68,27 +69,17 @@ web_interface = WebInterface(fm, publisher)
 # ========== ФУНКЦИИ ОТПРАВКИ ==========
 
 def send_message(chat_id, text):
-    """Отправка сообщения - СИНХРОННАЯ обертка"""
+    """Отправка сообщения - ПРОСТОЙ ВЫЗОВ"""
     if not api:
         logger.warning(f"⚠️ API не инициализирован!")
         return False
     
     try:
-        # Проверяем, есть ли метод send_message
+        # Просто вызываем метод, без всяких await/asyncio
         if hasattr(api, 'send_message'):
-            # Вызываем через asyncio.run() если это корутина
-            import inspect
-            if inspect.iscoroutinefunction(api.send_message):
-                # Это асинхронная функция - запускаем через asyncio
-                asyncio.run(api.send_message(chat_id, text))
-            else:
-                # Синхронная функция - вызываем напрямую
-                api.send_message(chat_id, text)
+            api.send_message(chat_id, text)
         elif hasattr(api, 'sendMessage'):
-            if inspect.iscoroutinefunction(api.sendMessage):
-                asyncio.run(api.sendMessage(chat_id, text))
-            else:
-                api.sendMessage(chat_id, text)
+            api.sendMessage(chat_id, text)
         else:
             logger.error(f"❌ Нет метода отправки!")
             return False
@@ -97,8 +88,6 @@ def send_message(chat_id, text):
         return True
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
-        import traceback
-        traceback.print_exc()
         return False
 
 # ========== ВЕБХУК ==========
@@ -112,14 +101,11 @@ def webhook():
         if not data:
             return jsonify({'status': 'ok'}), 200
         
-        # Проверяем тип обновления
         update_type = data.get('update_type')
         
-        # Только сообщения от пользователя
         if update_type != 'message_created':
             return jsonify({'status': 'ok'}), 200
         
-        # Извлекаем данные из правильной структуры
         message = data.get('message', {})
         recipient = message.get('recipient', {})
         body = message.get('body', {})
