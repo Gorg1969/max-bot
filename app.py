@@ -610,7 +610,81 @@ def setup_webhook():
             return f"❌ Ошибка: {r.status_code} - {r.text}"
     except Exception as e:
         return f"❌ Ошибка: {e}"
-
+@app.route('/test')
+def test():
+    """Диагностика бота через браузер"""
+    import platform
+    import sys
+    import psutil
+    import requests
+    
+    result = {
+        'status': 'ok',
+        'system': {
+            'os': platform.system(),
+            'python': sys.version,
+            'ram_total_gb': round(psutil.virtual_memory().total / (1024**3), 2),
+            'ram_available_gb': round(psutil.virtual_memory().available / (1024**3), 2),
+            'ram_percent': psutil.virtual_memory().percent,
+            'disk_free_gb': round(psutil.disk_usage('/').free / (1024**3), 2),
+            'disk_percent': psutil.disk_usage('/').percent,
+        },
+        'imports': {},
+        'files': {},
+        'api': {},
+        'env': {}
+    }
+    
+    # Проверка импортов
+    for mod in ['flask', 'requests', 'PIL', 'pandas', 'numpy', 'openpyxl', 'pytz', 'maxapi']:
+        try:
+            __import__(mod)
+            result['imports'][mod] = '✅ OK'
+        except ImportError as e:
+            result['imports'][mod] = f'❌ {str(e)}'
+    
+    # Проверка файлов
+    for file in ['app.py', 'requirements.txt', 
+                 'modules/__init__.py', 'modules/database.py', 
+                 'modules/file_manager.py', 'modules/publisher.py', 
+                 'modules/web_interface.py', 'modules/max_client.py']:
+        if os.path.exists(file):
+            result['files'][file] = f'✅ ({os.path.getsize(file)} байт)'
+        else:
+            result['files'][file] = '❌ НЕ НАЙДЕН'
+    
+    # Проверка токена
+    token = os.environ.get('MAX_TOKEN') or os.environ.get('MAX_BOT_TOKEN') or os.environ.get('TOKEN')
+    if token:
+        result['env']['token'] = f'✅ найден (первые 10: {token[:10]}...)'
+    else:
+        result['env']['token'] = '❌ НЕ НАЙДЕН!'
+    
+    # Проверка API
+    if token:
+        try:
+            r = requests.get('https://platform-api2.max.ru/me', 
+                           headers={'Authorization': token}, 
+                           timeout=10, 
+                           verify=False)
+            result['api']['status'] = r.status_code
+            if r.status_code == 200:
+                data = r.json()
+                result['api']['bot_name'] = data.get('first_name', 'Unknown')
+                result['api']['bot_id'] = data.get('user_id', 'Unknown')
+                result['api']['message'] = '✅ API доступен'
+            else:
+                result['api']['message'] = f'❌ Ошибка: {r.text[:100]}'
+        except Exception as e:
+            result['api']['message'] = f'❌ {str(e)}'
+    else:
+        result['api']['message'] = '❌ Токен отсутствует'
+    
+    # Переменные окружения
+    result['env']['PORT'] = os.environ.get('PORT', 'не установлен')
+    result['env']['BASE_URL'] = os.environ.get('BASE_URL', 'не установлен')
+    
+    return jsonify(result)
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
     if TOKEN:
