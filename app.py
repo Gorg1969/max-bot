@@ -61,11 +61,7 @@ class APIClient:
         if not self.token:
             return False
         try:
-            payload = {
-                "chat_id": chat_id,
-                "text": text,
-                "format": "markdown"
-            }
+            payload = {"chat_id": chat_id, "text": text, "format": "markdown"}
             response = requests.post(
                 f"{self.base_url}/messages",
                 headers={"Authorization": self.token, "Content-Type": "application/json"},
