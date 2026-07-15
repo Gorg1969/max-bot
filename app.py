@@ -90,7 +90,7 @@ class APIClient:
             )
             
             if response.status_code != 200:
-                logger.error(f"❌ Ошибка получения URL: {response.status_code}")
+                logger.error(f"❌ Ошибка получения URL: {response.status_code} - {response.text}")
                 return None
             
             upload_data = response.json()
@@ -111,7 +111,7 @@ class APIClient:
             )
             
             if response.status_code != 200:
-                logger.error(f"❌ Ошибка загрузки файла: {response.status_code}")
+                logger.error(f"❌ Ошибка загрузки файла: {response.status_code} - {response.text}")
                 return None
             
             result = response.json()
@@ -130,42 +130,54 @@ class APIClient:
                 logger.info(f"✅ Файл загружен, token получен")
                 return token
             else:
-                logger.error(f"❌ Не найден token в ответе")
+                logger.error(f"❌ Не найден token в ответе: {result}")
                 return None
                 
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки файла: {e}")
             return None
 
-    def _send_photos_chunk(self, chat_id, photo_files, text=None, suffix=""):
-        """Отправляет одну пачку фото (до 10 штук)"""
+    def send_photos_to_chat(self, chat_id, photo_files, text=None, caption=None):
+        """
+        Отправляет фото в чат через двухэтапную загрузку
+        photo_files: список кортежей (filename, binary_data)
+        """
+        if not self.token:
+            logger.error("❌ Токен не установлен!")
+            return False
+        
         try:
             attachments = []
             total = len(photo_files)
             
             for i, (filename, data) in enumerate(photo_files):
+                logger.info(f"📤 Загрузка фото {i+1}/{total}: {filename} ({len(data)} байт)")
                 token = self.upload_file_to_max(data, filename)
                 if token:
                     attachments.append({
                         "type": "image",
                         "payload": {"token": token}
                     })
-                    logger.info(f"✅ Фото {i+1}/{total} загружено")
+                    logger.info(f"✅ Фото {i+1} загружено")
                 else:
                     logger.warning(f"⚠️ Не удалось загрузить {filename}")
             
             if not attachments:
-                logger.warning("⚠️ Нет загруженных фото, отправляю только текст")
-                return self.send_message_to_chat(chat_id, text or "")
+                logger.error("❌ Нет загруженных файлов для отправки")
+                # Если нет фото - отправляем только текст
+                if text:
+                    return self.send_message_to_chat(chat_id, text)
+                return False
             
+            # ОТПРАВЛЯЕМ JSON
             payload = {
                 "chat_id": chat_id,
-                "text": (text or "") + (suffix or ""),
+                "text": text or "",
                 "format": "markdown",
                 "attachments": attachments
             }
             
-            logger.info(f"📤 Отправка {len(attachments)} фото в чат {chat_id}")
+            logger.info(f"📤 Отправка сообщения с {len(attachments)} фото в чат {chat_id}")
             
             response = requests.post(
                 f"{self.base_url}/messages",
@@ -178,59 +190,21 @@ class APIClient:
                 verify=False
             )
             
+            logger.info(f"📊 Статус ответа: {response.status_code}")
+            
             if response.status_code == 200:
-                logger.info(f"✅ {len(attachments)} фото отправлены")
+                logger.info(f"✅ Сообщение с {len(attachments)} фото отправлено")
                 return True
             else:
-                logger.error(f"❌ Ошибка: {response.status_code} - {response.text[:200]}")
+                logger.error(f"❌ Ошибка отправки: {response.status_code}")
+                logger.error(f"❌ Ответ сервера: {response.text[:500]}")
                 return False
                 
         except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
+            logger.error(f"❌ Ошибка отправки фото: {e}")
+            import traceback
+            traceback.print_exc()
             return False
-
-    def send_photos_to_chat(self, chat_id, photo_files, text=None, caption=None):
-        """
-        Отправляет фото в чат. Максимум 10 фото за раз.
-        """
-        if not self.token:
-            logger.error("❌ Токен не установлен!")
-            return False
-        
-        try:
-            MAX_PHOTOS = 10
-            total = len(photo_files)
-            
-            if total == 0:
-                return self.send_message_to_chat(chat_id, text or "")
-            
-            # Если фото > 10 - разбиваем на пачки
-            if total > MAX_PHOTOS:
-                logger.info(f"📸 {total} фото, разбиваем на пачки по {MAX_PHOTOS}")
-                success_all = True
-                
-                for i in range(0, total, MAX_PHOTOS):
-                    chunk = photo_files[i:i+MAX_PHOTOS]
-                    chunk_num = i // MAX_PHOTOS + 1
-                    total_chunks = (total + MAX_PHOTOS - 1) // MAX_PHOTOS
-                    
-                    chunk_text = text if i == 0 else None
-                    suffix = f" ({chunk_num}/{total_chunks})"
-                    
-                    success = self._send_photos_chunk(chat_id, chunk, chunk_text, suffix)
-                    if not success:
-                        success_all = False
-                    
-                    if i + MAX_PHOTOS < total:
-                        time.sleep(1)
-                
-                return success_all
-            else:
-                return self._send_photos_chunk(chat_id, photo_files, text)
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
-            return self.send_message_to_chat(chat_id, text or "")
 
 api = APIClient()
 publisher = Publisher(api, fm, db)
@@ -283,13 +257,13 @@ UPLOAD_PAGE = """
         <div class="instructions">
             <strong>📌 Как подготовить папку:</strong><br>
             1️⃣ Создайте головную папку (любое название)<br>
-            2️⃣ Внутри создайте подпапки объявлений: <code>1 -123456789</code><br>
+            2️⃣ Внутри создайте подпапки объявлений: <code>Название -123456789</code><br>
             3️⃣ В каждой подпапке: <code>info.txt</code> и фото (не более 6)<br>
             4️⃣ Перетащите головную папку в поле ниже
         </div>
         <div class="drop-zone" id="dropZone">
             <span class="icon">📂</span>
-            <p><strong>Перетащите папку сюда</strong></p>
+            <p><strong>Перетащите головную папку сюда</strong></p>
             <button class="btn btn-primary" onclick="document.getElementById('folderInput').click()">Выбрать папку</button>
             <input type="file" id="folderInput" webkitdirectory multiple>
         </div>
@@ -443,12 +417,12 @@ UPLOAD_PAGE = """
             files.forEach(f => {
                 const parts = f.webkitRelativePath.split('/');
                 if (parts.length >= 2) {
-                    const folder = parts[0] + '/' + parts[1];
+                    const folder = parts[0];
                     folders.add(folder);
                     if (!fileCount[folder]) fileCount[folder] = 0;
                     fileCount[folder]++;
                 } else if (parts.length === 1) {
-                    const folder = parts[0];
+                    const folder = 'Корень';
                     folders.add(folder);
                     if (!fileCount[folder]) fileCount[folder] = 0;
                     fileCount[folder]++;
@@ -458,8 +432,7 @@ UPLOAD_PAGE = """
             sortedFolders.forEach(folder => {
                 const li = document.createElement('li');
                 const count = fileCount[folder] || 0;
-                const displayName = folder.includes('/') ? folder.split('/')[1] : folder;
-                li.innerHTML = `<span>📁 <strong>${displayName}</strong></span><span class="count">${count} файлов</span>`;
+                li.innerHTML = `<span>📁 <strong>${folder}</strong></span><span class="count">${count} файлов</span>`;
                 fileListContent.appendChild(li);
             });
             selectedInfo.textContent = `✅ Выбрано ${sortedFolders.length} папок, всего ${files.length} файлов`;
@@ -495,12 +468,6 @@ UPLOAD_PAGE = """
             files.forEach(file => {
                 const parts = file.webkitRelativePath.split('/');
                 if (parts.length >= 2) {
-                    const folderName = parts[1];
-                    if (!folders[folderName]) {
-                        folders[folderName] = [];
-                    }
-                    folders[folderName].push(file);
-                } else if (parts.length === 1) {
                     const folderName = parts[0];
                     if (!folders[folderName]) {
                         folders[folderName] = [];
@@ -540,24 +507,25 @@ UPLOAD_PAGE = """
                 showStatus('error', '❌ Выберите папку');
                 return;
             }
-            showStatus('info', '⏳ Сжатие...');
+            showStatus('info', '⏳ Обработка...');
             progressBar.style.display = 'block';
             progress.style.width = '0%';
             progress.textContent = '0%';
             logDiv.textContent = '';
-            addLog('🚀 Начинаем обработку...');
-            addLog('📦 Сжатие фото на клиенте');
+            addLog('🚀 Начинаем загрузку...');
+            
             const processedFiles = await processAllFiles(selectedFiles);
             addLog(`✅ Обработано ${processedFiles.length} файлов`);
+            
             const folders = getFolderStructure(processedFiles);
             const folderNames = Object.keys(folders);
             const totalFolders = folderNames.length;
             const totalChunks = Math.ceil(totalFolders / CHUNK_SIZE);
-            showStatus('info', `⏳ Загрузка ${totalFolders} папок...`);
-            addLog(`📦 Загрузка ${totalFolders} папок (${totalChunks} пачек)`);
+            
             let uploadedFolders = 0;
             let failedChunks = 0;
             let uploadedFiles = 0;
+            
             for (let i = 0; i < folderNames.length; i += CHUNK_SIZE) {
                 const chunkFolders = folderNames.slice(i, i + CHUNK_SIZE);
                 const chunkNum = Math.floor(i / CHUNK_SIZE) + 1;
@@ -567,7 +535,7 @@ UPLOAD_PAGE = """
                         chunkFiles.push(file);
                     });
                 });
-                addLog(`📤 Пачка ${chunkNum}/${totalChunks} (${chunkFolders.length} папок, ${chunkFiles.length} файлов)`);
+                addLog(`📤 Пачка ${chunkNum}/${totalChunks}: ${chunkFolders.length} папок, ${chunkFiles.length} файлов`);
                 const formData = new FormData();
                 chunkFiles.forEach(file => {
                     formData.append('files[]', file, file.webkitRelativePath);
@@ -597,6 +565,7 @@ UPLOAD_PAGE = """
                     await new Promise(r => setTimeout(r, 300));
                 }
             }
+            
             if (failedChunks === 0) {
                 showStatus('success', `✅ Загружено ${uploadedFolders} папок (${uploadedFiles} файлов)!`);
                 addLog(`✅ ВСЕ ${uploadedFolders} папок загружены!`);
@@ -606,6 +575,7 @@ UPLOAD_PAGE = """
                 showStatus('warning', `⚠️ Загружено ${uploadedFolders} папок, ${failedChunks} пачек с ошибками`);
                 addLog(`⚠️ Загружено ${uploadedFolders} папок, ${failedChunks} пачек с ошибками`);
             }
+            
             if (uploadedFolders > 0) {
                 addLog('🚀 Запускаем публикацию...');
                 try {
