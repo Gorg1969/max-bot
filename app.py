@@ -84,7 +84,7 @@ class APIClient:
             return False
         try:
             attachments = []
-            for token in tokens[:10]:
+            for token in tokens[:3]:
                 attachments.append({
                     "type": "image",
                     "payload": {"token": token}
@@ -175,8 +175,7 @@ UPLOAD_PAGE = """
             &nbsp;&nbsp;• Текст ДО разделителя — публикуется в чат<br>
             &nbsp;&nbsp;• Текст ПОСЛЕ разделителя — идет в отчет<br>
             5️⃣ Перетащите головную папку в поле ниже<br>
-            6️⃣ <strong>Фото сжимаются на клиенте</strong> (макс. ширина 1024px, качество 80%)<br>
-            7️⃣ Максимум <strong>10 фото</strong> на объявление
+            6️⃣ Каждая папка отправляется отдельным запросом
         </div>
         
         <div class="drop-zone" id="dropZone">
@@ -329,75 +328,6 @@ UPLOAD_PAGE = """
             window.open(`/report/${userId}`, '_blank');
         }
 
-        // ====== СЖАТИЕ ИЗОБРАЖЕНИЯ ======
-        function compressImage(file, maxWidth=1024, quality=0.8) {
-            return new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = function(e) {
-                    const img = new Image();
-                    img.onload = function() {
-                        let width = img.width;
-                        let height = img.height;
-                        
-                        if (width > maxWidth) {
-                            const ratio = maxWidth / width;
-                            width = maxWidth;
-                            height = height * ratio;
-                        }
-                        
-                        const canvas = document.createElement('canvas');
-                        canvas.width = width;
-                        canvas.height = height;
-                        const ctx = canvas.getContext('2d');
-                        ctx.drawImage(img, 0, 0, width, height);
-                        
-                        const compressedDataUrl = canvas.toDataURL('image/jpeg', quality);
-                        const compressedBlob = dataURLToBlob(compressedDataUrl);
-                        
-                        resolve({
-                            blob: compressedBlob,
-                            name: file.name.replace(/\\.[^.]+$/, '') + '.jpg',
-                            size: compressedBlob.size,
-                            originalSize: file.size
-                        });
-                    };
-                    img.onerror = function() {
-                        reject(new Error('Ошибка загрузки изображения'));
-                    };
-                    img.src = e.target.result;
-                };
-                reader.onerror = function() {
-                    reject(new Error('Ошибка чтения файла'));
-                };
-                reader.readAsDataURL(file);
-            });
-        }
-
-        function dataURLToBlob(dataUrl) {
-            const parts = dataUrl.split(';base64,');
-            const contentType = parts[0].split(':')[1];
-            const raw = window.atob(parts[1]);
-            const rawLength = raw.length;
-            const uInt8Array = new Uint8Array(rawLength);
-            for (let i = 0; i < rawLength; ++i) {
-                uInt8Array[i] = raw.charCodeAt(i);
-            }
-            return new Blob([uInt8Array], {type: contentType});
-        }
-
-        function blobToArrayBuffer(blob) {
-            return new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = function() {
-                    resolve(new Uint8Array(reader.result));
-                };
-                reader.onerror = function() {
-                    reject(new Error('Ошибка чтения Blob'));
-                };
-                reader.readAsArrayBuffer(blob);
-            });
-        }
-
         async function prepareFolderData(folderName, files) {
             const txtFile = files.find(f => f.name === 'info' || f.name.endsWith('.txt'));
             if (!txtFile) {
@@ -415,26 +345,22 @@ UPLOAD_PAGE = """
                 metadataText = parts[1] ? parts[1].trim() : '';
             }
             
-            // Берем до 10 фото
             const imageFiles = files
                 .filter(f => f.type && f.type.startsWith('image/'))
-                .slice(0, 10);
+                .slice(0, 3);
             
             const images = [];
             for (const img of imageFiles) {
                 try {
-                    addLog(`🔄 Сжатие ${img.name}...`);
-                    const compressed = await compressImage(img, 1024, 0.8);
+                    const arrayBuffer = await img.arrayBuffer();
                     images.push({
-                        name: compressed.name,
-                        data: await blobToArrayBuffer(compressed.blob),
-                        type: 'image/jpeg',
-                        size: compressed.size,
-                        originalSize: compressed.originalSize
+                        name: img.name,
+                        data: Array.from(new Uint8Array(arrayBuffer)),
+                        type: img.type || 'image/jpeg'
                     });
-                    addLog(`✅ ${img.name} сжат: ${(compressed.size/1024).toFixed(1)} КБ (было ${(compressed.originalSize/1024).toFixed(1)} КБ)`);
+                    addLog(`✅ Фото ${img.name} преобразовано`);
                 } catch (e) {
-                    addLog(`⚠️ Ошибка сжатия ${img.name}: ${e.message}`);
+                    addLog(`⚠️ Ошибка чтения ${img.name}: ${e.message}`);
                 }
             }
             
@@ -466,7 +392,6 @@ UPLOAD_PAGE = """
             progress.textContent = '0%';
             logDiv.textContent = '';
             addLog('🚀 Начинаем обработку...');
-            addLog('🔄 Сжатие изображений на клиенте...');
             
             const folders = {};
             selectedFiles.forEach(file => {
@@ -648,8 +573,7 @@ def webhook():
                 "📋 **Инструкция:**\n"
                 "1. Подготовьте папки с объявлениями\n"
                 "2. Используйте разделитель #изъятая\n"
-                "3. Фото до 10 шт на объявление\n"
-                "4. Фото сжимаются на клиенте"
+                "3. Фото до 3 шт на объявление"
             )
             return jsonify({"ok": True}), 200
         
@@ -743,276 +667,6 @@ def setup_webhook():
             return f"❌ Ошибка: {r.status_code} - {r.text}"
     except Exception as e:
         return f"❌ Ошибка: {e}"
-
-# ========== ДИАГНОСТИКА ==========
-
-@app.route('/diagnostic')
-def diagnostic():
-    """Диагностика всех параметров бота"""
-    result = {
-        "status": "ok",
-        "token": TOKEN[:10] + "..." if TOKEN else "❌ НЕТ",
-        "base_url": BASE_URL,
-        "user_id": 151296248,
-        "chat_id": "-76868172202744",
-        "test_results": {}
-    }
-    
-    # 1. Проверяем токен
-    try:
-        response = requests.get(
-            f"{BASE_URL}/me",
-            headers={"Authorization": TOKEN},
-            timeout=10,
-            verify=False
-        )
-        result["test_results"]["token_check"] = {
-            "status": response.status_code,
-            "ok": response.status_code == 200,
-            "response": response.json() if response.status_code == 200 else response.text[:100]
-        }
-    except Exception as e:
-        result["test_results"]["token_check"] = {"error": str(e)}
-    
-    # 2. Пробуем отправить тестовое сообщение пользователю
-    test_payloads = [
-        {"name": "user_id как число", "payload": {"user_id": 151296248}},
-        {"name": "user_id как строка", "payload": {"user_id": "151296248"}},
-        {"name": "chat_id как число", "payload": {"chat_id": 76868172202744}},
-        {"name": "chat_id как строка", "payload": {"chat_id": "76868172202744"}},
-        {"name": "chat_id с дефисом", "payload": {"chat_id": "-76868172202744"}},
-    ]
-    
-    for test in test_payloads:
-        try:
-            payload = {
-                "text": f"🧪 Тест {test['name']}",
-                "format": "markdown",
-                **test["payload"]
-            }
-            response = requests.post(
-                f"{BASE_URL}/messages",
-                headers={"Authorization": TOKEN, "Content-Type": "application/json"},
-                json=payload,
-                timeout=10,
-                verify=False
-            )
-            result["test_results"][test["name"]] = {
-                "status": response.status_code,
-                "ok": response.status_code == 200,
-                "response": response.text[:200]
-            }
-        except Exception as e:
-            result["test_results"][test["name"]] = {"error": str(e)}
-    
-    # 3. Проверяем загрузку фото
-    try:
-        upload_response = requests.post(
-            f"{BASE_URL}/uploads",
-            headers={"Authorization": TOKEN},
-            params={"type": "image"},
-            timeout=10,
-            verify=False
-        )
-        result["test_results"]["upload_check"] = {
-            "status": upload_response.status_code,
-            "ok": upload_response.status_code == 200,
-            "response": upload_response.json() if upload_response.status_code == 200 else upload_response.text[:100]
-        }
-    except Exception as e:
-        result["test_results"]["upload_check"] = {"error": str(e)}
-    
-    # 4. Получаем список всех чатов
-    try:
-        subs_response = requests.get(
-            f"{BASE_URL}/subscriptions",
-            headers={"Authorization": TOKEN},
-            timeout=10,
-            verify=False
-        )
-        
-        chats_list = []
-        if subs_response.status_code == 200:
-            subs_data = subs_response.json()
-            if 'subscriptions' in subs_data:
-                for sub in subs_data['subscriptions']:
-                    if 'chat_id' in sub:
-                        chats_list.append(sub['chat_id'])
-                    elif 'payload' in sub and 'chat_id' in sub['payload']:
-                        chats_list.append(sub['payload']['chat_id'])
-            elif 'chats' in subs_data:
-                for chat in subs_data['chats']:
-                    chats_list.append(chat.get('chat_id'))
-            elif 'chat_id' in subs_data:
-                chats_list.append(subs_data['chat_id'])
-        
-        result["test_results"]["subscriptions"] = {
-            "status": subs_response.status_code,
-            "ok": subs_response.status_code == 200,
-            "chats": chats_list,
-            "full_response": subs_response.json() if subs_response.status_code == 200 else subs_response.text[:200]
-        }
-    except Exception as e:
-        result["test_results"]["subscriptions"] = {"error": str(e)}
-    
-    # 5. Информация о чате
-    try:
-        chat_info_response = requests.get(
-            f"{BASE_URL}/chats/-76868172202744",
-            headers={"Authorization": TOKEN},
-            timeout=10,
-            verify=False
-        )
-        if chat_info_response.status_code == 200:
-            chat_info = chat_info_response.json()
-            result["test_results"]["chat_info"] = {
-                "status": 200,
-                "ok": True,
-                "chat": chat_info
-            }
-        else:
-            result["test_results"]["chat_info"] = {
-                "status": chat_info_response.status_code,
-                "ok": False,
-                "response": chat_info_response.text[:200]
-            }
-    except Exception as e:
-        result["test_results"]["chat_info"] = {"error": str(e)}
-    
-    # 6. Тест с chat_id в URL
-    try:
-        payload = {
-            "text": "🧪 Тест через chat_id в URL",
-            "format": "markdown"
-        }
-        response = requests.post(
-            f"{BASE_URL}/messages?chat_id=-76868172202744",
-            headers={"Authorization": TOKEN, "Content-Type": "application/json"},
-            json=payload,
-            timeout=10,
-            verify=False
-        )
-        result["test_results"]["chat_id_in_url"] = {
-            "status": response.status_code,
-            "ok": response.status_code == 200,
-            "response": response.text[:200]
-        }
-    except Exception as e:
-        result["test_results"]["chat_id_in_url"] = {"error": str(e)}
-    
-    # 7. Тест с chat_id int в теле
-    try:
-        payload = {
-            "chat_id": 76868172202744,
-            "text": "🧪 Тест chat_id int",
-            "format": "markdown"
-        }
-        response = requests.post(
-            f"{BASE_URL}/messages",
-            headers={"Authorization": TOKEN, "Content-Type": "application/json"},
-            json=payload,
-            timeout=10,
-            verify=False
-        )
-        result["test_results"]["chat_id_int_body"] = {
-            "status": response.status_code,
-            "ok": response.status_code == 200,
-            "response": response.text[:200]
-        }
-    except Exception as e:
-        result["test_results"]["chat_id_int_body"] = {"error": str(e)}
-    
-    # 8. Определяем рабочий формат
-    working_format = "НЕ НАЙДЕН"
-    for name, data in result["test_results"].items():
-        if data.get("ok") and "user_id" in name:
-            working_format = name
-            break
-    for name, data in result["test_results"].items():
-        if data.get("ok") and "chat_id" in name:
-            working_format = name
-            break
-    
-    # 9. Формируем HTML
-    html = """
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <title>Диагностика бота</title>
-        <style>
-            body { font-family: Arial; max-width: 900px; margin: 30px auto; padding: 20px; background: #f5f5f5; }
-            .card { background: white; padding: 20px; margin: 15px 0; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-            .ok { color: #28a745; font-weight: bold; }
-            .error { color: #dc3545; font-weight: bold; }
-            pre { background: #f8f9fa; padding: 10px; border-radius: 5px; overflow-x: auto; font-size: 12px; }
-            .status { display: inline-block; padding: 3px 10px; border-radius: 15px; font-size: 12px; }
-            .status.success { background: #d4edda; color: #155724; }
-            .status.fail { background: #f8d7da; color: #721c24; }
-            .summary { background: #e8f4f8; padding: 15px; border-radius: 8px; }
-            .working { background: #d4edda; padding: 5px 15px; border-radius: 5px; font-weight: bold; }
-        </style>
-    </head>
-    <body>
-        <h1>🔧 Диагностика бота</h1>
-        
-        <div class="card summary">
-            <h2>📋 Краткий итог</h2>
-            <p><span class="status success">✅</span> Бот запущен и отвечает</p>
-    """
-    
-    token_ok = result["test_results"].get("token_check", {}).get("ok", False)
-    html += '<p><span class="status ' + ("success" if token_ok else "fail") + '">' + ("✅" if token_ok else "❌") + '</span> Токен ' + ("работает" if token_ok else "НЕ работает") + '</p>'
-    html += '<p><strong>Рабочий формат:</strong> <code class="working">' + working_format + '</code></p>'
-    
-    html += """
-        </div>
-        
-        <div class="card">
-            <h2>📋 Основные параметры</h2>
-            <p><strong>Токен:</strong> <code>""" + result["token"] + """</code></p>
-            <p><strong>URL:</strong> <code>""" + result["base_url"] + """</code></p>
-            <p><strong>User ID:</strong> <code>151296248</code></p>
-            <p><strong>Chat ID:</strong> <code>-76868172202744</code></p>
-        </div>
-        
-        <div class="card">
-            <h2>📤 Результаты тестов</h2>
-    """
-    
-    for name, data in result["test_results"].items():
-        status_class = "success" if data.get("ok") else "fail"
-        status_text = "✅ УСПЕШНО" if data.get("ok") else "❌ ОШИБКА"
-        html += """
-            <div style="border:1px solid #ddd; padding:10px; margin:10px 0; border-radius:5px;">
-                <strong>""" + name + """</strong>
-                <span class="status """ + status_class + """">""" + status_text + """</span>
-                <pre>""" + json.dumps(data, indent=2, ensure_ascii=False) + """</pre>
-            </div>
-        """
-    
-    html += """
-        </div>
-        
-        <div class="card">
-            <h2>💡 Рекомендации</h2>
-            <ul>
-                <li>Если <strong>token_check</strong> не 200 → проверьте токен</li>
-                <li>Если <strong>upload_check</strong> не 200 → проверьте права бота</li>
-                <li>Если какой-то <strong>тест отправки</strong> вернул 200 → используйте этот формат</li>
-                <li>Если все тесты вернули 400 → бот не добавлен в чат или токен невалидный</li>
-                <li>Если в <strong>subscriptions</strong> пусто → бот не подписан на события чата</li>
-                <li>Если <strong>chat_info</strong> вернул 200 → бот имеет доступ к чату</li>
-            </ul>
-        </div>
-        
-        <div style="text-align:center; margin-top:30px; color:#999;">
-            <a href="/upload">⬅️ Вернуться к загрузке</a>
-        </div>
-    </body>
-    </html>
-    """
-    
-    return html
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
