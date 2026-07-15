@@ -399,4 +399,4 @@ class Publisher:
             return False
     
     def is_running(self, user_id):
-        return self.active_publishes.get(user_id, False) 
+        return self.active_publishes.get(user_id, False)
