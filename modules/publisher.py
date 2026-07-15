@@ -184,4 +184,74 @@ class Publisher:
         """
         Обрабатывает ОДНУ папку:
         1. Загружает каждое изображение через POST /uploads (с таймаутом 60 сек на папку)
-        2. Отправ
+        2. Отправляет сообщение с текстом и токенами изображений через POST /messages
+        3. Сохраняет метаданные в БД
+        """
+        try:
+            start_time = time.time()
+            
+            # 1. Извлекаем chat_id
+            chat_id = self.extract_chat_id(folder_name)
+            if not chat_id:
+                return False, f"Не удалось извлечь chat_id из {folder_name}"
+            
+            logger.info(f"📤 Публикация папки {folder_name} в чат {chat_id}")
+            
+            # 2. Загружаем изображения (с таймаутом)
+            image_tokens = []
+            for i, img_data in enumerate(images_data[:6]):
+                # Проверяем таймаут
+                if time.time() - start_time > self.FOLDER_TIMEOUT:
+                    logger.warning(f"⏰ Таймаут обработки папки {folder_name} ({self.FOLDER_TIMEOUT} сек)")
+                    return False, f"Таймаут обработки папки {folder_name}"
+                
+                logger.info(f"📤 Загрузка изображения {i+1}/{min(len(images_data), 6)} для {folder_name}")
+                
+                # Получаем данные изображения
+                img_bytes = img_data.get('data')
+                if not img_bytes:
+                    continue
+                
+                # Загружаем изображение
+                token = self._upload_file_to_max(img_bytes)
+                if token:
+                    image_tokens.append(token)
+                else:
+                    logger.warning(f"⚠️ Не удалось загрузить изображение {i+1} для {folder_name}")
+            
+            # 3. Отправляем сообщение с текстом и загруженными изображениями
+            if image_tokens:
+                success = self._send_message_to_chat(chat_id, ad_text, image_tokens)
+            else:
+                # Отправляем только текст
+                logger.info(f"📤 Отправка только текста в чат {chat_id}")
+                success = self.api.send_message_to_chat(chat_id, ad_text)
+            
+            if not success:
+                return False, f"Не удалось отправить сообщение в чат {chat_id}"
+            
+            # 4. Сохраняем метаданные для отчета
+            metadata = self._parse_metadata(metadata_text)
+            self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, time.time())
+            self.db.add_publication(user_id, folder_name, chat_id)
+            
+            return True, f"✅ Папка {folder_name} опубликована с {len(image_tokens)} фото"
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка публикации {folder_name}: {e}")
+            return False, str(e)
+
+    def start(self, user_id):
+        """Запускает публикацию (устаревший метод)"""
+        return False
+
+    def stop(self, user_id):
+        """Останавливает публикацию"""
+        if self.active_publishes.get(user_id, False):
+            self.active_publishes[user_id] = False
+            logger.info(f"⏹️ Публикация остановлена для {user_id}")
+            return True
+        return False
+
+    def is_running(self, user_id):
+        return self.active_publishes.get(user_id, False)
