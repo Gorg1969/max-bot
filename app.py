@@ -47,7 +47,7 @@ class APIClient:
                 headers={"Authorization": self.token, "Content-Type": "application/json"},
                 params={"user_id": user_id},
                 json=payload,
-                timeout=(10, 30),
+                timeout=30,
                 verify=False
             )
             if response.status_code != 200:
@@ -67,7 +67,7 @@ class APIClient:
                 headers={"Authorization": self.token, "Content-Type": "application/json"},
                 params={"chat_id": chat_id},
                 json=payload,
-                timeout=(10, 30),
+                timeout=30,
                 verify=False
             )
             return response.status_code == 200
@@ -75,121 +75,9 @@ class APIClient:
             logger.error(f"❌ Ошибка отправки в чат: {e}")
             return False
 
-    def upload_file_to_max(self, file_data, filename):
-        """
-        Загружает файл на сервер MAX через /uploads
-        Возвращает token для использования в сообщении
-        """
-        try:
-            ext = filename.split('.')[-1].lower() if '.' in filename else 'jpg'
-            file_type = 'image'
-            
-            # ШАГ 1: Получаем URL для загрузки
-            logger.info(f"📤 Запрос URL для загрузки: {filename}")
-            response = requests.post(
-                f"{self.base_url}/uploads",
-                headers={
-                    "Authorization": self.token,
-                    "Content-Type": "application/json"
-                },
-                params={"type": file_type},
-                timeout=(10, 30),
-                verify=False
-            )
-            
-            if response.status_code != 200:
-                logger.error(f"❌ Ошибка получения URL: {response.status_code} - {response.text}")
-                return None
-            
-            upload_data = response.json()
-            logger.debug(f"📦 Ответ /uploads: {json.dumps(upload_data, indent=2)}")
-            
-            upload_url = upload_data.get('url')
-            
-            if not upload_url:
-                logger.error("❌ Не получен URL для загрузки")
-                return None
-            
-            logger.info(f"📤 URL для загрузки получен")
-            
-            # ШАГ 2: Загружаем файл
-            files = {'file': (filename, file_data, 'image/jpeg')}
-            response = requests.post(
-                upload_url,
-                files=files,
-                timeout=(30, 120),
-                verify=False
-            )
-            
-            if response.status_code != 200:
-                logger.error(f"❌ Ошибка загрузки файла: {response.status_code} - {response.text}")
-                return None
-            
-            result = response.json()
-            logger.debug(f"📦 Ответ от upload_url: {json.dumps(result, indent=2)}")
-            
-            # ===== ПРАВИЛЬНЫЙ ПАРСИНГ ТОКЕНА =====
-            token = None
-            
-            # Вариант 1: token в корне (стандартный формат)
-            if 'token' in result:
-                token = result['token']
-                logger.info(f"✅ Токен найден в корне ответа")
-            
-            # Вариант 2: token внутри photos (формат MAX)
-            elif 'photos' in result:
-                photos = result['photos']
-                logger.debug(f"📸 photos: {photos}")
-                # Берем первый токен из photos
-                for key, value in photos.items():
-                    if isinstance(value, dict) and 'token' in value:
-                        token = value['token']
-                        logger.info(f"✅ Токен найден в photos[{key}]['token']")
-                        break
-                    elif isinstance(value, str):
-                        # Возможно token - это строка
-                        token = value
-                        logger.info(f"✅ Токен найден как строка в photos[{key}]")
-                        break
-            
-            # Вариант 3: рекурсивный поиск по всем ключам
-            if not token and isinstance(result, dict):
-                for key, value in result.items():
-                    if isinstance(value, dict):
-                        if 'token' in value:
-                            token = value['token']
-                            logger.info(f"✅ Токен найден в {key}['token']")
-                            break
-            
-            # Вариант 4: token в списке photos
-            if not token and 'photos' in result:
-                photos = result['photos']
-                if isinstance(photos, list) and len(photos) > 0:
-                    if isinstance(photos[0], dict) and 'token' in photos[0]:
-                        token = photos[0]['token']
-                        logger.info(f"✅ Токен найден в photos[0]['token']")
-            
-            # =====================================
-            
-            if token:
-                logger.info(f"✅ Файл загружен, token получен: {token[:20]}...")
-                return token
-            else:
-                logger.error(f"❌ Не удалось найти token в ответе: {result}")
-                return None
-                
-        except requests.exceptions.Timeout:
-            logger.error(f"❌ Таймаут при загрузке файла {filename}")
-            return None
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки файла: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-
     def send_photos_to_chat(self, chat_id, photo_files, text=None, caption=None):
         """
-        Отправляет фото в чат через двухэтапную загрузку (ПО ДОКУМЕНТАЦИИ!)
+        ОДНОЭТАПНАЯ отправка фото (без /uploads)
         photo_files: список кортежей (filename, binary_data)
         """
         if not self.token:
@@ -197,57 +85,45 @@ class APIClient:
             return False
         
         try:
-            attachments = []
-            total = len(photo_files)
+            files = []
+            for filename, data in photo_files:
+                ext = filename.split('.')[-1].lower() if '.' in filename else 'jpg'
+                content_type = 'image/jpeg'
+                if ext == 'png':
+                    content_type = 'image/png'
+                elif ext == 'gif':
+                    content_type = 'image/gif'
+                elif ext == 'webp':
+                    content_type = 'image/webp'
+                files.append(('file', (filename, data, content_type)))
             
-            for i, (filename, data) in enumerate(photo_files):
-                logger.info(f"📤 Загрузка фото {i+1}/{total}: {filename} ({len(data)} байт)")
-                
-                token = self.upload_file_to_max(data, filename)
-                if token:
-                    attachments.append({
-                        "type": "image",
-                        "payload": {"token": token}
-                    })
-                    logger.info(f"✅ Фото {i+1} загружено, token: {token[:20]}...")
-                else:
-                    logger.warning(f"⚠️ Не удалось загрузить {filename}")
+            data = {"chat_id": chat_id}
+            if text:
+                data["text"] = text
+            if caption:
+                data["caption"] = caption
             
-            if not attachments:
-                logger.error("❌ Нет загруженных файлов для отправки")
-                return False
-            
-            payload = {
-                "chat_id": chat_id,
-                "text": text or "",
-                "format": "markdown",
-                "attachments": attachments
-            }
-            
-            logger.info(f"📤 Отправка сообщения с {len(attachments)} фото в чат {chat_id}")
-            logger.debug(f"📦 Payload: {json.dumps(payload, indent=2)}")
+            logger.info(f"📤 Отправка {len(photo_files)} фото в чат {chat_id}")
             
             response = requests.post(
                 f"{self.base_url}/messages",
-                headers={
-                    "Authorization": self.token,
-                    "Content-Type": "application/json"
-                },
-                json=payload,
-                timeout=(10, 60),
+                headers={"Authorization": self.token},
+                data=data,
+                files=files,
+                timeout=120,
                 verify=False
             )
             
             logger.info(f"📊 Статус ответа: {response.status_code}")
             
             if response.status_code == 200:
-                logger.info(f"✅ Сообщение с {len(attachments)} фото отправлено в чат {chat_id}")
+                logger.info(f"✅ Фото отправлены в чат {chat_id}")
                 return True
             else:
                 logger.error(f"❌ Ошибка отправки: {response.status_code}")
                 logger.error(f"❌ Ответ сервера: {response.text[:500]}")
                 return False
-                
+
         except Exception as e:
             logger.error(f"❌ Ошибка отправки фото: {e}")
             import traceback
@@ -630,7 +506,7 @@ UPLOAD_PAGE = """
                     });
                 });
                 
-                addLog(`📤 Пачка ${chunkNum}/${totalChunks} (${chunkFolders.length} папок, ${chunkFiles.length} файлов)...`);
+                addLog(`📤 Пачка ${chunkNum}/${totalChunks} (${chunkFolders.length} папок, ${chunkFiles.length} 파일들)...`);
                 
                 const formData = new FormData();
                 chunkFiles.forEach(file => {
