@@ -15,7 +15,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")
-app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200 МБ
+app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -61,7 +61,11 @@ class APIClient:
         if not self.token:
             return False
         try:
-            payload = {"chat_id": chat_id, "text": text, "format": "markdown"}
+            payload = {
+                "chat_id": chat_id,
+                "text": text,
+                "format": "markdown"
+            }
             response = requests.post(
                 f"{self.base_url}/messages",
                 headers={"Authorization": self.token, "Content-Type": "application/json"},
@@ -69,9 +73,50 @@ class APIClient:
                 timeout=30,
                 verify=False
             )
-            return response.status_code == 200
+            if response.status_code == 200:
+                return True
+            else:
+                logger.error(f"❌ Ошибка отправки в чат: {response.status_code} - {response.text}")
+                return False
         except Exception as e:
             logger.error(f"❌ Ошибка отправки в чат: {e}")
+            return False
+
+    def send_message_with_attachments(self, chat_id, text, tokens):
+        """Отправляет сообщение с вложениями (фото) в чат"""
+        if not self.token:
+            return False
+        try:
+            attachments = []
+            for token in tokens[:6]:
+                attachments.append({
+                    "type": "image",
+                    "payload": {"token": token}
+                })
+            
+            payload = {
+                "chat_id": chat_id,
+                "text": text,
+                "format": "markdown",
+                "attachments": attachments
+            }
+            
+            response = requests.post(
+                f"{self.base_url}/messages",
+                headers={"Authorization": self.token, "Content-Type": "application/json"},
+                json=payload,
+                timeout=60,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                logger.info(f"✅ Сообщение с фото отправлено в чат {chat_id}")
+                return True
+            else:
+                logger.error(f"❌ Ошибка: {response.status_code} - {response.text}")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Ошибка: {e}")
             return False
 
 api = APIClient()
@@ -134,8 +179,7 @@ UPLOAD_PAGE = """
             &nbsp;&nbsp;• Текст ДО разделителя — публикуется в чат<br>
             &nbsp;&nbsp;• Текст ПОСЛЕ разделителя — идет в отчет<br>
             5️⃣ Перетащите головную папку в поле ниже<br>
-            6️⃣ Фото преобразуются в бинарный код на клиенте<br>
-            7️⃣ Каждая папка отправляется отдельным запросом
+            6️⃣ Каждая папка отправляется отдельным запросом
         </div>
         
         <div class="drop-zone" id="dropZone">
@@ -318,7 +362,7 @@ UPLOAD_PAGE = """
                         data: Array.from(new Uint8Array(arrayBuffer)),
                         type: img.type || 'image/jpeg'
                     });
-                    addLog(`✅ Фото ${img.name} преобразовано в бинарный код`);
+                    addLog(`✅ Фото ${img.name} преобразовано`);
                 } catch (e) {
                     addLog(`⚠️ Ошибка чтения ${img.name}: ${e.message}`);
                 }
@@ -346,13 +390,12 @@ UPLOAD_PAGE = """
             
             isProcessing = true;
             
-            showStatus('info', '⏳ Подготовка данных на клиенте...');
+            showStatus('info', '⏳ Подготовка данных...');
             progressBar.style.display = 'block';
             progress.style.width = '0%';
             progress.textContent = '0%';
             logDiv.textContent = '';
             addLog('🚀 Начинаем обработку...');
-            addLog('📱 Преобразование фото в бинарный код на клиенте...');
             
             const folders = {};
             selectedFiles.forEach(file => {
@@ -481,18 +524,17 @@ def publish_folder():
         folder_name = folder_data.get('folderName')
         ad_text = folder_data.get('adText')
         metadata_text = folder_data.get('metadataText')
-        full_text = folder_data.get('fullText')
         images = folder_data.get('images', [])
         
         logger.info(f"📦 Получена папка: {folder_name} от пользователя {user_id}")
         logger.info(f"📝 Текст: {len(ad_text)} символов, 🖼️ Фото: {len(images)}")
         
         success, message = publisher.publish_single_folder(
-            user_id, folder_name, ad_text, metadata_text, full_text, images
+            user_id, folder_name, ad_text, metadata_text, images
         )
         
         if success:
-            return jsonify({'success': True, 'message': f'Папка {folder_name} опубликована'})
+            return jsonify({'success': True, 'message': message})
         else:
             return jsonify({'success': False, 'message': message}), 500
         
@@ -535,8 +577,7 @@ def webhook():
                 "📋 **Инструкция:**\n"
                 "1. Подготовьте папки с объявлениями\n"
                 "2. Используйте разделитель #изъятая\n"
-                "3. Фото до 3 шт на объявление\n"
-                "4. Фото преобразуются в бинарный код на клиенте"
+                "3. Фото до 3 шт на объявление"
             )
             return jsonify({"ok": True}), 200
         
