@@ -5,7 +5,6 @@ import re
 import json
 import requests
 import threading
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -17,25 +16,55 @@ class Publisher:
         self.active_publishes = {}  # user_id -> bool
         self.uploaded_folders = {}  # user_id -> set()
         self.FOLDER_TIMEOUT = 60  # Максимальное время на обработку одной папки
-        self.executor = ThreadPoolExecutor(max_workers=2)
     
     def extract_chat_id(self, folder_name):
-        """Извлекает chat_id из названия папки"""
+        """
+        Извлекает chat_id из названия папки
+        Формат: "1 -76868172202744" -> "-76868172202744"
+        Формат: "29 -76868172202744" -> "-76868172202744"
+        Формат: "объявление===/29 -76868172202744" -> "-76868172202744"
+        """
+        # Ищем цифры после дефиса (основной паттерн)
         match = re.search(r'-\s*(\d+)', folder_name)
         if match:
             return f"-{match.group(1)}"
+        
+        # Если не нашли, ищем любую последовательность цифр в конце
+        match = re.search(r'(\d{10,})$', folder_name)
+        if match:
+            return f"-{match.group(1)}"
+        
+        return None
+    
+    def extract_folder_number(self, folder_name):
+        """
+        Извлекает порядковый номер папки
+        Формат: "1 -76868172202744" -> "1"
+        Формат: "объявление===/29 -76868172202744" -> "29"
+        """
+        # Ищем число в начале
+        match = re.match(r'^(\d+)', folder_name)
+        if match:
+            return match.group(1)
+        
+        # Ищем число перед дефисом
+        match = re.search(r'(\d+)\s*-', folder_name)
+        if match:
+            return match.group(1)
+        
+        # Ищем число в пути
+        match = re.search(r'/(\d+)\s*-', folder_name)
+        if match:
+            return match.group(1)
+        
         return None
     
     def get_sorted_images(self, folder_path, max_count=3):
-        """
-        Возвращает список изображений (до 3 штук)
-        БЕЗ сжатия - клиент уже сжал!
-        """
+        """Возвращает список изображений (до 3 штук)"""
         images = []
         if not os.path.exists(folder_path):
             return images
         
-        # Поддерживаемые расширения
         extensions = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')
         
         for file in os.listdir(folder_path):
@@ -43,22 +72,17 @@ class Publisher:
                 continue
             if file.lower().endswith(extensions):
                 img_path = os.path.join(folder_path, file)
-                # Проверяем, что файл существует и не пустой
                 try:
                     if os.path.getsize(img_path) > 0:
                         images.append(img_path)
-                except Exception as e:
-                    logger.warning(f"⚠️ Ошибка чтения {file}: {e}")
+                except Exception:
                     continue
         
-        # Сортируем и берем первые 3
         images.sort()
         return images[:max_count]
     
     def get_ad_text(self, folder_path):
-        """
-        Извлекает текст объявления из info.txt
-        """
+        """Извлекает текст объявления из info.txt"""
         info_path = os.path.join(folder_path, 'info.txt')
         if not os.path.exists(info_path):
             return None
@@ -73,19 +97,13 @@ class Publisher:
             else:
                 text = content.strip()
             
-            # Обрезаем слишком длинный текст (MAX API может не принять)
-            if len(text) > 4000:
-                text = text[:4000] + "..."
-            
             return text
         except Exception as e:
             logger.error(f"❌ Ошибка чтения info.txt: {e}")
             return None
     
     def get_ad_metadata(self, folder_path):
-        """
-        Извлекает метаданные из info.txt для отчета
-        """
+        """Извлекает метаданные из info.txt"""
         info_path = os.path.join(folder_path, 'info.txt')
         if not os.path.exists(info_path):
             return {}
@@ -113,82 +131,13 @@ class Publisher:
         return metadata
     
     def read_image_data(self, image_path):
-        """
-        Читает изображение без сжатия (клиент уже сжал)
-        """
+        """Читает изображение"""
         try:
             with open(image_path, 'rb') as f:
                 return f.read()
         except Exception as e:
             logger.error(f"❌ Ошибка чтения {image_path}: {e}")
             return None
-    
-    def _publish_ad_safe(self, user_id, folder_path, folder_name):
-        """
-        Безопасная публикация с таймаутом
-        """
-        try:
-            # 1. Получаем chat_id из названия папки
-            chat_id = self.extract_chat_id(folder_name)
-            if not chat_id:
-                return False, f"Не удалось извлечь ID чата из {folder_name}", None
-            
-            # 2. Получаем текст объявления
-            text = self.get_ad_text(folder_path)
-            if not text:
-                return False, f"Не найден info.txt в {folder_name}", chat_id
-            
-            # 3. Получаем до 3 изображений (уже сжатые клиентом)
-            image_paths = self.get_sorted_images(folder_path, max_count=3)
-            
-            # 4. Отправляем в MAX API
-            if image_paths:
-                # Отправляем с фото
-                success = self._send_message_with_photos(chat_id, text, image_paths)
-            else:
-                # Отправляем только текст
-                success = self.api.send_message_to_chat(chat_id, text)
-            
-            if not success:
-                return False, f"Не удалось отправить в чат {chat_id}", chat_id
-            
-            # 5. Сохраняем метаданные в БД
-            metadata = self.get_ad_metadata(folder_path)
-            self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, time.time())
-            
-            # 6. Записываем в публикации
-            self.db.add_publication(user_id, folder_name, chat_id)
-            
-            return True, f"✅ Опубликовано: {folder_name} в чат {chat_id}", chat_id
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка публикации {folder_name}: {e}")
-            return False, str(e), None
-    
-    def publish_ad_with_timeout(self, user_id, folder_path, folder_name):
-        """
-        Публикует с таймаутом. Если превышает 60 сек - пропускаем.
-        """
-        result = [None, None, None]  # success, message, chat_id
-        
-        def _publish():
-            success, message, chat_id = self._publish_ad_safe(user_id, folder_path, folder_name)
-            result[0] = success
-            result[1] = message
-            result[2] = chat_id
-        
-        # Запускаем в отдельном потоке с таймаутом
-        thread = threading.Thread(target=_publish)
-        thread.daemon = True
-        thread.start()
-        thread.join(timeout=self.FOLDER_TIMEOUT)
-        
-        if thread.is_alive():
-            # Превышен таймаут - пропускаем папку
-            logger.warning(f"⏰ Таймаут {self.FOLDER_TIMEOUT}с при обработке {folder_name}")
-            return False, f"⏰ Таймаут обработки папки {folder_name}", None
-        
-        return result[0], result[1], result[2]
     
     def _send_message_with_photos(self, chat_id, text, image_paths):
         """
@@ -199,7 +148,7 @@ class Publisher:
                 logger.error("❌ Токен не установлен")
                 return False
             
-            # Подготавливаем файлы для отправки (без сжатия!)
+            # Подготавливаем файлы
             files = []
             for img_path in image_paths:
                 img_data = self.read_image_data(img_path)
@@ -207,29 +156,24 @@ class Publisher:
                     filename = os.path.basename(img_path)
                     files.append(('file', (filename, img_data, 'image/jpeg')))
             
-            if not files:
-                # Если нет фото - отправляем только текст
-                return self.api.send_message_to_chat(chat_id, text)
-            
             # Формируем данные
             data = {
                 "chat_id": chat_id,
-                "text": text,
-                "format": "markdown"
+                "text": text
             }
             
-            # Отправляем через requests (multipart/form-data)
+            # Отправляем
             response = requests.post(
                 f"{self.api.base_url}/messages",
                 headers={"Authorization": self.api.token},
                 data=data,
                 files=files,
-                timeout=60,  # Таймаут запроса 60 сек
+                timeout=60,
                 verify=False
             )
             
             if response.status_code == 200:
-                logger.info(f"✅ Сообщение с фото отправлено в чат {chat_id}")
+                logger.info(f"✅ Сообщение отправлено в чат {chat_id}")
                 return True
             else:
                 logger.error(f"❌ Ошибка отправки: {response.status_code} - {response.text[:200]}")
@@ -239,31 +183,105 @@ class Publisher:
             logger.error(f"❌ Таймаут отправки в чат {chat_id}")
             return False
         except Exception as e:
-            logger.error(f"❌ Ошибка отправки сообщения с фото: {e}")
+            logger.error(f"❌ Ошибка отправки: {e}")
             return False
+    
+    def _send_message_only(self, chat_id, text):
+        """Отправляет только текст"""
+        try:
+            if not self.api.token:
+                return False
+            
+            payload = {
+                "chat_id": chat_id,
+                "text": text,
+                "format": "markdown"
+            }
+            
+            response = requests.post(
+                f"{self.api.base_url}/messages",
+                headers={
+                    "Authorization": self.api.token,
+                    "Content-Type": "application/json"
+                },
+                json=payload,
+                timeout=30,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                logger.info(f"✅ Текст отправлен в чат {chat_id}")
+                return True
+            else:
+                logger.error(f"❌ Ошибка отправки текста: {response.status_code} - {response.text[:200]}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки текста: {e}")
+            return False
+    
+    def publish_ad(self, user_id, folder_path, folder_name):
+        """
+        Публикует одно объявление
+        Извлекает chat_id из названия папки
+        """
+        try:
+            # 1. Извлекаем chat_id из названия папки
+            chat_id = self.extract_chat_id(folder_name)
+            if not chat_id:
+                return False, f"Не удалось извлечь ID чата из {folder_name}", None
+            
+            # 2. Извлекаем номер папки (для логов)
+            folder_num = self.extract_folder_number(folder_name) or folder_name
+            
+            logger.info(f"📤 Публикация папки #{folder_num} в чат {chat_id}")
+            
+            # 3. Получаем текст
+            text = self.get_ad_text(folder_path)
+            if not text:
+                return False, f"Не найден info.txt в {folder_name}", chat_id
+            
+            # 4. Получаем изображения (до 3)
+            image_paths = self.get_sorted_images(folder_path, max_count=3)
+            
+            # 5. Отправляем
+            if image_paths:
+                success = self._send_message_with_photos(chat_id, text, image_paths)
+            else:
+                success = self._send_message_only(chat_id, text)
+            
+            if not success:
+                return False, f"Не удалось отправить в чат {chat_id}", chat_id
+            
+            # 6. Сохраняем метаданные
+            metadata = self.get_ad_metadata(folder_path)
+            self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, time.time())
+            self.db.add_publication(user_id, folder_name, chat_id)
+            
+            return True, f"✅ Папка #{folder_num} опубликована в чат {chat_id}", chat_id
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка публикации {folder_name}: {e}")
+            return False, str(e), None
     
     def start(self, user_id):
         """Запускает публикацию для пользователя"""
         try:
-            # Проверяем, не запущена ли уже публикация
             if self.active_publishes.get(user_id, False):
-                logger.warning(f"⚠️ Публикация уже запущена для пользователя {user_id}")
-                self.api.send_message(user_id, "⚠️ Публикация уже запущена. Дождитесь завершения.")
+                self.api.send_message(user_id, "⚠️ Публикация уже запущена.")
                 return False
             
             logger.info(f"🚀 Запуск публикации для пользователя {user_id}")
             self.active_publishes[user_id] = True
-            self.uploaded_folders[user_id] = set()
             
-            # Получаем фиксированную папку ads/
             ads_folder = self.fm.get_ads_folder(user_id)
             
             if not os.path.exists(ads_folder):
-                self.api.send_message(user_id, "❌ Нет загруженных объявлений для публикации.")
+                self.api.send_message(user_id, "❌ Нет загруженных объявлений.")
                 self.active_publishes[user_id] = False
                 return False
             
-            # Ищем все подпапки с info.txt
+            # Собираем все папки с info.txt
             subfolders = []
             for root, dirs, files in os.walk(ads_folder):
                 if 'info.txt' in files:
@@ -272,91 +290,91 @@ class Publisher:
                         subfolders.append(rel_path)
             
             if not subfolders:
-                self.api.send_message(user_id, "❌ Нет папок с объявлениями для публикации.")
+                self.api.send_message(user_id, "❌ Нет папок с объявлениями.")
                 self.active_publishes[user_id] = False
                 return False
             
-            total_folders = len(subfolders)
-            self.api.send_message(user_id, f"📢 Начинаю публикацию {total_folders} объявлений...")
+            # Группируем папки по chat_id для статистики
+            chat_groups = {}
+            for folder in subfolders:
+                chat_id = self.extract_chat_id(folder)
+                if chat_id:
+                    if chat_id not in chat_groups:
+                        chat_groups[chat_id] = []
+                    chat_groups[chat_id].append(folder)
+            
+            total = len(subfolders)
+            chat_count = len(chat_groups)
+            
+            # Отправляем информацию о начале публикации
+            info_text = f"📢 Начинаю публикацию {total} объявлений\n"
+            info_text += f"📋 Чатов: {chat_count}\n"
+            for chat_id, folders in chat_groups.items():
+                info_text += f"  • {chat_id}: {len(folders)} объявлений\n"
+            
+            self.api.send_message(user_id, info_text)
             
             published = 0
             failed = 0
-            timeout = 0
             results = []
             
             for idx, folder_name in enumerate(subfolders):
-                # Проверяем состояние
                 if not self.active_publishes.get(user_id, False):
-                    logger.info(f"⏹️ Публикация остановлена пользователем {user_id}")
+                    logger.info(f"⏹️ Остановлено пользователем {user_id}")
                     break
                 
                 folder_path = os.path.join(ads_folder, folder_name)
+                logger.info(f"📤 [{idx+1}/{total}] Обработка: {folder_name}")
                 
-                # Логируем прогресс
-                logger.info(f"📤 [{idx+1}/{total_folders}] Обработка: {folder_name}")
-                
-                # Публикуем с таймаутом
-                success, message, chat_id = self.publish_ad_with_timeout(user_id, folder_path, folder_name)
+                success, message, chat_id = self.publish_ad(user_id, folder_path, folder_name)
                 
                 if success:
                     published += 1
-                    self.uploaded_folders[user_id].add(folder_name)
-                    results.append(f"✅ {folder_name} -> {chat_id}")
-                    logger.info(f"✅ [{idx+1}/{total_folders}] {message}")
+                    results.append(f"✅ {folder_name}")
+                    logger.info(f"✅ [{idx+1}/{total}] {message}")
                 else:
-                    if "Таймаут" in message:
-                        timeout += 1
-                    else:
-                        failed += 1
+                    failed += 1
                     results.append(f"❌ {folder_name}: {message}")
-                    logger.warning(f"❌ [{idx+1}/{total_folders}] {message}")
+                    logger.warning(f"❌ [{idx+1}/{total}] {message}")
                 
-                # Задержка между постами (2 сек)
-                time.sleep(2)
-                
-                # Обновляем статус каждые 5 папок
-                if (idx + 1) % 5 == 0:
-                    self.api.send_message(
-                        user_id, 
-                        f"📊 Прогресс: {idx+1}/{total_folders}\n"
-                        f"✅ Успешно: {published}\n"
-                        f"❌ Ошибок: {failed}\n"
-                        f"⏰ Таймаутов: {timeout}"
-                    )
+                time.sleep(2)  # Задержка между постами
             
-            # Завершаем публикацию
             self.active_publishes[user_id] = False
             
-            # Отправляем финальный результат
+            # Отправляем результат
             result_text = f"📊 **Результат публикации:**\n\n"
-            result_text += f"📁 Всего папок: {total_folders}\n"
+            result_text += f"📁 Всего папок: {total}\n"
             result_text += f"✅ Успешно: {published}\n"
             if failed > 0:
                 result_text += f"❌ Ошибок: {failed}\n"
-            if timeout > 0:
-                result_text += f"⏰ Таймаутов: {timeout}\n"
             
-            # Показываем первые 5 результатов
+            # Статистика по чатам
+            if chat_count > 1:
+                result_text += f"\n📋 По чатам:\n"
+                for chat_id, folders in chat_groups.items():
+                    # Считаем сколько опубликовано из этой группы
+                    published_in_chat = sum(1 for f in folders if f in [r.replace('✅ ', '').replace('❌ ', '').split(':')[0] for r in results if '✅' in r])
+                    result_text += f"  • {chat_id}: {published_in_chat}/{len(folders)}\n"
+            
             if results:
-                result_text += f"\n📋 Детали:\n" + "\n".join(results[:5])
-                if len(results) > 5:
-                    result_text += f"\n... и еще {len(results) - 5} объявлений"
+                result_text += f"\n📋 Детали:\n" + "\n".join(results[:10])
+                if len(results) > 10:
+                    result_text += f"\n... и еще {len(results) - 10} объявлений"
             
             self.api.send_message(user_id, result_text)
             
-            # Если есть опубликованные - предлагаем отчет
             if published > 0:
                 self.api.send_message(user_id, 
                     f"📊 **Отчет готов!**\n\n"
                     f"🔗 Скачать отчет: https://maxbot.bothost.tech/report/{user_id}"
                 )
             
-            # Очищаем память - удаляем папку ads/
+            # Очищаем папку ads/
             try:
                 import shutil
                 if os.path.exists(ads_folder):
                     shutil.rmtree(ads_folder)
-                    logger.info(f"🗑️ Папка ads/ удалена для пользователя {user_id}")
+                    logger.info(f"🗑️ Папка ads/ удалена")
             except Exception as e:
                 logger.error(f"❌ Ошибка удаления ads/: {e}")
             
@@ -365,22 +383,21 @@ class Publisher:
         except Exception as e:
             logger.error(f"❌ Ошибка публикации: {e}")
             import traceback
-            logger.error(traceback.format_exc())
+            traceback.print_exc()
             self.active_publishes[user_id] = False
-            self.api.send_message(user_id, f"❌ Ошибка публикации: {str(e)[:200]}")
+            self.api.send_message(user_id, f"❌ Ошибка: {str(e)[:200]}")
             return False
     
     def stop(self, user_id):
-        """Останавливает публикацию для конкретного пользователя"""
+        """Останавливает публикацию"""
         if self.active_publishes.get(user_id, False):
             self.active_publishes[user_id] = False
-            logger.info(f"⏹️ Публикация остановлена для пользователя {user_id}")
+            logger.info(f"⏹️ Публикация остановлена для {user_id}")
             self.api.send_message(user_id, "⏹️ Публикация остановлена.")
             return True
         else:
-            self.api.send_message(user_id, "ℹ️ Нет активной публикации для остановки.")
+            self.api.send_message(user_id, "ℹ️ Нет активной публикации.")
             return False
     
     def is_running(self, user_id):
-        """Проверяет, запущена ли публикация для пользователя"""
         return self.active_publishes.get(user_id, False)
