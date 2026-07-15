@@ -20,17 +20,15 @@ class Publisher:
         self.STOP_FLAG = {}
 
     def extract_chat_id(self, folder_name):
-        """Извлекает chat_id из названия папки (возвращает int)"""
+        """Извлекает chat_id из названия папки"""
         match = re.search(r'-\s*(\d+)', folder_name)
         if match:
             chat_id = match.group(1)
             if len(chat_id) >= 10:
-                return int(chat_id)
-        
+                return chat_id
         match = re.search(r'(\d{10,})$', folder_name)
         if match:
-            return int(match.group(1))
-        
+            return match.group(1)
         return None
 
     def _upload_file_to_max(self, image_data, user_id):
@@ -39,7 +37,7 @@ class Publisher:
             if self.STOP_FLAG.get(user_id, False):
                 return None
 
-            # Получаем URL для загрузки
+            # 1. Получаем URL для загрузки
             response = requests.post(
                 f"{self.api.base_url}/uploads",
                 headers={"Authorization": self.api.token},
@@ -59,9 +57,7 @@ class Publisher:
                 logger.error(f"❌ Не получен URL: {upload_data}")
                 return None
             
-            # Извлекаем байты из разных форматов
-            image_bytes = None
-            
+            # 2. Извлекаем байты из разных форматов
             if isinstance(image_data, dict):
                 if 'data' in image_data:
                     img_data = image_data['data']
@@ -71,7 +67,6 @@ class Publisher:
                             img_data = value
                             break
                     else:
-                        logger.error(f"❌ В словаре нет данных: {image_data.keys()}")
                         return None
             else:
                 img_data = image_data
@@ -81,13 +76,10 @@ class Publisher:
             elif isinstance(img_data, (bytes, bytearray)):
                 image_bytes = bytes(img_data)
             else:
-                logger.error(f"❌ Неподдерживаемый тип данных: {type(img_data)}")
                 return None
             
-            # Отправляем файл
-            files = {
-                'data': ('image.jpg', image_bytes, 'image/jpeg')
-            }
+            # 3. Отправляем файл
+            files = {'data': ('image.jpg', image_bytes, 'image/jpeg')}
             
             upload_response = requests.post(
                 upload_url,
@@ -102,9 +94,8 @@ class Publisher:
             
             upload_result = upload_response.json()
             
-            # Извлекаем токен
+            # 4. Извлекаем токен
             token = None
-            
             if 'photos' in upload_result and isinstance(upload_result['photos'], dict):
                 for photo_data in upload_result['photos'].values():
                     if isinstance(photo_data, dict) and 'token' in photo_data:
@@ -118,8 +109,6 @@ class Publisher:
                 logger.error(f"❌ Не получен токен: {upload_result}")
                 return None
             
-            logger.info(f"✅ Файл загружен, токен: {token[:20]}...")
-            
             time.sleep(1)
             return token
             
@@ -128,12 +117,15 @@ class Publisher:
             return None
 
     def _send_to_chat(self, chat_id, text, image_tokens):
-        """Отправляет сообщение в чат"""
+        """
+        Отправляет сообщение в чат.
+        chat_id передается в URL параметре (рабочий способ по результатам диагностики).
+        """
         try:
             if not self.api.token:
-                logger.error("❌ Токен не установлен")
                 return False
             
+            # Формируем вложения
             attachments = []
             for token in image_tokens[:6]:
                 attachments.append({
@@ -141,8 +133,8 @@ class Publisher:
                     "payload": {"token": token}
                 })
             
+            # Формируем payload (без chat_id в теле!)
             payload = {
-                "chat_id": chat_id,
                 "text": text,
                 "format": "markdown"
             }
@@ -150,10 +142,9 @@ class Publisher:
             if attachments:
                 payload["attachments"] = attachments
             
-            logger.info(f"📤 Отправка в чат {chat_id} с {len(attachments)} фото")
-            
+            # chat_id передаем в URL параметре
             response = requests.post(
-                f"{self.api.base_url}/messages",
+                f"{self.api.base_url}/messages?chat_id={chat_id}",
                 headers={
                     "Authorization": self.api.token,
                     "Content-Type": "application/json"
@@ -167,7 +158,7 @@ class Publisher:
                 logger.info(f"✅ Сообщение отправлено в чат {chat_id}")
                 return True
             else:
-                logger.error(f"❌ Ошибка: {response.status_code} - {response.text[:200]}")
+                logger.error(f"❌ Ошибка: {response.status_code} - {response.text}")
                 return False
                 
         except Exception as e:
@@ -175,10 +166,9 @@ class Publisher:
             return False
 
     def _send_to_user(self, user_id, text, image_tokens):
-        """Отправляет сообщение в личные сообщения"""
+        """Отправляет сообщение в личные сообщения пользователя"""
         try:
             if not self.api.token:
-                logger.error("❌ Токен не установлен")
                 return False
             
             attachments = []
@@ -197,8 +187,6 @@ class Publisher:
             if attachments:
                 payload["attachments"] = attachments
             
-            logger.info(f"📤 Отправка пользователю {user_id} с {len(attachments)} фото")
-            
             response = requests.post(
                 f"{self.api.base_url}/messages",
                 headers={
@@ -214,7 +202,7 @@ class Publisher:
                 logger.info(f"✅ Сообщение отправлено пользователю {user_id}")
                 return True
             else:
-                logger.error(f"❌ Ошибка: {response.status_code} - {response.text[:200]}")
+                logger.error(f"❌ Ошибка: {response.status_code} - {response.text}")
                 return False
                 
         except Exception as e:
@@ -243,7 +231,10 @@ class Publisher:
 
     def publish_single_folder(self, user_id, folder_name, ad_text, metadata_text, images_data):
         """
-        Обрабатывает ОДНУ папку
+        Обрабатывает ОДНУ папку:
+        1. Загружает изображения через POST /uploads
+        2. Отправляет сообщение с текстом и фото в чат
+        3. Сохраняет метаданные в БД
         """
         try:
             if self.STOP_FLAG.get(user_id, False):
@@ -252,6 +243,7 @@ class Publisher:
             
             start_time = time.time()
             
+            # 1. Извлекаем chat_id
             chat_id = self.extract_chat_id(folder_name)
             if not chat_id:
                 logger.error(f"❌ Не удалось извлечь chat_id из: {folder_name}")
@@ -259,7 +251,7 @@ class Publisher:
             
             logger.info(f"📤 Извлечен chat_id: {chat_id}")
             
-            # Загружаем изображения
+            # 2. Загружаем изображения (максимум 3)
             image_tokens = []
             max_images = min(len(images_data), 3) if isinstance(images_data, list) else 0
             
@@ -285,13 +277,14 @@ class Publisher:
             
             logger.info(f"📦 Загружено {len(image_tokens)} из {max_images} изображений")
             
-            # Отправляем сообщение
+            # 3. Отправляем сообщение в чат
             if image_tokens:
                 success = self._send_to_chat(chat_id, ad_text, image_tokens)
             else:
                 logger.info(f"📤 Отправка только текста в чат {chat_id}")
                 success = self._send_to_chat(chat_id, ad_text, [])
             
+            # Если не удалось отправить в чат, пробуем в личные сообщения
             if not success:
                 logger.warning("⚠️ Отправка в чат не удалась, пробуем в личные сообщения...")
                 if image_tokens:
@@ -302,7 +295,7 @@ class Publisher:
             if not success:
                 return False, "Не удалось отправить сообщение"
             
-            # Сохраняем метаданные
+            # 4. Сохраняем метаданные для отчета
             metadata = self._parse_metadata(metadata_text)
             self.db.save_ad_metadata(user_id, folder_name, f"-{chat_id}", metadata, time.time())
             self.db.add_publication(user_id, folder_name, f"-{chat_id}")
@@ -316,6 +309,7 @@ class Publisher:
             return False, str(e)
 
     def stop(self, user_id):
+        """Останавливает публикацию и удаляет все файлы пользователя"""
         logger.info(f"⏹️ Остановка публикации для пользователя {user_id}")
         self.STOP_FLAG[user_id] = True
         
