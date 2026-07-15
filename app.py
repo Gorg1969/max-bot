@@ -774,7 +774,18 @@ def diagnostic():
     except Exception as e:
         result["test_results"]["subscriptions"] = {"error": str(e)}
     
-    # 5. Форматируем вывод
+    # 5. Определяем рабочий формат
+    working_format = "НЕ НАЙДЕН"
+    for name, data in result["test_results"].items():
+        if data.get("ok") and "user_id" in name:
+            working_format = name
+            break
+    for name, data in result["test_results"].items():
+        if data.get("ok") and "chat_id" in name:
+            working_format = name
+            break
+    
+    # 6. Формируем HTML
     html = """
     <html>
     <head>
@@ -790,8 +801,6 @@ def diagnostic():
             .status.success { background: #d4edda; color: #155724; }
             .status.fail { background: #f8d7da; color: #721c24; }
             .summary { background: #e8f4f8; padding: 15px; border-radius: 8px; }
-            .working { color: #28a745; font-weight: bold; }
-            .not-working { color: #dc3545; font-weight: bold; }
         </style>
     </head>
     <body>
@@ -800,9 +809,16 @@ def diagnostic():
         <div class="card summary">
             <h2>📋 Краткий итог</h2>
             <p><span class="status success">✅</span> Бот запущен и отвечает</p>
-            <p><span class="status """ + ("success" if result["test_results"].get("token_check", {}).get("ok") else "fail") + """">""" + 
-               ("✅" if result["test_results"].get("token_check", {}).get("ok") else "❌") + """</span> Токен """ + 
-               ("работает" if result["test_results"].get("token_check", {}).get("ok") else "НЕ работает") + """</p>
+    """
+    
+    # Добавляем статус токена
+    token_ok = result["test_results"].get("token_check", {}).get("ok", False)
+    html += '<p><span class="status ' + ("success" if token_ok else "fail") + '">' + ("✅" if token_ok else "❌") + '</span> Токен ' + ("работает" if token_ok else "НЕ работает") + '</p>'
+    
+    # Добавляем рабочий формат
+    html += '<p><strong>Рабочий формат:</strong> <code>' + working_format + '</code></p>'
+    
+    html += """
         </div>
         
         <div class="card">
@@ -814,30 +830,19 @@ def diagnostic():
         </div>
         
         <div class="card">
-            <h2>📤 Тестовые отправки</h2>
+            <h2>📤 Результаты тестов</h2>
     """
     
     for name, data in result["test_results"].items():
         status_class = "success" if data.get("ok") else "fail"
         status_text = "✅ УСПЕШНО" if data.get("ok") else "❌ ОШИБКА"
-        html += f"""
+        html += """
             <div style="border:1px solid #ddd; padding:10px; margin:10px 0; border-radius:5px;">
-                <strong>{name}</strong>
-                <span class="status {status_class}">{status_text}</span>
-                <pre>{json.dumps(data, indent=2, ensure_ascii=False)}</pre>
+                <strong>""" + name + """</strong>
+                <span class="status """ + status_class + """">""" + status_text + """</span>
+                <pre>""" + json.dumps(data, indent=2, ensure_ascii=False) + """</pre>
             </div>
         """
-    
-    # Определяем рабочий формат
-    working_format = "НЕ НАЙДЕН"
-    for name, data in result["test_results"].items():
-        if data.get("ok") and "user_id" in name:
-            working_format = name
-            break
-    for name, data in result["test_results"].items():
-        if data.get("ok") and "chat_id" in name:
-            working_format = name
-            break
     
     html += """
         </div>
@@ -845,7 +850,6 @@ def diagnostic():
         <div class="card">
             <h2>💡 Рекомендации</h2>
             <ul>
-                <li><strong>Рабочий формат:</strong> <code>""" + working_format + """</code></li>
                 <li>Если <strong>token_check</strong> не 200 → проверьте токен</li>
                 <li>Если <strong>upload_check</strong> не 200 → проверьте права бота</li>
                 <li>Если какой-то <strong>тест отправки</strong> вернул 200 → используйте этот формат</li>
