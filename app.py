@@ -79,7 +79,7 @@ api = APIClient()
 publisher = Publisher(api, fm, db)
 report_gen = ReportGenerator(fm, db)
 
-# ========== СТАРЫЙ ИНТЕРФЕЙС (АДАПТИРОВАННЫЙ) ==========
+# ========== HTML СТРАНИЦА ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -135,7 +135,8 @@ UPLOAD_PAGE = """
             &nbsp;&nbsp;• Текст ДО разделителя — публикуется в чат<br>
             &nbsp;&nbsp;• Текст ПОСЛЕ разделителя — идет в отчет<br>
             5️⃣ Перетащите головную папку в поле ниже<br>
-            6️⃣ Каждая папка отправляется отдельным запросом
+            6️⃣ Фото преобразуются в бинарный код на клиенте<br>
+            7️⃣ Каждая папка отправляется отдельным запросом
         </div>
         
         <div class="drop-zone" id="dropZone">
@@ -175,6 +176,7 @@ UPLOAD_PAGE = """
         const userId = urlParams.get('user_id') || 151296248;
         
         let selectedFiles = [];
+        let isProcessing = false;
         
         const dropZone = document.getElementById('dropZone');
         const folderInput = document.getElementById('folderInput');
@@ -288,6 +290,59 @@ UPLOAD_PAGE = """
             window.open(`/report/${userId}`, '_blank');
         }
 
+        // ====== ПОДГОТОВКА ДАННЫХ ДЛЯ ОДНОЙ ПАПКИ (НА КЛИЕНТЕ) ======
+        async function prepareFolderData(folderName, files) {
+            // Находим текстовый файл
+            const txtFile = files.find(f => f.name === 'info' || f.name.endsWith('.txt'));
+            if (!txtFile) {
+                return null;
+            }
+            
+            // Читаем текст
+            let fullText = await txtFile.text();
+            
+            // Разделяем на текст объявления и метаданные
+            let adText = fullText;
+            let metadataText = '';
+            
+            if (fullText.includes('#изъятая')) {
+                const parts = fullText.split('#изъятая');
+                adText = parts[0].trim();
+                metadataText = parts[1] ? parts[1].trim() : '';
+            }
+            
+            // Находим изображения (до 3) и преобразуем в бинарный код НА КЛИЕНТЕ
+            const imageFiles = files
+                .filter(f => f.type && f.type.startsWith('image/'))
+                .slice(0, 3);
+            
+            const images = [];
+            for (const img of imageFiles) {
+                try {
+                    // Читаем файл как ArrayBuffer (бинарные данные)
+                    const arrayBuffer = await img.arrayBuffer();
+                    // Преобразуем в Uint8Array для отправки
+                    const uint8Array = new Uint8Array(arrayBuffer);
+                    images.push({
+                        name: img.name,
+                        data: Array.from(uint8Array), // Преобразуем в обычный массив для JSON
+                        type: img.type || 'image/jpeg'
+                    });
+                    addLog(`✅ Фото ${img.name} преобразовано в бинарный код (${uint8Array.length} байт)`);
+                } catch (e) {
+                    addLog(`⚠️ Ошибка чтения ${img.name}: ${e.message}`);
+                }
+            }
+            
+            return {
+                folderName: folderName,
+                adText: adText,
+                metadataText: metadataText,
+                fullText: fullText,
+                images: images
+            };
+        }
+
         // ====== ОСНОВНАЯ ФУНКЦИЯ ======
         async function uploadFolder() {
             if (selectedFiles.length === 0) {
@@ -295,20 +350,27 @@ UPLOAD_PAGE = """
                 return;
             }
             
-            showStatus('info', '⏳ Подготовка данных...');
+            if (isProcessing) {
+                addLog('⚠️ Обработка уже выполняется, подождите...');
+                return;
+            }
+            
+            isProcessing = true;
+            
+            showStatus('info', '⏳ Подготовка данных на клиенте...');
             progressBar.style.display = 'block';
             progress.style.width = '0%';
             progress.textContent = '0%';
             logDiv.textContent = '';
-            addLog('🚀 Начинаем загрузку...');
-            addLog(`📁 Файлов: ${selectedFiles.length}`);
+            addLog('🚀 Начинаем обработку...');
+            addLog('📱 Преобразование фото в бинарный код на клиенте...');
             
             // Группируем файлы по папкам
             const folders = {};
             selectedFiles.forEach(file => {
                 const pathParts = file.webkitRelativePath.split('/');
                 if (pathParts.length >= 2) {
-                    const folderName = pathParts[0] + '/' + parts[1];
+                    const folderName = pathParts[0] + '/' + pathParts[1];
                     if (!folders[folderName]) {
                         folders[folderName] = [];
                     }
@@ -319,11 +381,12 @@ UPLOAD_PAGE = """
             const folderNames = Object.keys(folders);
             const totalFolders = folderNames.length;
             
-            showStatus('info', `⏳ Загрузка ${totalFolders} папок...`);
-            addLog(`📦 Загрузка ${totalFolders} папок`);
+            addLog(`📁 Найдено ${totalFolders} папок`);
+            showStatus('info', `⏳ Подготовка 0/${totalFolders} папок...`);
             
             let uploadedFolders = 0;
-            let failedChunks = 0;
+            let failedFolders = 0;
+            const results = [];
             
             for (let i = 0; i < folderNames.length; i++) {
                 const folderName = folderNames[i];
@@ -331,21 +394,24 @@ UPLOAD_PAGE = """
                 
                 const percent = Math.round((i / totalFolders) * 100);
                 progress.style.width = percent + '%';
-                progress.textContent = percent + '%';
-                showStatus('info', `⏳ Обработка ${i+1}/${totalFolders}: ${folderName}`);
+                progress.textContent = `${i}/${totalFolders}`;
+                showStatus('info', `⏳ Подготовка ${i+1}/${totalFolders}: ${folderName}`);
                 
                 try {
-                    // Подготавливаем данные для папки
+                    // ПОДГОТАВЛИВАЕМ ДАННЫЕ НА КЛИЕНТЕ (включая бинарные фото)
+                    addLog(`📤 Подготовка ${i+1}/${totalFolders}: ${folderName}...`);
                     const folderData = await prepareFolderData(folderName, files);
                     
                     if (!folderData) {
                         addLog(`⚠️ Пропускаем ${folderName}: нет текстового файла`);
-                        failedChunks++;
+                        failedFolders++;
+                        results.push(`❌ ${folderName}: нет текстового файла`);
                         continue;
                     }
                     
-                    addLog(`📤 Отправка ${i+1}/${totalFolders}: ${folderName}...`);
+                    addLog(`📤 Отправка ${i+1}/${totalFolders}: ${folderName} (${folderData.images.length} фото)`);
                     
+                    // ОТПРАВЛЯЕМ НА СЕРВЕР (1 папка = 1 запрос)
                     const response = await fetch('/publish_folder', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -360,73 +426,46 @@ UPLOAD_PAGE = """
                     if (result.success) {
                         uploadedFolders++;
                         addLog(`✅ ${folderName}: опубликовано`);
+                        results.push(`✅ ${folderName}: успешно`);
                     } else {
-                        failedChunks++;
+                        failedFolders++;
                         addLog(`❌ ${folderName}: ${result.message}`);
+                        results.push(`❌ ${folderName}: ${result.message}`);
                     }
                     
                 } catch (error) {
-                    failedChunks++;
+                    failedFolders++;
                     addLog(`❌ ${folderName}: ошибка - ${error.message}`);
+                    results.push(`❌ ${folderName}: ${error.message}`);
                 }
                 
                 await new Promise(r => setTimeout(r, 500));
             }
             
             progress.style.width = '100%';
-            progress.textContent = '100%';
+            progress.textContent = `${totalFolders}/${totalFolders}`;
             
-            if (failedChunks === 0) {
+            if (failedFolders === 0) {
                 showStatus('success', `✅ Загружено ${uploadedFolders} папок!`);
                 addLog(`✅ ВСЕ ${uploadedFolders} папок загружены!`);
             } else {
-                showStatus('warning', `⚠️ Загружено ${uploadedFolders} папок, ${failedChunks} с ошибками`);
-                addLog(`⚠️ Загружено ${uploadedFolders} папок, ${failedChunks} с ошибками`);
+                showStatus('warning', `⚠️ Загружено ${uploadedFolders} папок, ${failedFolders} с ошибками`);
+                addLog(`⚠️ Загружено ${uploadedFolders} папок, ${failedFolders} с ошибками`);
+            }
+            
+            if (results.length > 0) {
+                addLog('\\n📋 Детали:');
+                results.slice(0, 20).forEach(r => addLog(r));
+                if (results.length > 20) {
+                    addLog(`... и еще ${results.length - 20} папок`);
+                }
             }
             
             if (uploadedFolders > 0) {
                 addLog(`\\n📊 Скачать отчет: /report/${userId}`);
             }
-        }
-
-        // ====== ПОДГОТОВКА ДАННЫХ ДЛЯ ОДНОЙ ПАПКИ ======
-        async function prepareFolderData(folderName, files) {
-            const txtFile = files.find(f => f.name === 'info' || f.name.endsWith('.txt'));
-            if (!txtFile) {
-                return null;
-            }
             
-            let fullText = await txtFile.text();
-            let adText = fullText;
-            let metadataText = '';
-            
-            if (fullText.includes('#изъятая')) {
-                const parts = fullText.split('#изъятая');
-                adText = parts[0].trim();
-                metadataText = parts[1] ? parts[1].trim() : '';
-            }
-            
-            const imageFiles = files.filter(f => f.type && f.type.startsWith('image/')).slice(0, 3);
-            const images = [];
-            for (const img of imageFiles) {
-                try {
-                    const arrayBuffer = await img.arrayBuffer();
-                    images.push({
-                        name: img.name,
-                        data: Array.from(new Uint8Array(arrayBuffer))
-                    });
-                } catch (e) {
-                    addLog(`⚠️ Ошибка чтения ${img.name}: ${e.message}`);
-                }
-            }
-            
-            return {
-                folderName: folderName,
-                adText: adText,
-                metadataText: metadataText,
-                fullText: fullText,
-                images: images
-            };
+            isProcessing = false;
         }
     </script>
 </body>
@@ -506,11 +545,17 @@ def webhook():
                 f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
                 "📊 **Получить отчет:**\n"
                 f"🔗 https://maxbot.bothost.tech/report/{user_id}\n\n"
+                "⏹ **Остановить публикацию:** `/stop`\n\n"
                 "📋 **Инструкция:**\n"
                 "1. Подготовьте папки с объявлениями\n"
                 "2. Используйте разделитель #изъятая\n"
-                "3. Фото до 3 шт на объявление"
+                "3. Фото до 3 шт на объявление\n"
+                "4. Фото преобразуются в бинарный код на клиенте"
             )
+            return jsonify({"ok": True}), 200
+        
+        if text and text.strip() == '/stop':
+            api.send_message(user_id, "⏹️ Публикация остановлена.")
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/report':
