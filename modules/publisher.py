@@ -20,31 +20,36 @@ class Publisher:
         self.STOP_FLAG = {}
 
     def extract_chat_id(self, folder_name):
-        """Извлекает chat_id из названия папки"""
-        # Ищем ID после дефиса с пробелом или в конце строки
+        """
+        Извлекает chat_id из названия папки.
+        Для групповых чатов ID должен быть с дефисом: -123456789
+        """
+        # Ищем ID после дефиса с пробелом: "Название -123456789"
         match = re.search(r'-\s*(\d+)', folder_name)
         if match:
             chat_id = match.group(1)
-            # Проверяем, что это действительно ID (10+ цифр)
             if len(chat_id) >= 10:
-                return chat_id  # Возвращаем без дефиса
+                # ВОЗВРАЩАЕМ С ДЕФИСОМ!
+                return f"-{chat_id}"
+        
+        # Ищем ID в конце строки: "Название 123456789"
         match = re.search(r'(\d{10,})$', folder_name)
         if match:
-            return match.group(1)  # Возвращаем без дефиса
+            chat_id = match.group(1)
+            # ВОЗВРАЩАЕМ С ДЕФИСОМ!
+            return f"-{chat_id}"
+        
         return None
 
     def _upload_file_to_max(self, image_data, user_id):
         """
         Загружает одно изображение через POST /uploads и возвращает токен
-        Согласно документации: https://dev.max.ru/docs-api/methods/POST/uploads
         """
         try:
-            # Проверяем флаг остановки
             if self.STOP_FLAG.get(user_id, False):
                 logger.info(f"⏹️ Остановка загрузки для пользователя {user_id}")
                 return None
 
-            # 1. Получаем URL для загрузки
             upload_type = "image"
             
             response = requests.post(
@@ -68,7 +73,6 @@ class Publisher:
             
             logger.info(f"📤 Получен URL для загрузки: {upload_url[:80]}...")
             
-            # 2. Загружаем файл по полученному URL
             if isinstance(image_data, list):
                 image_bytes = bytes(image_data)
             else:
@@ -84,7 +88,6 @@ class Publisher:
                 elif image_bytes[:4] == b'RIFF':
                     mime_type = 'image/webp'
             
-            # Загружаем файл через multipart/form-data
             files = {
                 'data': ('image.jpg', image_bytes, mime_type)
             }
@@ -102,7 +105,7 @@ class Publisher:
             
             upload_result = upload_response.json()
             
-            # Правильно извлекаем токен из структуры ответа
+            # Извлекаем токен из структуры ответа
             token = None
             
             if 'photos' in upload_result and isinstance(upload_result['photos'], dict):
@@ -120,7 +123,7 @@ class Publisher:
             
             logger.info(f"✅ Файл загружен, получен токен: {token[:20]}...")
             
-            # Делаем паузу после загрузки, чтобы файл обработался на сервере
+            # Пауза для обработки файла на сервере
             time.sleep(1)
             
             return token
@@ -131,17 +134,16 @@ class Publisher:
 
     def _send_message_to_chat(self, chat_id, text, image_tokens):
         """
-        Отправляет сообщение с изображениями в чат по документации MAX API
+        Отправляет сообщение с изображениями в чат.
+        chat_id ДОЛЖЕН быть с дефисом для групповых чатов!
         """
         try:
             if not self.api.token:
                 logger.error("❌ Токен не установлен")
                 return False
             
-            # Формируем вложения
             attachments = []
             
-            # Добавляем изображения (до 12 штук)
             for token in image_tokens[:6]:
                 attachments.append({
                     "type": "image",
@@ -150,9 +152,8 @@ class Publisher:
                     }
                 })
             
-            # Формируем тело запроса - chat_id ПЕРЕДАЕТСЯ В ТЕЛЕ, а не в параметрах!
             payload = {
-                "chat_id": chat_id,  # <-- chat_id в теле запроса
+                "chat_id": chat_id,  # chat_id с дефисом: -76868172202744
                 "text": text,
                 "format": "markdown"
             }
@@ -161,7 +162,6 @@ class Publisher:
                 payload["attachments"] = attachments
             
             logger.info(f"📤 Отправка сообщения в чат {chat_id} с {len(attachments)} изображениями")
-            logger.info(f"📤 Payload: {payload}")
             
             response = requests.post(
                 f"{self.api.base_url}/messages",
@@ -169,7 +169,7 @@ class Publisher:
                     "Authorization": self.api.token,
                     "Content-Type": "application/json"
                 },
-                json=payload,  # chat_id в теле запроса
+                json=payload,
                 timeout=60,
                 verify=False
             )
@@ -208,19 +208,18 @@ class Publisher:
     def publish_single_folder(self, user_id, folder_name, ad_text, metadata_text, full_text, images_data):
         """
         Обрабатывает ОДНУ папку:
-        1. Загружает каждое изображение через POST /uploads (с таймаутом 60 сек на папку)
-        2. Отправляет сообщение с текстом и токенами изображений через POST /messages
+        1. Загружает изображения через POST /uploads
+        2. Отправляет сообщение с текстом и токенами через POST /messages
         3. Сохраняет метаданные в БД
         """
         try:
-            # Проверяем флаг остановки
             if self.STOP_FLAG.get(user_id, False):
                 logger.info(f"⏹️ Пропускаем папку {folder_name} - остановка")
                 return False, "Остановка пользователем"
             
             start_time = time.time()
             
-            # 1. Извлекаем chat_id
+            # 1. Извлекаем chat_id (С ДЕФИСОМ!)
             chat_id = self.extract_chat_id(folder_name)
             if not chat_id:
                 logger.error(f"❌ Не удалось извлечь chat_id из: {folder_name}")
@@ -233,24 +232,20 @@ class Publisher:
             max_images = 1  # Для теста берем только 1 фото
             
             for i, img_data in enumerate(images_data[:max_images]):
-                # Проверяем флаг остановки
                 if self.STOP_FLAG.get(user_id, False):
                     logger.info(f"⏹️ Остановка загрузки для пользователя {user_id}")
                     return False, "Остановка пользователем"
                 
-                # Проверяем таймаут
                 if time.time() - start_time > self.FOLDER_TIMEOUT:
                     logger.warning(f"⏰ Таймаут обработки папки {folder_name} ({self.FOLDER_TIMEOUT} сек)")
                     return False, f"Таймаут обработки папки {folder_name}"
                 
                 logger.info(f"📤 Загрузка изображения {i+1}/{max_images} для {folder_name}")
                 
-                # Получаем данные изображения
                 img_bytes = img_data.get('data')
                 if not img_bytes:
                     continue
                 
-                # Загружаем изображение
                 token = self._upload_file_to_max(img_bytes, user_id)
                 if token:
                     image_tokens.append(token)
@@ -281,21 +276,16 @@ class Publisher:
             return False, str(e)
 
     def start(self, user_id):
-        """Запускает публикацию (устаревший метод)"""
         return False
 
     def stop(self, user_id):
-        """Останавливает публикацию и удаляет все файлы из очереди"""
         logger.info(f"⏹️ Остановка публикации для пользователя {user_id}")
         
-        # Устанавливаем флаг остановки
         self.STOP_FLAG[user_id] = True
         
-        # Очищаем очередь
         if user_id in self.publish_threads:
             self.publish_threads[user_id] = None
         
-        # Удаляем временные файлы пользователя
         try:
             user_folder = self.fm.get_user_folder(user_id)
             if os.path.exists(user_folder):
@@ -306,7 +296,6 @@ class Publisher:
         except Exception as e:
             logger.error(f"❌ Ошибка удаления файлов: {e}")
         
-        # Сбрасываем флаг через некоторое время
         def reset_stop_flag():
             time.sleep(5)
             self.STOP_FLAG[user_id] = False
