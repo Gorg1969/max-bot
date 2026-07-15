@@ -4,7 +4,6 @@ import time
 import re
 import requests
 import threading
-import base64
 import json
 from datetime import datetime
 
@@ -35,15 +34,12 @@ class Publisher:
         return None
 
     def _upload_file_to_max(self, image_data, user_id):
-        """
-        Загружает ОДНО изображение через POST /uploads.
-        Принимает данные в разных форматах.
-        """
+        """Загружает ОДНО изображение через POST /uploads"""
         try:
             if self.STOP_FLAG.get(user_id, False):
                 return None
 
-            # 1. Получаем URL для загрузки
+            # Получаем URL для загрузки
             response = requests.post(
                 f"{self.api.base_url}/uploads",
                 headers={"Authorization": self.api.token},
@@ -63,15 +59,13 @@ class Publisher:
                 logger.error(f"❌ Не получен URL: {upload_data}")
                 return None
             
-            # 2. Извлекаем байты из разных форматов
+            # Извлекаем байты из разных форматов
             image_bytes = None
             
-            # Если это словарь с полем 'data'
             if isinstance(image_data, dict):
                 if 'data' in image_data:
                     img_data = image_data['data']
                 else:
-                    # Пробуем взять первый ключ
                     for key, value in image_data.items():
                         if isinstance(value, (list, bytes, bytearray)):
                             img_data = value
@@ -82,7 +76,6 @@ class Publisher:
             else:
                 img_data = image_data
             
-            # Преобразуем в байты
             if isinstance(img_data, list):
                 image_bytes = bytes(img_data)
             elif isinstance(img_data, (bytes, bytearray)):
@@ -91,7 +84,7 @@ class Publisher:
                 logger.error(f"❌ Неподдерживаемый тип данных: {type(img_data)}")
                 return None
             
-            # 3. Отправляем файл
+            # Отправляем файл
             files = {
                 'data': ('image.jpg', image_bytes, 'image/jpeg')
             }
@@ -109,7 +102,7 @@ class Publisher:
             
             upload_result = upload_response.json()
             
-            # 4. Извлекаем токен
+            # Извлекаем токен
             token = None
             
             if 'photos' in upload_result and isinstance(upload_result['photos'], dict):
@@ -148,44 +141,34 @@ class Publisher:
                     "payload": {"token": token}
                 })
             
-            # Пробуем разные форматы chat_id
-            chat_formats = [
-                chat_id,                    # int: 76868172202744
-                str(chat_id),               # str: "76868172202744"
-                f"-{chat_id}",              # str: "-76868172202744"
-            ]
+            payload = {
+                "chat_id": chat_id,
+                "text": text,
+                "format": "markdown"
+            }
             
-            for fmt in chat_formats:
-                payload = {
-                    "chat_id": fmt,
-                    "text": text,
-                    "format": "markdown"
-                }
-                
-                if attachments:
-                    payload["attachments"] = attachments
-                
-                logger.info(f"📤 Пробуем chat_id: {fmt} (тип: {type(fmt).__name__})")
-                
-                response = requests.post(
-                    f"{self.api.base_url}/messages",
-                    headers={
-                        "Authorization": self.api.token,
-                        "Content-Type": "application/json"
-                    },
-                    json=payload,
-                    timeout=60,
-                    verify=False
-                )
-                
-                if response.status_code == 200:
-                    logger.info(f"✅ УСПЕШНО! chat_id: {fmt}")
-                    return True
-                else:
-                    logger.warning(f"⚠️ Неудача с {fmt}: {response.status_code}")
+            if attachments:
+                payload["attachments"] = attachments
             
-            logger.error(f"❌ Все форматы chat_id не работают")
-            return False
+            logger.info(f"📤 Отправка в чат {chat_id} с {len(attachments)} фото")
+            
+            response = requests.post(
+                f"{self.api.base_url}/messages",
+                headers={
+                    "Authorization": self.api.token,
+                    "Content-Type": "application/json"
+                },
+                json=payload,
+                timeout=60,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                logger.info(f"✅ Сообщение отправлено в чат {chat_id}")
+                return True
+            else:
+                logger.error(f"❌ Ошибка: {response.status_code} - {response.text[:200]}")
+                return False
                 
         except Exception as e:
             logger.error(f"❌ Ошибка отправки: {e}")
@@ -258,7 +241,7 @@ class Publisher:
         
         return metadata
 
-    def publish_single_folder(self, user_id, folder_name, ad_text, metadata_text, full_text, images_data):
+    def publish_single_folder(self, user_id, folder_name, ad_text, metadata_text, images_data):
         """
         Обрабатывает ОДНУ папку
         """
@@ -276,9 +259,9 @@ class Publisher:
             
             logger.info(f"📤 Извлечен chat_id: {chat_id}")
             
-            # Загружаем изображения (максимум 6)
+            # Загружаем изображения
             image_tokens = []
-            max_images = min(len(images_data), 6) if isinstance(images_data, list) else 0
+            max_images = min(len(images_data), 3) if isinstance(images_data, list) else 0
             
             for i in range(max_images):
                 if self.STOP_FLAG.get(user_id, False):
