@@ -21,12 +21,16 @@ class Publisher:
 
     def extract_chat_id(self, folder_name):
         """Извлекает chat_id из названия папки"""
+        # Ищем ID после дефиса с пробелом или в конце строки
         match = re.search(r'-\s*(\d+)', folder_name)
         if match:
-            return f"-{match.group(1)}"
+            chat_id = match.group(1)
+            # Проверяем, что это действительно ID (10+ цифр)
+            if len(chat_id) >= 10:
+                return chat_id  # Возвращаем без дефиса
         match = re.search(r'(\d{10,})$', folder_name)
         if match:
-            return f"-{match.group(1)}"
+            return match.group(1)  # Возвращаем без дефиса
         return None
 
     def _upload_file_to_max(self, image_data, user_id):
@@ -65,7 +69,6 @@ class Publisher:
             logger.info(f"📤 Получен URL для загрузки: {upload_url[:80]}...")
             
             # 2. Загружаем файл по полученному URL
-            # Преобразуем данные обратно в bytes
             if isinstance(image_data, list):
                 image_bytes = bytes(image_data)
             else:
@@ -100,7 +103,6 @@ class Publisher:
             upload_result = upload_response.json()
             
             # Правильно извлекаем токен из структуры ответа
-            # Ответ приходит в формате: {"photos": {"photo_key": {"token": "..."}}}
             token = None
             
             if 'photos' in upload_result and isinstance(upload_result['photos'], dict):
@@ -109,7 +111,6 @@ class Publisher:
                         token = photo_data['token']
                         break
             
-            # Если не нашли в photos, пробуем найти напрямую
             if not token and 'token' in upload_result:
                 token = upload_result['token']
             
@@ -140,7 +141,7 @@ class Publisher:
             # Формируем вложения
             attachments = []
             
-            # Добавляем изображения (до 12 штук, но мы отправляем до 6)
+            # Добавляем изображения (до 12 штук)
             for token in image_tokens[:6]:
                 attachments.append({
                     "type": "image",
@@ -149,9 +150,9 @@ class Publisher:
                     }
                 })
             
-            # Формируем тело запроса
+            # Формируем тело запроса - chat_id ПЕРЕДАЕТСЯ В ТЕЛЕ, а не в параметрах!
             payload = {
-                "chat_id": chat_id,
+                "chat_id": chat_id,  # <-- chat_id в теле запроса
                 "text": text,
                 "format": "markdown"
             }
@@ -160,6 +161,7 @@ class Publisher:
                 payload["attachments"] = attachments
             
             logger.info(f"📤 Отправка сообщения в чат {chat_id} с {len(attachments)} изображениями")
+            logger.info(f"📤 Payload: {payload}")
             
             response = requests.post(
                 f"{self.api.base_url}/messages",
@@ -167,7 +169,7 @@ class Publisher:
                     "Authorization": self.api.token,
                     "Content-Type": "application/json"
                 },
-                json=payload,
+                json=payload,  # chat_id в теле запроса
                 timeout=60,
                 verify=False
             )
@@ -176,7 +178,7 @@ class Publisher:
                 logger.info(f"✅ Сообщение отправлено в чат {chat_id}")
                 return True
             else:
-                logger.error(f"❌ Ошибка отправки: {response.status_code} - {response.text[:200]}")
+                logger.error(f"❌ Ошибка отправки: {response.status_code} - {response.text[:500]}")
                 return False
                 
         except Exception as e:
@@ -221,6 +223,7 @@ class Publisher:
             # 1. Извлекаем chat_id
             chat_id = self.extract_chat_id(folder_name)
             if not chat_id:
+                logger.error(f"❌ Не удалось извлечь chat_id из: {folder_name}")
                 return False, f"Не удалось извлечь chat_id из {folder_name}"
             
             logger.info(f"📤 Публикация папки {folder_name} в чат {chat_id}")
