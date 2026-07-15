@@ -24,10 +24,33 @@ class FileManager:
         os.makedirs(ads_folder, exist_ok=True)
         return ads_folder
     
+    def is_text_file(self, file, file_name):
+        """Определяет, является ли файл текстовым"""
+        # По MIME типу
+        if file.content_type and 'text/' in file.content_type:
+            return True
+        
+        # По расширению
+        if file_name.lower().endswith(('.txt', '.text', '.md', '.info')):
+            return True
+        
+        # Если файл называется "info" - проверяем содержимое
+        if file_name.lower() == 'info' or file_name.lower() == 'info.txt':
+            try:
+                # Читаем первые 1024 байта
+                sample = file.stream.read(1024)
+                file.stream.seek(0)
+                # Если нет нулевых байтов - это текст
+                if b'\x00' not in sample:
+                    return True
+            except:
+                pass
+        
+        return False
+    
     def save_uploaded_files_stream(self, files, user_id, append=False):
         """
-        ПОТОКОВОЕ сохранение файлов - запись по частям (64KB)
-        Без загрузки всего файла в память
+        ПОТОКОВОЕ сохранение файлов с определением типа
         """
         try:
             ads_folder = self.get_ads_folder(user_id)
@@ -48,47 +71,58 @@ class FileManager:
                 if file.filename.startswith('.'):
                     continue
                 
-                # Проверяем размер файла - если больше 20MB, пропускаем
+                # Определяем имя файла и папку
+                rel_path = file.filename
+                file_name = os.path.basename(rel_path)
+                dir_name = os.path.dirname(rel_path)
+                
+                # Проверяем, не является ли файл текстовым
+                is_text = self.is_text_file(file, file_name)
+                
+                # Если это текстовый файл и у него нет расширения .txt
+                if is_text and not file_name.lower().endswith('.txt'):
+                    new_file_name = file_name + '.txt'
+                    rel_path = os.path.join(dir_name, new_file_name)
+                    logger.info(f"📝 Текстовый файл переименован: {file_name} -> {new_file_name}")
+                    file_name = new_file_name
+                
+                full_path = os.path.join(ads_folder, rel_path)
+                os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                
+                # Проверяем размер
                 try:
-                    file.seek(0, 2)  # Перемещаемся в конец
-                    file_size = file.tell()
-                    file.seek(0)  # Возвращаемся в начало
+                    file.stream.seek(0, 2)
+                    file_size = file.stream.tell()
+                    file.stream.seek(0)
                     
                     if file_size > 20 * 1024 * 1024:  # 20 MB
-                        logger.warning(f"⚠️ Файл {file.filename} слишком большой ({file_size//1024//1024}MB) - пропускаем")
+                        logger.warning(f"⚠️ Файл {file_name} слишком большой ({file_size//1024//1024}MB) - пропускаем")
                         skipped_count += 1
                         continue
                 except:
                     pass
                 
-                # Сохраняем файлы прямо в ads/, сохраняя структуру подпапок
-                rel_path = file.filename
-                full_path = os.path.join(ads_folder, rel_path)
-                os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                
-                # ПОТОКОВАЯ запись - по 64KB
+                # Сохраняем
                 try:
                     with open(full_path, 'wb') as f:
                         while True:
-                            chunk = file.stream.read(64 * 1024)  # 64KB
+                            chunk = file.stream.read(64 * 1024)
                             if not chunk:
                                 break
                             f.write(chunk)
                     saved_count += 1
                 except Exception as e:
-                    logger.error(f"❌ Ошибка сохранения {file.filename}: {e}")
-                    # Удаляем частично записанный файл
+                    logger.error(f"❌ Ошибка сохранения {file_name}: {e}")
                     if os.path.exists(full_path):
                         os.remove(full_path)
                     continue
                 finally:
-                    # Освобождаем память
                     try:
                         file.stream.close()
                     except:
                         pass
             
-            logger.info(f"✅ Сохранено {saved_count} файлов в /ads/ ({skipped_count} пропущено)")
+            logger.info(f"✅ Сохранено {saved_count} файлов ({skipped_count} пропущено)")
             return {
                 'success': True, 
                 'saved_count': saved_count,
@@ -100,7 +134,7 @@ class FileManager:
             return {'success': False, 'error': str(e)}
     
     def get_subfolders(self, user_id):
-        """Возвращает список подпапок с info.txt из ФИКСИРОВАННОЙ папки ads/"""
+        """Возвращает список подпапок с текстовыми файлами из папки ads/"""
         ads_folder = self.get_ads_folder(user_id)
         subfolders = []
         
@@ -108,20 +142,16 @@ class FileManager:
             logger.warning(f"⚠️ Папка ads не существует для пользователя {user_id}")
             return subfolders
         
-        # Рекурсивно обходим папку ads/
         for root, dirs, files in os.walk(ads_folder):
-            if 'info.txt' in files:
-                # Берем имя папки относительно ads/
-                rel_path = os.path.relpath(root, ads_folder)
-                if rel_path == '.':
-                    # Если info.txt в самой папке ads
-                    folder_name = os.path.basename(root)
-                else:
-                    folder_name = rel_path
-                subfolders.append(folder_name)
-                logger.info(f"📁 Найдена папка с info.txt: {folder_name}")
+            # Ищем любой текстовый файл
+            for file in files:
+                if file.lower().endswith('.txt') or file.lower() == 'info':
+                    rel_path = os.path.relpath(root, ads_folder)
+                    if rel_path != '.':
+                        subfolders.append(rel_path)
+                    break
         
-        logger.info(f"📁 Всего найдено {len(subfolders)} папок с info.txt")
+        logger.info(f"📁 Всего найдено {len(subfolders)} папок с текстовыми файлами")
         return subfolders
     
     def get_folder_path(self, user_id, folder_name):
@@ -138,16 +168,18 @@ class FileManager:
             logger.info(f"🗑️ Данные пользователя {user_id} очищены")
     
     def get_folders(self, user_id):
-        """Возвращает список папок с info.txt из ads/"""
+        """Возвращает список папок с текстовыми файлами из ads/"""
         ads_folder = self.get_ads_folder(user_id)
         folders = []
         if os.path.exists(ads_folder):
             for item in os.listdir(ads_folder):
                 item_path = os.path.join(ads_folder, item)
                 if os.path.isdir(item_path):
-                    info_path = os.path.join(item_path, 'info.txt')
-                    if os.path.exists(info_path):
-                        folders.append(item)
+                    # Проверяем наличие текстового файла
+                    for file in os.listdir(item_path):
+                        if file.lower().endswith('.txt') or file.lower() == 'info':
+                            folders.append(item)
+                            break
         return folders
     
     def extract_chat_id_from_name(self, folder_name):
@@ -158,10 +190,7 @@ class FileManager:
         return None
     
     def get_folder_size(self, user_id, folder_name=None):
-        """
-        Возвращает размер папки в байтах
-        Если folder_name не указан - размер всей папки user_id
-        """
+        """Возвращает размер папки в байтах"""
         try:
             if folder_name:
                 folder_path = self.get_folder_path(user_id, folder_name)
@@ -184,9 +213,7 @@ class FileManager:
             return 0
     
     def cleanup_old_files(self, max_age_hours=24):
-        """
-        Очищает файлы старше указанного времени
-        """
+        """Очищает файлы старше указанного времени"""
         try:
             import time
             current_time = time.time()
@@ -198,7 +225,6 @@ class FileManager:
                 if not os.path.isdir(user_path):
                     continue
                 
-                # Проверяем возраст папки
                 dir_mtime = os.path.getmtime(user_path)
                 if current_time - dir_mtime > max_age_seconds:
                     shutil.rmtree(user_path)
@@ -206,7 +232,6 @@ class FileManager:
                     logger.info(f"🗑️ Удалена старая папка: {user_dir}")
                     continue
                 
-                # Проверяем файлы внутри
                 for root, dirs, files in os.walk(user_path):
                     for f in files:
                         file_path = os.path.join(root, f)
