@@ -4,8 +4,8 @@ import time
 import re
 import json
 import requests
-from PIL import Image
-import io
+import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +16,8 @@ class Publisher:
         self.db = db
         self.active_publishes = {}  # user_id -> bool
         self.uploaded_folders = {}  # user_id -> set()
+        self.FOLDER_TIMEOUT = 60  # Максимальное время на обработку одной папки
+        self.executor = ThreadPoolExecutor(max_workers=2)
     
     def extract_chat_id(self, folder_name):
         """Извлекает chat_id из названия папки"""
@@ -26,8 +28,8 @@ class Publisher:
     
     def get_sorted_images(self, folder_path, max_count=3):
         """
-        Возвращает список путей к изображениям (до 3 штук)
-        с проверкой на валидность изображений
+        Возвращает список изображений (до 3 штук)
+        БЕЗ сжатия - клиент уже сжал!
         """
         images = []
         if not os.path.exists(folder_path):
@@ -41,53 +43,17 @@ class Publisher:
                 continue
             if file.lower().endswith(extensions):
                 img_path = os.path.join(folder_path, file)
-                # Проверяем, что файл действительно изображение
+                # Проверяем, что файл существует и не пустой
                 try:
-                    with Image.open(img_path) as img:
-                        img.verify()  # Проверяем целостность
-                    images.append(img_path)
+                    if os.path.getsize(img_path) > 0:
+                        images.append(img_path)
                 except Exception as e:
-                    logger.warning(f"⚠️ Невалидное изображение {file}: {e}")
+                    logger.warning(f"⚠️ Ошибка чтения {file}: {e}")
                     continue
         
         # Сортируем и берем первые 3
         images.sort()
         return images[:max_count]
-    
-    def compress_image(self, image_path, max_size_mb=10):
-        """
-        Сжимает изображение если оно больше max_size_mb
-        Возвращает bytes или None при ошибке
-        """
-        try:
-            with Image.open(image_path) as img:
-                # Конвертируем в RGB если нужно
-                if img.mode in ('RGBA', 'LA', 'P'):
-                    img = img.convert('RGB')
-                
-                # Сжимаем если файл большой
-                file_size = os.path.getsize(image_path)
-                if file_size > max_size_mb * 1024 * 1024:
-                    # Уменьшаем качество
-                    quality = 85
-                    buffer = io.BytesIO()
-                    img.save(buffer, format='JPEG', quality=quality, optimize=True)
-                    
-                    while buffer.tell() > max_size_mb * 1024 * 1024 and quality > 30:
-                        quality -= 5
-                        buffer.seek(0)
-                        buffer.truncate()
-                        img.save(buffer, format='JPEG', quality=quality, optimize=True)
-                    
-                    logger.info(f"✅ Сжато изображение: {os.path.basename(image_path)} ({file_size//1024}KB -> {buffer.tell()//1024}KB)")
-                    return buffer.getvalue()
-                else:
-                    # Возвращаем оригинал
-                    with open(image_path, 'rb') as f:
-                        return f.read()
-        except Exception as e:
-            logger.error(f"❌ Ошибка сжатия {image_path}: {e}")
-            return None
     
     def get_ad_text(self, folder_path):
         """
@@ -106,6 +72,10 @@ class Publisher:
                 text = content.split('#изъятая')[0].strip()
             else:
                 text = content.strip()
+            
+            # Обрезаем слишком длинный текст (MAX API может не принять)
+            if len(text) > 4000:
+                text = text[:4000] + "..."
             
             return text
         except Exception as e:
@@ -142,10 +112,20 @@ class Publisher:
         
         return metadata
     
-    def publish_ad(self, user_id, folder_path, folder_name):
+    def read_image_data(self, image_path):
         """
-        Публикует одно объявление в чат MAX
-        Возвращает (success, message, chat_id)
+        Читает изображение без сжатия (клиент уже сжал)
+        """
+        try:
+            with open(image_path, 'rb') as f:
+                return f.read()
+        except Exception as e:
+            logger.error(f"❌ Ошибка чтения {image_path}: {e}")
+            return None
+    
+    def _publish_ad_safe(self, user_id, folder_path, folder_name):
+        """
+        Безопасная публикация с таймаутом
         """
         try:
             # 1. Получаем chat_id из названия папки
@@ -158,7 +138,7 @@ class Publisher:
             if not text:
                 return False, f"Не найден info.txt в {folder_name}", chat_id
             
-            # 3. Получаем до 3 изображений
+            # 3. Получаем до 3 изображений (уже сжатые клиентом)
             image_paths = self.get_sorted_images(folder_path, max_count=3)
             
             # 4. Отправляем в MAX API
@@ -185,6 +165,31 @@ class Publisher:
             logger.error(f"❌ Ошибка публикации {folder_name}: {e}")
             return False, str(e), None
     
+    def publish_ad_with_timeout(self, user_id, folder_path, folder_name):
+        """
+        Публикует с таймаутом. Если превышает 60 сек - пропускаем.
+        """
+        result = [None, None, None]  # success, message, chat_id
+        
+        def _publish():
+            success, message, chat_id = self._publish_ad_safe(user_id, folder_path, folder_name)
+            result[0] = success
+            result[1] = message
+            result[2] = chat_id
+        
+        # Запускаем в отдельном потоке с таймаутом
+        thread = threading.Thread(target=_publish)
+        thread.daemon = True
+        thread.start()
+        thread.join(timeout=self.FOLDER_TIMEOUT)
+        
+        if thread.is_alive():
+            # Превышен таймаут - пропускаем папку
+            logger.warning(f"⏰ Таймаут {self.FOLDER_TIMEOUT}с при обработке {folder_name}")
+            return False, f"⏰ Таймаут обработки папки {folder_name}", None
+        
+        return result[0], result[1], result[2]
+    
     def _send_message_with_photos(self, chat_id, text, image_paths):
         """
         Отправляет сообщение с фото в MAX API
@@ -194,11 +199,10 @@ class Publisher:
                 logger.error("❌ Токен не установлен")
                 return False
             
-            # Подготавливаем файлы для отправки
+            # Подготавливаем файлы для отправки (без сжатия!)
             files = []
             for img_path in image_paths:
-                # Сжимаем если нужно
-                img_data = self.compress_image(img_path)
+                img_data = self.read_image_data(img_path)
                 if img_data:
                     filename = os.path.basename(img_path)
                     files.append(('file', (filename, img_data, 'image/jpeg')))
@@ -220,7 +224,7 @@ class Publisher:
                 headers={"Authorization": self.api.token},
                 data=data,
                 files=files,
-                timeout=120,
+                timeout=60,  # Таймаут запроса 60 сек
                 verify=False
             )
             
@@ -228,9 +232,12 @@ class Publisher:
                 logger.info(f"✅ Сообщение с фото отправлено в чат {chat_id}")
                 return True
             else:
-                logger.error(f"❌ Ошибка отправки: {response.status_code} - {response.text}")
+                logger.error(f"❌ Ошибка отправки: {response.status_code} - {response.text[:200]}")
                 return False
                 
+        except requests.exceptions.Timeout:
+            logger.error(f"❌ Таймаут отправки в чат {chat_id}")
+            return False
         except Exception as e:
             logger.error(f"❌ Ошибка отправки сообщения с фото: {e}")
             return False
@@ -269,13 +276,15 @@ class Publisher:
                 self.active_publishes[user_id] = False
                 return False
             
-            self.api.send_message(user_id, f"📢 Начинаю публикацию {len(subfolders)} объявлений...")
+            total_folders = len(subfolders)
+            self.api.send_message(user_id, f"📢 Начинаю публикацию {total_folders} объявлений...")
             
             published = 0
             failed = 0
+            timeout = 0
             results = []
             
-            for folder_name in subfolders:
+            for idx, folder_name in enumerate(subfolders):
                 # Проверяем состояние
                 if not self.active_publishes.get(user_id, False):
                     logger.info(f"⏹️ Публикация остановлена пользователем {user_id}")
@@ -283,34 +292,55 @@ class Publisher:
                 
                 folder_path = os.path.join(ads_folder, folder_name)
                 
-                # Публикуем
-                success, message, chat_id = self.publish_ad(user_id, folder_path, folder_name)
+                # Логируем прогресс
+                logger.info(f"📤 [{idx+1}/{total_folders}] Обработка: {folder_name}")
+                
+                # Публикуем с таймаутом
+                success, message, chat_id = self.publish_ad_with_timeout(user_id, folder_path, folder_name)
                 
                 if success:
                     published += 1
                     self.uploaded_folders[user_id].add(folder_name)
                     results.append(f"✅ {folder_name} -> {chat_id}")
+                    logger.info(f"✅ [{idx+1}/{total_folders}] {message}")
                 else:
-                    failed += 1
+                    if "Таймаут" in message:
+                        timeout += 1
+                    else:
+                        failed += 1
                     results.append(f"❌ {folder_name}: {message}")
+                    logger.warning(f"❌ [{idx+1}/{total_folders}] {message}")
                 
-                logger.info(message)
-                
-                # Задержка между постами
+                # Задержка между постами (2 сек)
                 time.sleep(2)
+                
+                # Обновляем статус каждые 5 папок
+                if (idx + 1) % 5 == 0:
+                    self.api.send_message(
+                        user_id, 
+                        f"📊 Прогресс: {idx+1}/{total_folders}\n"
+                        f"✅ Успешно: {published}\n"
+                        f"❌ Ошибок: {failed}\n"
+                        f"⏰ Таймаутов: {timeout}"
+                    )
             
             # Завершаем публикацию
             self.active_publishes[user_id] = False
             
-            # Отправляем результат
+            # Отправляем финальный результат
             result_text = f"📊 **Результат публикации:**\n\n"
+            result_text += f"📁 Всего папок: {total_folders}\n"
             result_text += f"✅ Успешно: {published}\n"
             if failed > 0:
                 result_text += f"❌ Ошибок: {failed}\n"
-            result_text += f"\n📋 Детали:\n" + "\n".join(results[:10])
+            if timeout > 0:
+                result_text += f"⏰ Таймаутов: {timeout}\n"
             
-            if len(results) > 10:
-                result_text += f"\n... и еще {len(results) - 10} объявлений"
+            # Показываем первые 5 результатов
+            if results:
+                result_text += f"\n📋 Детали:\n" + "\n".join(results[:5])
+                if len(results) > 5:
+                    result_text += f"\n... и еще {len(results) - 5} объявлений"
             
             self.api.send_message(user_id, result_text)
             
@@ -321,6 +351,15 @@ class Publisher:
                     f"🔗 Скачать отчет: https://maxbot.bothost.tech/report/{user_id}"
                 )
             
+            # Очищаем память - удаляем папку ads/
+            try:
+                import shutil
+                if os.path.exists(ads_folder):
+                    shutil.rmtree(ads_folder)
+                    logger.info(f"🗑️ Папка ads/ удалена для пользователя {user_id}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка удаления ads/: {e}")
+            
             return True
             
         except Exception as e:
@@ -328,7 +367,7 @@ class Publisher:
             import traceback
             logger.error(traceback.format_exc())
             self.active_publishes[user_id] = False
-            self.api.send_message(user_id, f"❌ Ошибка публикации: {str(e)}")
+            self.api.send_message(user_id, f"❌ Ошибка публикации: {str(e)[:200]}")
             return False
     
     def stop(self, user_id):
