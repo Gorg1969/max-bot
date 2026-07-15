@@ -74,28 +74,16 @@ class Publisher:
                 return f.read()
     
     def get_sorted_images(self, folder_path, max_count=10):
-        """Возвращает отсортированный список изображений (до 10)"""
         images = []
         if not os.path.exists(folder_path):
-            logger.warning(f"⚠️ Папка не существует: {folder_path}")
             return images
-        
-        # Логируем все файлы в папке для отладки
-        all_files = os.listdir(folder_path)
-        logger.info(f"📂 Файлы в папке: {all_files}")
-        
-        for file in all_files:
-            # Проверяем расширения (включая большие буквы)
-            if file.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')):
+        for file in os.listdir(folder_path):
+            if file.lower().endswith(('.jpg', '.jpeg', '.png')):
                 if file.startswith('.'):
                     continue
                 images.append(file)
-                logger.info(f"🖼️ Найдено изображение: {file}")
-        
         images.sort()
-        result = images[:max_count]
-        logger.info(f"📸 Всего изображений: {len(result)}")
-        return result
+        return images[:max_count]
     
     def parse_info_file(self, info_path):
         """
@@ -107,7 +95,6 @@ class Publisher:
             with open(info_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            # Разделитель
             delimiter = "#изъятая"
             
             if delimiter in content:
@@ -115,11 +102,9 @@ class Publisher:
                 ad_text = parts[0].strip()
                 metadata_part = parts[1].strip() if len(parts) > 1 else ""
             else:
-                # Если разделителя нет - всё содержимое в объявление
                 ad_text = content.strip()
                 metadata_part = ""
             
-            # Парсим метаданные для отчета
             metadata = {}
             if metadata_part:
                 lines = metadata_part.split('\n')
@@ -138,8 +123,8 @@ class Publisher:
                         metadata[key] = value
             
             return {
-                'ad_text': ad_text,       # Только для объявления
-                'metadata': metadata      # Только для отчета
+                'ad_text': ad_text,
+                'metadata': metadata
             }
             
         except Exception as e:
@@ -180,14 +165,12 @@ class Publisher:
                     
                     info_path = os.path.join(folder_path, 'info.txt')
                     if not os.path.exists(info_path):
-                        logger.warning(f"⚠️ Нет info.txt в {folder_path}")
                         continue
                     
                     # ===== ПАРСИМ INFO.TXT =====
                     parsed = self.parse_info_file(info_path)
                     ad_text = parsed['ad_text']          # Только для объявления
                     metadata = parsed['metadata']        # Только для отчета
-                    # =============================
                     
                     chat_id = self.extract_chat_id(folder_name)
                     if not chat_id:
@@ -196,7 +179,6 @@ class Publisher:
                     
                     # ===== ПОЛУЧАЕМ ИЗОБРАЖЕНИЯ =====
                     images = self.get_sorted_images(folder_path, max_count=10)
-                    # ================================
                     
                     if self.user_states.get(user_id) == UserState.STOPPED:
                         break
@@ -208,8 +190,10 @@ class Publisher:
                         if not os.path.exists(img_path):
                             continue
                         try:
-                            compressed = self.compress_image_to_bytes(img_path)
-                            photo_files.append((img_name, compressed))
+                            # Читаем файл как бинарные данные (уже сжатые на клиенте)
+                            with open(img_path, 'rb') as f:
+                                photo_data = f.read()
+                            photo_files.append((img_name, photo_data))
                         except Exception as e:
                             logger.error(f"❌ Ошибка подготовки {img_name}: {e}")
                     
