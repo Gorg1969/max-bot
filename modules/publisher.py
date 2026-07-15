@@ -26,22 +26,22 @@ class Publisher:
             return f"-{match.group(1)}"
         return None
     
-    def get_sorted_images(self, folder_path, max_count=10):
-        """Возвращает отсортированный список изображений (до 10) - РЕГИСТРОНЕЗАВИСИМО!"""
+    def get_sorted_images(self, folder_path, max_count=6):
+        """
+        Возвращает отсортированный список изображений (максимум 6)
+        """
         images = []
         if not os.path.exists(folder_path):
             return images
         
-        # Разрешенные расширения (все регистры)
         allowed_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')
         
         for file in os.listdir(folder_path):
             if file.startswith('.'):
                 continue
-            # Приводим к нижнему регистру для проверки
             if file.lower().endswith(allowed_extensions):
                 images.append(file)
-                logger.info(f"🖼️ Найдено изображение: {file}")
+                logger.debug(f"🖼️ Найдено изображение: {file}")
         
         images.sort()
         return images[:max_count]
@@ -117,7 +117,6 @@ class Publisher:
             failed = 0
             
             for folder_name in subfolders:
-                # Проверяем остановку
                 if self.user_states.get(user_id) == UserState.STOPPED:
                     logger.info(f"⏹️ Публикация остановлена пользователем {user_id}")
                     break
@@ -127,10 +126,8 @@ class Publisher:
                     
                     info_path = os.path.join(folder_path, 'info.txt')
                     if not os.path.exists(info_path):
-                        logger.warning(f"⚠️ Нет info.txt в {folder_path}")
                         continue
                     
-                    # Парсим info.txt
                     parsed = self.parse_info_file(info_path)
                     ad_text = parsed['ad_text']
                     metadata = parsed['metadata']
@@ -140,13 +137,13 @@ class Publisher:
                         logger.warning(f"⚠️ Не удалось извлечь ID чата из {folder_name}")
                         continue
                     
-                    # Получаем изображения
-                    images = self.get_sorted_images(folder_path, max_count=10)
+                    # ===== БЕРЁМ НЕ БОЛЕЕ 6 ФОТО =====
+                    images = self.get_sorted_images(folder_path, max_count=6)
+                    # =================================
                     
                     if self.user_states.get(user_id) == UserState.STOPPED:
                         break
                     
-                    # Подготавливаем фото
                     photo_files = []
                     for img_name in images:
                         img_path = os.path.join(folder_path, img_name)
@@ -160,7 +157,6 @@ class Publisher:
                         except Exception as e:
                             logger.error(f"❌ Ошибка чтения {img_name}: {e}")
                     
-                    # Отправляем
                     if photo_files:
                         success = self.api.send_photos_to_chat(
                             chat_id=chat_id,
@@ -176,7 +172,6 @@ class Publisher:
                         failed += 1
                         continue
                     
-                    # Сохраняем в БД
                     self.db.add_publication(user_id, folder_name, chat_id)
                     self.db.save_ad_metadata(
                         user_id=user_id,
