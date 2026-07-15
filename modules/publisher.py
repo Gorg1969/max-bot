@@ -5,6 +5,7 @@ import re
 import json
 import requests
 import threading
+import base64
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +61,7 @@ class Publisher:
         return images[:max_count]
     
     def get_txt_file(self, folder_path):
-        """
-        Находит текстовый файл в папке
-        Ищет файлы с расширением .txt и файл 'info' без расширения
-        """
+        """Находит текстовый файл в папке"""
         if not os.path.exists(folder_path):
             return None
         
@@ -71,39 +69,26 @@ class Publisher:
             for file in os.listdir(folder_path):
                 file_path = os.path.join(folder_path, file)
                 
-                # Пропускаем изображения
                 if file.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')):
                     continue
                 
-                # Проверяем, что файл не слишком большой
                 try:
                     size = os.path.getsize(file_path)
-                    if size == 0 or size > 1024 * 1024:  # Пустой или > 1MB
+                    if size == 0 or size > 1024 * 1024:
                         continue
                 except:
                     continue
                 
-                # Если файл с расширением .txt
-                if file.lower().endswith('.txt'):
-                    logger.info(f"📄 Найден .txt файл: {file}")
+                if file.lower().endswith('.txt') or file.lower() == 'info':
                     return file_path
                 
-                # Если файл называется 'info' (без расширения)
-                if file.lower() == 'info':
-                    logger.info(f"📄 Найден файл info: {file}")
-                    return file_path
-                
-                # Пробуем прочитать как текстовый файл
                 try:
                     with open(file_path, 'rb') as f:
                         content = f.read(1024)
-                        # Если нет нулевых байтов - это текстовый файл
                         if b'\x00' not in content:
                             try:
                                 text_content = content.decode('utf-8', errors='ignore')
-                                # Если есть хотя бы одно слово или #изъятая - это наш файл
                                 if any(c.isalpha() for c in text_content) or '#изъятая' in text_content:
-                                    logger.info(f"📄 Найден текстовый файл: {file}")
                                     return file_path
                             except:
                                 pass
@@ -115,26 +100,20 @@ class Publisher:
         return None
     
     def get_ad_text(self, folder_path):
-        """
-        Извлекает текст объявления из текстового файла
-        Текст до #изъятая - тело объявления
-        """
+        """Извлекает текст объявления из текстового файла"""
         txt_file = self.get_txt_file(folder_path)
         if not txt_file:
-            logger.warning(f"⚠️ Не найден текстовый файл в {folder_path}")
             return None
         
         try:
             with open(txt_file, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            # Разделитель #изъятая
             if '#изъятая' in content:
                 text = content.split('#изъятая')[0].strip()
             else:
                 text = content.strip()
             
-            logger.info(f"📝 Текст объявления: {len(text)} символов")
             return text
             
         except Exception as e:
@@ -142,9 +121,7 @@ class Publisher:
             return None
     
     def get_ad_metadata(self, folder_path):
-        """
-        Извлекает метаданные из текстового файла (после #изъятая)
-        """
+        """Извлекает метаданные из текстового файла"""
         txt_file = self.get_txt_file(folder_path)
         if not txt_file:
             return {}
@@ -154,7 +131,6 @@ class Publisher:
             with open(txt_file, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            # Ищем метаданные после разделителя
             if '#изъятая' in content:
                 parts = content.split('#изъятая')
                 if len(parts) > 1:
@@ -177,45 +153,60 @@ class Publisher:
         
         return metadata
     
-    def read_image_data(self, image_path):
-        """Читает изображение"""
+    def encode_image_to_base64(self, image_path):
+        """Кодирует изображение в base64"""
         try:
             with open(image_path, 'rb') as f:
-                return f.read()
+                return base64.b64encode(f.read()).decode('utf-8')
         except Exception as e:
-            logger.error(f"❌ Ошибка чтения {image_path}: {e}")
+            logger.error(f"❌ Ошибка кодирования {image_path}: {e}")
             return None
     
-    def _send_message_with_photos(self, chat_id, text, image_paths):
-        """Отправляет сообщение с фото в MAX API"""
+    def _send_message_with_photos_attachment(self, chat_id, text, image_paths):
+        """
+        Отправляет сообщение с фото через attachments (как в send_message)
+        """
         try:
             if not self.api.token:
                 logger.error("❌ Токен не установлен")
                 return False
             
-            files = []
-            for img_path in image_paths:
-                img_data = self.read_image_data(img_path)
+            # Подготавливаем attachments
+            attachments = []
+            for img_path in image_paths[:3]:  # Максимум 3 фото
+                img_data = self.encode_image_to_base64(img_path)
                 if img_data:
                     filename = os.path.basename(img_path)
-                    files.append(('file', (filename, img_data, 'image/jpeg')))
+                    attachments.append({
+                        "type": "image",
+                        "filename": filename,
+                        "data": img_data
+                    })
             
-            data = {
+            # Формируем payload
+            payload = {
                 "chat_id": chat_id,
-                "text": text
+                "text": text,
+                "format": "markdown"
             }
             
+            if attachments:
+                payload["attachments"] = attachments
+            
+            # Отправляем
             response = requests.post(
                 f"{self.api.base_url}/messages",
-                headers={"Authorization": self.api.token},
-                data=data,
-                files=files,
+                headers={
+                    "Authorization": self.api.token,
+                    "Content-Type": "application/json"
+                },
+                json=payload,
                 timeout=60,
                 verify=False
             )
             
             if response.status_code == 200:
-                logger.info(f"✅ Сообщение отправлено в чат {chat_id}")
+                logger.info(f"✅ Сообщение с фото отправлено в чат {chat_id}")
                 return True
             else:
                 logger.error(f"❌ Ошибка отправки: {response.status_code} - {response.text[:200]}")
@@ -272,25 +263,22 @@ class Publisher:
             folder_num = self.extract_folder_number(folder_name) or folder_name
             logger.info(f"📤 Публикация папки #{folder_num} в чат {chat_id}")
             
-            # Получаем текст
             text = self.get_ad_text(folder_path)
             if not text:
                 return False, f"Не найден текстовый файл в {folder_name}", chat_id
             
-            # Получаем изображения (до 3)
             image_paths = self.get_sorted_images(folder_path, max_count=3)
             logger.info(f"🖼️ Найдено {len(image_paths)} изображений")
             
-            # Отправляем
+            # Отправляем через attachments (как в send_message)
             if image_paths:
-                success = self._send_message_with_photos(chat_id, text, image_paths)
+                success = self._send_message_with_photos_attachment(chat_id, text, image_paths)
             else:
                 success = self._send_message_only(chat_id, text)
             
             if not success:
                 return False, f"Не удалось отправить в чат {chat_id}", chat_id
             
-            # Сохраняем метаданные
             metadata = self.get_ad_metadata(folder_path)
             self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, time.time())
             self.db.add_publication(user_id, folder_name, chat_id)
@@ -318,10 +306,8 @@ class Publisher:
                 self.active_publishes[user_id] = False
                 return False
             
-            # Собираем все папки с текстовыми файлами
             subfolders = []
             for root, dirs, files in os.walk(ads_folder):
-                # Проверяем наличие текстового файла
                 for file in files:
                     if file.lower().endswith('.txt') or file.lower() == 'info':
                         rel_path = os.path.relpath(root, ads_folder)
@@ -383,7 +369,6 @@ class Publisher:
                     f"🔗 Скачать отчет: https://maxbot.bothost.tech/report/{user_id}"
                 )
             
-            # Очищаем папку ads/
             try:
                 import shutil
                 if os.path.exists(ads_folder):
@@ -414,4 +399,4 @@ class Publisher:
             return False
     
     def is_running(self, user_id):
-        return self.active_publishes.get(user_id, False)
+        return self.active_publishes.get(user_id, False) 
