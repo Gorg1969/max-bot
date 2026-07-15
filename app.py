@@ -47,7 +47,7 @@ class APIClient:
                 headers={"Authorization": self.token, "Content-Type": "application/json"},
                 params={"user_id": user_id},
                 json=payload,
-                timeout=30,
+                timeout=(10, 30),
                 verify=False
             )
             if response.status_code != 200:
@@ -67,7 +67,7 @@ class APIClient:
                 headers={"Authorization": self.token, "Content-Type": "application/json"},
                 params={"chat_id": chat_id},
                 json=payload,
-                timeout=30,
+                timeout=(10, 30),
                 verify=False
             )
             return response.status_code == 200
@@ -81,7 +81,6 @@ class APIClient:
         Возвращает token для использования в сообщении
         """
         try:
-            # Определяем тип файла
             ext = filename.split('.')[-1].lower() if '.' in filename else 'jpg'
             file_type = 'image'
             
@@ -89,9 +88,12 @@ class APIClient:
             logger.info(f"📤 Запрос URL для загрузки: {filename}")
             response = requests.post(
                 f"{self.base_url}/uploads",
-                headers={"Authorization": self.token},
+                headers={
+                    "Authorization": self.token,
+                    "Content-Type": "application/json"
+                },
                 params={"type": file_type},
-                timeout=30,
+                timeout=(10, 30),
                 verify=False
             )
             
@@ -100,6 +102,8 @@ class APIClient:
                 return None
             
             upload_data = response.json()
+            logger.debug(f"📦 Ответ /uploads: {json.dumps(upload_data, indent=2)}")
+            
             upload_url = upload_data.get('url')
             
             if not upload_url:
@@ -113,7 +117,7 @@ class APIClient:
             response = requests.post(
                 upload_url,
                 files=files,
-                timeout=60,
+                timeout=(30, 120),
                 verify=False
             )
             
@@ -122,17 +126,65 @@ class APIClient:
                 return None
             
             result = response.json()
-            token = result.get('token')
+            logger.debug(f"📦 Ответ от upload_url: {json.dumps(result, indent=2)}")
+            
+            # ===== ПРАВИЛЬНЫЙ ПАРСИНГ ТОКЕНА =====
+            token = None
+            
+            # Вариант 1: token в корне (стандартный формат)
+            if 'token' in result:
+                token = result['token']
+                logger.info(f"✅ Токен найден в корне ответа")
+            
+            # Вариант 2: token внутри photos (формат MAX)
+            elif 'photos' in result:
+                photos = result['photos']
+                logger.debug(f"📸 photos: {photos}")
+                # Берем первый токен из photos
+                for key, value in photos.items():
+                    if isinstance(value, dict) and 'token' in value:
+                        token = value['token']
+                        logger.info(f"✅ Токен найден в photos[{key}]['token']")
+                        break
+                    elif isinstance(value, str):
+                        # Возможно token - это строка
+                        token = value
+                        logger.info(f"✅ Токен найден как строка в photos[{key}]")
+                        break
+            
+            # Вариант 3: рекурсивный поиск по всем ключам
+            if not token and isinstance(result, dict):
+                for key, value in result.items():
+                    if isinstance(value, dict):
+                        if 'token' in value:
+                            token = value['token']
+                            logger.info(f"✅ Токен найден в {key}['token']")
+                            break
+            
+            # Вариант 4: token в списке photos
+            if not token and 'photos' in result:
+                photos = result['photos']
+                if isinstance(photos, list) and len(photos) > 0:
+                    if isinstance(photos[0], dict) and 'token' in photos[0]:
+                        token = photos[0]['token']
+                        logger.info(f"✅ Токен найден в photos[0]['token']")
+            
+            # =====================================
             
             if token:
                 logger.info(f"✅ Файл загружен, token получен: {token[:20]}...")
                 return token
             else:
-                logger.error(f"❌ Не получен token: {result}")
+                logger.error(f"❌ Не удалось найти token в ответе: {result}")
                 return None
                 
+        except requests.exceptions.Timeout:
+            logger.error(f"❌ Таймаут при загрузке файла {filename}")
+            return None
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки файла: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def send_photos_to_chat(self, chat_id, photo_files, text=None, caption=None):
@@ -151,7 +203,6 @@ class APIClient:
             for i, (filename, data) in enumerate(photo_files):
                 logger.info(f"📤 Загрузка фото {i+1}/{total}: {filename} ({len(data)} байт)")
                 
-                # Загружаем файл на сервер MAX
                 token = self.upload_file_to_max(data, filename)
                 if token:
                     attachments.append({
@@ -166,7 +217,6 @@ class APIClient:
                 logger.error("❌ Нет загруженных файлов для отправки")
                 return False
             
-            # ШАГ 3: Отправляем сообщение с токенами (КАК JSON!)
             payload = {
                 "chat_id": chat_id,
                 "text": text or "",
@@ -175,12 +225,16 @@ class APIClient:
             }
             
             logger.info(f"📤 Отправка сообщения с {len(attachments)} фото в чат {chat_id}")
+            logger.debug(f"📦 Payload: {json.dumps(payload, indent=2)}")
             
             response = requests.post(
                 f"{self.base_url}/messages",
-                headers={"Authorization": self.token, "Content-Type": "application/json"},
+                headers={
+                    "Authorization": self.token,
+                    "Content-Type": "application/json"
+                },
                 json=payload,
-                timeout=60,
+                timeout=(10, 60),
                 verify=False
             )
             
