@@ -4,7 +4,6 @@ import time
 import re
 import requests
 import threading
-import base64
 
 logger = logging.getLogger(__name__)
 
@@ -26,51 +25,18 @@ class Publisher:
             return f"-{match.group(1)}"
         return None
 
-    def _upload_image_bytes(self, image_bytes, filename):
+    def _send_message_with_photos_direct(self, chat_id, text, images_data):
         """
-        Загружает изображение из байтов на сервер MAX через POST /uploads
-        """
-        try:
-            files = {
-                'file': (filename, image_bytes, 'image/jpeg')
-            }
-            
-            response = requests.post(
-                f"{self.api.base_url}/uploads",
-                headers={"Authorization": self.api.token},
-                files=files,
-                timeout=30,
-                verify=False
-            )
-            
-            if response.status_code == 200:
-                token = response.json().get('token')
-                if token:
-                    logger.info(f"✅ Загружено фото: {filename}")
-                    return token
-                else:
-                    logger.error(f"❌ Токен не получен: {response.text}")
-                    return None
-            else:
-                logger.error(f"❌ Ошибка загрузки {filename}: {response.status_code} - {response.text[:200]}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки {filename}: {e}")
-            return None
-
-    def _send_with_images_from_data(self, chat_id, text, images_data):
-        """
-        Отправляет сообщение с изображениями из подготовленных данных
-        Загружает фото на MAX и отправляет с токенами
+        Отправляет сообщение с фото напрямую через multipart/form-data
+        (БЕЗ предварительной загрузки через /uploads)
         """
         try:
             if not self.api.token:
                 logger.error("❌ Токен не установлен")
                 return False
             
-            # Загружаем каждое изображение на сервер MAX
-            image_tokens = []
+            # Подготавливаем файлы для multipart/form-data
+            files = []
             for img_data in images_data[:3]:
                 img_bytes = img_data.get('data')
                 img_name = img_data.get('name')
@@ -82,41 +48,36 @@ class Publisher:
                 if isinstance(img_bytes, list):
                     img_bytes = bytes(img_bytes)
                 
-                token = self._upload_image_bytes(img_bytes, img_name)
-                if token:
-                    image_tokens.append(token)
+                # Определяем MIME тип
+                mime_type = 'image/jpeg'
+                if img_name.lower().endswith('.png'):
+                    mime_type = 'image/png'
+                elif img_name.lower().endswith('.gif'):
+                    mime_type = 'image/gif'
+                elif img_name.lower().endswith('.webp'):
+                    mime_type = 'image/webp'
+                
+                files.append(('file', (img_name, img_bytes, mime_type)))
             
-            # Формируем attachments
-            attachments = []
-            for token in image_tokens:
-                attachments.append({
-                    "type": "image",
-                    "payload": {"token": token}
-                })
-            
-            # Отправляем сообщение
-            payload = {
+            # Формируем данные
+            data = {
                 "chat_id": chat_id,
                 "text": text,
                 "format": "markdown"
             }
             
-            if attachments:
-                payload["attachments"] = attachments
-            
+            # Отправляем multipart/form-data
             response = requests.post(
                 f"{self.api.base_url}/messages",
-                headers={
-                    "Authorization": self.api.token,
-                    "Content-Type": "application/json"
-                },
-                json=payload,
+                headers={"Authorization": self.api.token},
+                data=data,
+                files=files,
                 timeout=60,
                 verify=False
             )
             
             if response.status_code == 200:
-                logger.info(f"✅ Сообщение отправлено в чат {chat_id}")
+                logger.info(f"✅ Сообщение с фото отправлено в чат {chat_id}")
                 return True
             else:
                 logger.error(f"❌ Ошибка отправки: {response.status_code} - {response.text[:200]}")
@@ -161,9 +122,7 @@ class Publisher:
             return False
 
     def _parse_metadata(self, metadata_text):
-        """
-        Парсит метаданные из текста после #изъятая
-        """
+        """Парсит метаданные из текста после #изъятая"""
         metadata = {}
         if not metadata_text:
             return metadata
@@ -194,9 +153,9 @@ class Publisher:
             
             logger.info(f"📤 Публикация папки {folder_name} в чат {chat_id}")
             
-            # 2. Отправляем текст + фото
+            # 2. Отправляем текст + фото (напрямую, без /uploads)
             if images_data:
-                success = self._send_with_images_from_data(chat_id, ad_text, images_data)
+                success = self._send_message_with_photos_direct(chat_id, ad_text, images_data)
             else:
                 success = self._send_message_only(chat_id, ad_text)
             
@@ -215,7 +174,7 @@ class Publisher:
             return False, str(e)
 
     def start(self, user_id):
-        """Запускает публикацию (устаревший метод, используется для обратной совместимости)"""
+        """Запускает публикацию (устаревший метод)"""
         return False
 
     def stop(self, user_id):
