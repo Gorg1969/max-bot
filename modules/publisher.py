@@ -5,6 +5,7 @@ import re
 import requests
 import threading
 import base64
+import json  # <-- ДОБАВЛЯЕМ ИМПОРТ JSON
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -20,17 +21,16 @@ class Publisher:
         self.STOP_FLAG = {}
 
     def extract_chat_id(self, folder_name):
-        """Извлекает chat_id из названия папки"""
+        """Извлекает chat_id из названия папки (БЕЗ дефиса)"""
         match = re.search(r'-\s*(\d+)', folder_name)
         if match:
             chat_id = match.group(1)
             if len(chat_id) >= 10:
-                return chat_id  # Возвращаем БЕЗ дефиса!
+                return chat_id
         
         match = re.search(r'(\d{10,})$', folder_name)
         if match:
-            chat_id = match.group(1)
-            return chat_id  # Возвращаем БЕЗ дефиса!
+            return match.group(1)
         
         return None
 
@@ -40,6 +40,7 @@ class Publisher:
             if self.STOP_FLAG.get(user_id, False):
                 return None
 
+            # Получаем URL для загрузки
             response = requests.post(
                 f"{self.api.base_url}/uploads",
                 headers={"Authorization": self.api.token},
@@ -59,18 +60,23 @@ class Publisher:
                 logger.error(f"❌ Не получен URL: {upload_data}")
                 return None
             
+            # Подготавливаем данные изображения
             if isinstance(image_data, list):
                 image_bytes = bytes(image_data)
             else:
                 image_bytes = image_data
             
+            # Определяем MIME тип
             mime_type = 'image/jpeg'
             if len(image_bytes) > 4:
                 if image_bytes[:4] == b'\x89PNG':
                     mime_type = 'image/png'
                 elif image_bytes[:2] == b'GIF':
                     mime_type = 'image/gif'
+                elif image_bytes[:4] == b'RIFF':
+                    mime_type = 'image/webp'
             
+            # Загружаем файл
             files = {'data': ('image.jpg', image_bytes, mime_type)}
             
             upload_response = requests.post(
@@ -86,6 +92,7 @@ class Publisher:
             
             upload_result = upload_response.json()
             
+            # Извлекаем токен
             token = None
             if 'photos' in upload_result and isinstance(upload_result['photos'], dict):
                 for photo_data in upload_result['photos'].values():
@@ -109,25 +116,24 @@ class Publisher:
 
     def _send_message_to_chat(self, chat_id, text, image_tokens):
         """
-        Отправляет сообщение с изображениями в чат.
-        chat_id передается БЕЗ дефиса!
+        Отправляет сообщение с изображениями в чат
         """
         try:
             if not self.api.token:
                 logger.error("❌ Токен не установлен")
                 return False
             
+            # Формируем вложения
             attachments = []
-            
             for token in image_tokens[:6]:
                 attachments.append({
                     "type": "image",
                     "payload": {"token": token}
                 })
             
-            # chat_id передается как строка БЕЗ дефиса
+            # Формируем payload
             payload = {
-                "chat_id": str(chat_id),  # Преобразуем в строку
+                "chat_id": chat_id,  # ID без дефиса
                 "text": text,
                 "format": "markdown"
             }
@@ -135,9 +141,9 @@ class Publisher:
             if attachments:
                 payload["attachments"] = attachments
             
-            logger.info(f"📤 Отправка сообщения в чат {chat_id} с {len(attachments)} изображениями")
-            logger.info(f"📤 Payload: {json.dumps(payload, ensure_ascii=False)[:500]}")
+            logger.info(f"📤 Отправка в чат {chat_id} с {len(attachments)} фото")
             
+            # Отправляем запрос
             response = requests.post(
                 f"{self.api.base_url}/messages",
                 headers={
@@ -153,11 +159,11 @@ class Publisher:
                 logger.info(f"✅ Сообщение отправлено в чат {chat_id}")
                 return True
             else:
-                logger.error(f"❌ Ошибка отправки: {response.status_code} - {response.text[:500]}")
+                logger.error(f"❌ Ошибка: {response.status_code} - {response.text[:300]}")
                 return False
                 
         except Exception as e:
-            logger.error(f"❌ Ошибка отправки сообщения: {e}")
+            logger.error(f"❌ Ошибка отправки: {e}")
             return False
 
     def _parse_metadata(self, metadata_text):
@@ -199,7 +205,7 @@ class Publisher:
             
             logger.info(f"📤 Извлечен chat_id: {chat_id} из папки {folder_name}")
             
-            # Загружаем изображения
+            # Загружаем изображения (только 1 для теста)
             image_tokens = []
             max_images = 1
             
@@ -223,7 +229,7 @@ class Publisher:
                 else:
                     logger.warning(f"⚠️ Не удалось загрузить изображение {i+1}")
             
-            # Отправляем сообщение (chat_id БЕЗ дефиса)
+            # Отправляем сообщение
             if image_tokens:
                 success = self._send_message_to_chat(chat_id, ad_text, image_tokens)
             else:
