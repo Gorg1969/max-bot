@@ -668,6 +668,200 @@ def setup_webhook():
     except Exception as e:
         return f"❌ Ошибка: {e}"
 
+# ========== ДИАГНОСТИКА ==========
+
+@app.route('/diagnostic')
+def diagnostic():
+    """Диагностика всех параметров бота"""
+    result = {
+        "status": "ok",
+        "token": TOKEN[:10] + "..." if TOKEN else "❌ НЕТ",
+        "base_url": BASE_URL,
+        "user_id": 151296248,
+        "chat_id": "-76868172202744",
+        "test_results": {}
+    }
+    
+    # 1. Проверяем токен
+    try:
+        response = requests.get(
+            f"{BASE_URL}/me",
+            headers={"Authorization": TOKEN},
+            timeout=10,
+            verify=False
+        )
+        result["test_results"]["token_check"] = {
+            "status": response.status_code,
+            "ok": response.status_code == 200,
+            "response": response.json() if response.status_code == 200 else response.text[:100]
+        }
+    except Exception as e:
+        result["test_results"]["token_check"] = {"error": str(e)}
+    
+    # 2. Пробуем отправить тестовое сообщение пользователю
+    test_payloads = [
+        {"name": "user_id как число", "payload": {"user_id": 151296248}},
+        {"name": "user_id как строка", "payload": {"user_id": "151296248"}},
+        {"name": "chat_id как число", "payload": {"chat_id": 76868172202744}},
+        {"name": "chat_id как строка", "payload": {"chat_id": "76868172202744"}},
+        {"name": "chat_id с дефисом", "payload": {"chat_id": "-76868172202744"}},
+    ]
+    
+    for test in test_payloads:
+        try:
+            payload = {
+                "text": f"🧪 Тест {test['name']}",
+                "format": "markdown",
+                **test["payload"]
+            }
+            response = requests.post(
+                f"{BASE_URL}/messages",
+                headers={"Authorization": TOKEN, "Content-Type": "application/json"},
+                json=payload,
+                timeout=10,
+                verify=False
+            )
+            result["test_results"][test["name"]] = {
+                "status": response.status_code,
+                "ok": response.status_code == 200,
+                "response": response.text[:200]
+            }
+        except Exception as e:
+            result["test_results"][test["name"]] = {"error": str(e)}
+    
+    # 3. Проверяем загрузку фото
+    try:
+        upload_response = requests.post(
+            f"{BASE_URL}/uploads",
+            headers={"Authorization": TOKEN},
+            params={"type": "image"},
+            timeout=10,
+            verify=False
+        )
+        result["test_results"]["upload_check"] = {
+            "status": upload_response.status_code,
+            "ok": upload_response.status_code == 200,
+            "response": upload_response.json() if upload_response.status_code == 200 else upload_response.text[:100]
+        }
+    except Exception as e:
+        result["test_results"]["upload_check"] = {"error": str(e)}
+    
+    # 4. Получаем список подписок бота
+    try:
+        subs_response = requests.get(
+            f"{BASE_URL}/subscriptions",
+            headers={"Authorization": TOKEN},
+            timeout=10,
+            verify=False
+        )
+        if subs_response.status_code == 200:
+            subs_data = subs_response.json()
+            chats = []
+            for sub in subs_data.get('subscriptions', []):
+                if 'chat_id' in sub:
+                    chats.append(sub.get('chat_id'))
+            result["test_results"]["subscriptions"] = {
+                "status": subs_response.status_code,
+                "ok": True,
+                "chats": chats[:10]
+            }
+        else:
+            result["test_results"]["subscriptions"] = {
+                "status": subs_response.status_code,
+                "ok": False,
+                "response": subs_response.text[:100]
+            }
+    except Exception as e:
+        result["test_results"]["subscriptions"] = {"error": str(e)}
+    
+    # 5. Форматируем вывод
+    html = """
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>Диагностика бота</title>
+        <style>
+            body { font-family: Arial; max-width: 900px; margin: 30px auto; padding: 20px; background: #f5f5f5; }
+            .card { background: white; padding: 20px; margin: 15px 0; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+            .ok { color: #28a745; font-weight: bold; }
+            .error { color: #dc3545; font-weight: bold; }
+            pre { background: #f8f9fa; padding: 10px; border-radius: 5px; overflow-x: auto; font-size: 12px; }
+            .status { display: inline-block; padding: 3px 10px; border-radius: 15px; font-size: 12px; }
+            .status.success { background: #d4edda; color: #155724; }
+            .status.fail { background: #f8d7da; color: #721c24; }
+            .summary { background: #e8f4f8; padding: 15px; border-radius: 8px; }
+            .working { color: #28a745; font-weight: bold; }
+            .not-working { color: #dc3545; font-weight: bold; }
+        </style>
+    </head>
+    <body>
+        <h1>🔧 Диагностика бота</h1>
+        
+        <div class="card summary">
+            <h2>📋 Краткий итог</h2>
+            <p><span class="status success">✅</span> Бот запущен и отвечает</p>
+            <p><span class="status """ + ("success" if result["test_results"].get("token_check", {}).get("ok") else "fail") + """">""" + 
+               ("✅" if result["test_results"].get("token_check", {}).get("ok") else "❌") + """</span> Токен """ + 
+               ("работает" if result["test_results"].get("token_check", {}).get("ok") else "НЕ работает") + """</p>
+        </div>
+        
+        <div class="card">
+            <h2>📋 Основные параметры</h2>
+            <p><strong>Токен:</strong> <code>""" + result["token"] + """</code></p>
+            <p><strong>URL:</strong> <code>""" + result["base_url"] + """</code></p>
+            <p><strong>User ID:</strong> <code>151296248</code></p>
+            <p><strong>Chat ID:</strong> <code>-76868172202744</code></p>
+        </div>
+        
+        <div class="card">
+            <h2>📤 Тестовые отправки</h2>
+    """
+    
+    for name, data in result["test_results"].items():
+        status_class = "success" if data.get("ok") else "fail"
+        status_text = "✅ УСПЕШНО" if data.get("ok") else "❌ ОШИБКА"
+        html += f"""
+            <div style="border:1px solid #ddd; padding:10px; margin:10px 0; border-radius:5px;">
+                <strong>{name}</strong>
+                <span class="status {status_class}">{status_text}</span>
+                <pre>{json.dumps(data, indent=2, ensure_ascii=False)}</pre>
+            </div>
+        """
+    
+    # Определяем рабочий формат
+    working_format = "НЕ НАЙДЕН"
+    for name, data in result["test_results"].items():
+        if data.get("ok") and "user_id" in name:
+            working_format = name
+            break
+    for name, data in result["test_results"].items():
+        if data.get("ok") and "chat_id" in name:
+            working_format = name
+            break
+    
+    html += """
+        </div>
+        
+        <div class="card">
+            <h2>💡 Рекомендации</h2>
+            <ul>
+                <li><strong>Рабочий формат:</strong> <code>""" + working_format + """</code></li>
+                <li>Если <strong>token_check</strong> не 200 → проверьте токен</li>
+                <li>Если <strong>upload_check</strong> не 200 → проверьте права бота</li>
+                <li>Если какой-то <strong>тест отправки</strong> вернул 200 → используйте этот формат</li>
+                <li>Если все тесты вернули 400 → бот не добавлен в чат или токен невалидный</li>
+            </ul>
+        </div>
+        
+        <div style="text-align:center; margin-top:30px; color:#999;">
+            <a href="/upload">⬅️ Вернуться к загрузке</a>
+        </div>
+    </body>
+    </html>
+    """
+    
+    return html
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
     if TOKEN:
