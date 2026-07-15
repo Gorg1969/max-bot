@@ -104,7 +104,7 @@ api = APIClient()
 publisher = Publisher(api, fm, db)
 report_gen = ReportGenerator(fm, db)
 
-# ========== HTML СТРАНИЦА (С КЛИЕНТСКИМ СЖАТИЕМ) ==========
+# ========== HTML СТРАНИЦА ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -128,10 +128,13 @@ UPLOAD_PAGE = """
         .btn-success:hover { background: #218838; }
         .btn-danger { background: #dc3545; color: white; }
         .btn-danger:hover { background: #c82333; }
+        .btn-warning { background: #ffc107; color: #333; }
+        .btn-warning:hover { background: #e0a800; }
         .status { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
         .status.success { background: #d4edda; color: #155724; display: block; border-left: 4px solid #28a745; }
         .status.error { background: #f8d7da; color: #721c24; display: block; border-left: 4px solid #dc3545; }
         .status.info { background: #d1ecf1; color: #0c5460; display: block; border-left: 4px solid #17a2b8; }
+        .status.warning { background: #fff3cd; color: #856404; display: block; border-left: 4px solid #ffc107; }
         .file-list { text-align: left; margin: 20px 0; padding: 0; list-style: none; }
         .file-list li { background: #f8f9fa; padding: 10px 15px; margin: 5px 0; border-radius: 5px; border-left: 3px solid #007bff; display: flex; justify-content: space-between; align-items: center; }
         .file-list li .count { background: #007bff; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
@@ -143,6 +146,12 @@ UPLOAD_PAGE = """
         .button-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px; }
         .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
         .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; }
+        .publish-controls { margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 10px; border: 1px solid #dee2e6; }
+        .publish-controls h3 { margin-top: 0; }
+        .status-badge { display: inline-block; padding: 5px 15px; border-radius: 20px; font-size: 14px; font-weight: bold; }
+        .status-badge.running { background: #28a745; color: white; }
+        .status-badge.stopped { background: #dc3545; color: white; }
+        .status-badge.idle { background: #6c757d; color: white; }
     </style>
 </head>
 <body>
@@ -155,7 +164,7 @@ UPLOAD_PAGE = """
             2️⃣ Внутри создайте подпапки объявлений: <code>1 -123456789</code>, <code>2 -987654321</code><br>
             3️⃣ В каждой подпапке: <code>info.txt</code> (текст) и фото (1-10 шт)<br>
             4️⃣ Перетащите головную папку в поле ниже<br>
-            5️⃣ Фото сжимаются на вашем компьютере перед отправкой!
+            5️⃣ Фото автоматически сжимаются на сервере перед отправкой!
         </div>
         
         <div class="drop-zone" id="dropZone">
@@ -169,7 +178,7 @@ UPLOAD_PAGE = """
             <div class="selected-info" id="selectedInfo"></div>
             <ul class="file-list" id="fileListContent"></ul>
             <div class="button-group">
-                <button class="btn btn-success" onclick="uploadFolder()">🚀 Загрузить</button>
+                <button class="btn btn-success" onclick="uploadFolder()">🚀 Загрузить и опубликовать</button>
                 <button class="btn btn-danger" onclick="clearFiles()">🗑️ Очистить</button>
             </div>
         </div>
@@ -181,6 +190,16 @@ UPLOAD_PAGE = """
         <div id="status" class="status"></div>
         <div id="log"></div>
         
+        <div class="publish-controls">
+            <h3>📊 Управление публикацией</h3>
+            <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+                <span>Статус: <span id="publishStatus" class="status-badge idle">Неактивна</span></span>
+                <button class="btn btn-warning" onclick="checkStatus()">🔄 Обновить статус</button>
+                <button class="btn btn-danger" onclick="stopPublish()">⏹ Остановить</button>
+                <button class="btn btn-primary" onclick="getReport()">📊 Скачать отчет</button>
+            </div>
+        </div>
+        
         <div class="footer">⚡ MAX Bot | Загрузка объявлений</div>
     </div>
 
@@ -189,8 +208,6 @@ UPLOAD_PAGE = """
         let userId = 151296248;
         const CHUNK_SIZE = 1;
         const RETRY_DELAY = 1000;
-        const MAX_WIDTH = 800;
-        const QUALITY = 0.6;
         
         const dropZone = document.getElementById('dropZone');
         const folderInput = document.getElementById('folderInput');
@@ -201,92 +218,6 @@ UPLOAD_PAGE = """
         const logDiv = document.getElementById('log');
         const progressBar = document.getElementById('progressBar');
         const progress = document.getElementById('progress');
-
-        // ========== СЖАТИЕ ФОТО НА КЛИЕНТЕ ==========
-        
-        async function compressImage(file, maxWidth=MAX_WIDTH, quality=QUALITY) {
-            return new Promise((resolve, reject) => {
-                // Если файл уже маленький - не сжимаем
-                if (file.size < 100 * 1024) {
-                    resolve(file);
-                    return;
-                }
-                
-                const reader = new FileReader();
-                reader.onload = function(e) {
-                    const img = new Image();
-                    img.onload = function() {
-                        const canvas = document.createElement('canvas');
-                        let width = img.width;
-                        let height = img.height;
-                        
-                        if (width > maxWidth || height > maxWidth) {
-                            const ratio = Math.min(maxWidth / width, maxWidth / height);
-                            width = Math.round(width * ratio);
-                            height = Math.round(height * ratio);
-                        }
-                        
-                        canvas.width = width;
-                        canvas.height = height;
-                        const ctx = canvas.getContext('2d');
-                        ctx.drawImage(img, 0, 0, width, height);
-                        
-                        canvas.toBlob(function(blob) {
-                            const newName = file.name.replace(/\.[^.]+$/, '.jpg');
-                            const compressedFile = new File([blob], newName, { type: 'image/jpeg' });
-                            compressedFile.webkitRelativePath = file.webkitRelativePath;
-                            resolve(compressedFile);
-                        }, 'image/jpeg', quality);
-                    };
-                    img.onerror = function() {
-                        reject(new Error('Не удалось загрузить изображение'));
-                    };
-                    img.src = e.target.result;
-                };
-                reader.onerror = function() {
-                    reject(new Error('Не удалось прочитать файл'));
-                };
-                reader.readAsDataURL(file);
-            });
-        }
-
-        // ========== ОБРАБОТКА ВСЕХ ФАЙЛОВ ==========
-        
-        async function processAllFiles(files) {
-            const processed = [];
-            const total = files.length;
-            let processedCount = 0;
-            
-            for (const file of files) {
-                const ext = file.name.split('.').pop().toLowerCase();
-                
-                if (['jpg', 'jpeg', 'png'].includes(ext)) {
-                    try {
-                        const compressed = await compressImage(file);
-                        processed.push(compressed);
-                        if (compressed.size < file.size) {
-                            addLog(`✅ Сжато: ${file.name} (${(file.size/1024).toFixed(0)} КБ → ${(compressed.size/1024).toFixed(0)} КБ)`);
-                        } else {
-                            addLog(`ℹ️ ${file.name} уже сжат (${(file.size/1024).toFixed(0)} КБ)`);
-                        }
-                    } catch (e) {
-                        addLog(`⚠️ Ошибка сжатия ${file.name}: ${e.message}`);
-                        processed.push(file);
-                    }
-                } else {
-                    processed.push(file);
-                }
-                
-                processedCount++;
-                const progressPercent = Math.round((processedCount / total) * 100);
-                progress.style.width = progressPercent + '%';
-                progress.textContent = progressPercent + '%';
-            }
-            
-            return processed;
-        }
-
-        // ========== ОСТАЛЬНЫЕ ФУНКЦИИ ==========
 
         dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
         dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('dragover'); });
@@ -365,7 +296,7 @@ UPLOAD_PAGE = """
             
             selectedInfo.textContent = `✅ Выбрано ${sortedFolders.length} папок, всего ${files.length} файлов`;
             fileList.style.display = 'block';
-            showStatus('info', '📦 Нажмите "Загрузить" для обработки и отправки');
+            showStatus('info', '📦 Нажмите "Загрузить и опубликовать" для отправки');
         }
 
         function clearFiles() {
@@ -443,18 +374,15 @@ UPLOAD_PAGE = """
                 return;
             }
             
-            showStatus('info', '⏳ Сжатие и обработка файлов...');
+            showStatus('info', '⏳ Загрузка файлов на сервер...');
             progressBar.style.display = 'block';
             progress.style.width = '0%';
             progress.textContent = '0%';
             logDiv.textContent = '';
-            addLog('🚀 Начинаем обработку файлов...');
-            addLog('📦 Сжатие фото на клиенте (не на сервере!)');
+            addLog('🚀 Начинаем загрузку...');
+            addLog(`📁 Файлов: ${selectedFiles.length}`);
             
-            const processedFiles = await processAllFiles(selectedFiles);
-            addLog(`✅ Обработано ${processedFiles.length} файлов`);
-            
-            const folders = getFolderStructure(processedFiles);
+            const folders = getFolderStructure(selectedFiles);
             const folderNames = Object.keys(folders);
             const totalFolders = folderNames.length;
             const totalChunks = Math.ceil(totalFolders / CHUNK_SIZE);
@@ -534,14 +462,74 @@ UPLOAD_PAGE = """
                     const result = await response.json();
                     if (result.success) {
                         addLog('✅ Публикация запущена в фоне!');
+                        showStatus('success', '✅ Публикация запущена! Следите за статусом.');
+                        updateStatusBadge('running');
                     } else {
                         addLog('❌ Ошибка запуска публикации: ' + result.message);
+                        showStatus('error', '❌ Ошибка запуска публикации: ' + result.message);
                     }
                 } catch (error) {
                     addLog('❌ Ошибка запуска публикации: ' + error.message);
                 }
             }
         }
+
+        async function checkStatus() {
+            try {
+                const response = await fetch(`/publish_status/${userId}`);
+                const data = await response.json();
+                if (data.is_running) {
+                    updateStatusBadge('running');
+                    showStatus('info', '🔄 Публикация выполняется...');
+                } else {
+                    updateStatusBadge('idle');
+                    showStatus('info', '⏸️ Публикация неактивна');
+                }
+            } catch (error) {
+                addLog('❌ Ошибка получения статуса: ' + error.message);
+            }
+        }
+
+        async function stopPublish() {
+            if (!confirm('Остановить публикацию?')) return;
+            try {
+                const response = await fetch('/stop_publish', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({user_id: userId})
+                });
+                const data = await response.json();
+                if (data.success) {
+                    showStatus('warning', '⏹️ Публикация остановлена');
+                    updateStatusBadge('idle');
+                    addLog('⏹️ Публикация остановлена пользователем');
+                } else {
+                    showStatus('error', '❌ Ошибка остановки: ' + data.message);
+                }
+            } catch (error) {
+                addLog('❌ Ошибка остановки: ' + error.message);
+            }
+        }
+
+        async function getReport() {
+            window.open(`/report/${userId}`, '_blank');
+        }
+
+        function updateStatusBadge(status) {
+            const badge = document.getElementById('publishStatus');
+            badge.className = 'status-badge ' + status;
+            const texts = {
+                'running': '🔄 Выполняется',
+                'idle': '⏸️ Неактивна',
+                'stopped': '⏹️ Остановлена'
+            };
+            badge.textContent = texts[status] || status;
+        }
+
+        // Автоматически проверяем статус при загрузке
+        setTimeout(checkStatus, 1000);
+        // Обновляем статус каждые 10 секунд
+        setInterval(checkStatus, 10000);
     </script>
 </body>
 </html>
@@ -619,6 +607,44 @@ def start_publish():
         logger.error(f"❌ Ошибка запуска публикации: {e}")
         return jsonify({'success': False, 'message': str(e)}), 500
 
+@app.route('/publish_status/<int:user_id>')
+def publish_status(user_id):
+    """Проверяет статус публикации"""
+    try:
+        is_running = publisher.is_running(user_id)
+        return jsonify({
+            'user_id': user_id,
+            'is_running': is_running
+        })
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения статуса: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/stop_publish', methods=['POST'])
+def stop_publish():
+    """Останавливает публикацию"""
+    try:
+        data = request.get_json()
+        user_id = data.get('user_id')
+        if not user_id:
+            return jsonify({'success': False, 'message': 'user_id не указан'}), 400
+        
+        result = publisher.stop(user_id)
+        return jsonify({'success': result})
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка остановки публикации: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/cleanup/<int:user_id>', methods=['POST'])
+def cleanup_user(user_id):
+    """Принудительная очистка данных пользователя"""
+    try:
+        report_gen.cleanup_user_data(user_id, keep_report=True)
+        return jsonify({'success': True, 'message': f'Данные пользователя {user_id} очищены'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -650,13 +676,22 @@ def webhook():
                 f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
                 "📊 **Получить отчет:**\n"
                 f"🔗 https://maxbot.bothost.tech/report/{user_id}\n\n"
-                "⏹ **Остановить публикацию:** `/stop`"
+                "⏹ **Остановить публикацию:** `/stop`\n"
+                "📊 **Статус публикации:** `/status`"
             )
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/stop':
             publisher.stop(user_id)
             api.send_message(user_id, "⏹️ Публикация остановлена.")
+            return jsonify({"ok": True}), 200
+        
+        if text and text.strip() == '/status':
+            is_running = publisher.is_running(user_id)
+            if is_running:
+                api.send_message(user_id, "🔄 Публикация выполняется...")
+            else:
+                api.send_message(user_id, "⏸️ Публикация неактивна")
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/report':
@@ -709,9 +744,6 @@ def download_report(user_id, filename):
             return "❌ Файл не найден", 404
         
         response = send_file(file_path, as_attachment=True, download_name=filename)
-        
-        threading.Thread(target=report_gen.cleanup_user_data, args=(user_id, True)).start()
-        
         return response
         
     except Exception as e:
