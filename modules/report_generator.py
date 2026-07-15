@@ -13,167 +13,53 @@ class ReportGenerator:
         self.fm = file_manager
         self.db = db
     
-    def get_txt_file(self, folder_path):
-        """Находит текстовый файл в папке"""
-        if not os.path.exists(folder_path):
-            return None
-        
-        try:
-            for file in os.listdir(folder_path):
-                file_path = os.path.join(folder_path, file)
-                
-                if file.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')):
-                    continue
-                
-                try:
-                    size = os.path.getsize(file_path)
-                    if size == 0 or size > 1024 * 1024:
-                        continue
-                except:
-                    continue
-                
-                if file.lower().endswith('.txt') or file.lower() == 'info':
-                    return file_path
-                
-                # Пробуем прочитать как текстовый
-                try:
-                    with open(file_path, 'rb') as f:
-                        content = f.read(1024)
-                        if b'\x00' not in content:
-                            try:
-                                text_content = content.decode('utf-8', errors='ignore')
-                                if any(c.isalpha() for c in text_content) or '#изъятая' in text_content:
-                                    return file_path
-                            except:
-                                pass
-                except:
-                    pass
-        except:
-            pass
-        
-        return None
-    
-    def parse_info_file(self, folder_path):
-        """Парсит текстовый файл и извлекает нужные поля"""
-        txt_file = self.get_txt_file(folder_path)
-        if not txt_file:
-            return {}
-        
-        data = {
-            'Название': '',
-            'Ссылка': '',
-            'Код предложения': '',
-            'Цена в лизинге': '',
-            'Полный текст': ''
-        }
-        
-        try:
-            with open(txt_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            # Извлекаем метаданные после #изъятая
-            if '#изъятая' in content:
-                parts = content.split('#изъятая')
-                data['Полный текст'] = parts[0].strip()
-                metadata_content = parts[1].strip() if len(parts) > 1 else ''
-                
-                fields = {
-                    'Название': r'Название:\s*(.+)',
-                    'Ссылка': r'Ссылка:\s*(.+)',
-                    'Код предложения': r'Код предложения:\s*(.+)',
-                    'Цена в лизинге': r'Цена\s*[вВ]\s*лизинге:\s*(.+)',
-                }
-                
-                for key, pattern in fields.items():
-                    match = re.search(pattern, metadata_content)
-                    if match:
-                        data[key] = match.group(1).strip()
-            else:
-                data['Полный текст'] = content.strip()
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка парсинга {txt_file}: {e}")
-        
-        return data
-    
-    def count_images_in_folder(self, folder_path):
-        """Подсчитывает количество изображений в папке"""
-        count = 0
-        extensions = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')
-        
-        if os.path.exists(folder_path):
-            for file in os.listdir(folder_path):
-                if file.startswith('.'):
-                    continue
-                if file.lower().endswith(extensions):
-                    count += 1
-        
-        return count
-    
     def generate_report(self, user_id):
-        """Генерирует отчет в CSV формате и удаляет временные папки"""
+        """Генерирует отчет из метаданных в БД"""
         try:
             user_folder = self.fm.get_user_folder(user_id)
-            ads_folder = self.fm.get_ads_folder(user_id)
             
-            if not os.path.exists(ads_folder):
-                logger.warning(f"⚠️ Папка ads не найдена для пользователя {user_id}")
+            # Получаем все публикации пользователя
+            publications = self.db.get_publications(user_id)
+            
+            if not publications:
+                logger.warning(f"⚠️ Нет публикаций для пользователя {user_id}")
                 return None
             
             moscow_tz = pytz.timezone('Europe/Moscow')
             report_data = []
             
-            # Рекурсивно ищем все папки с текстовыми файлами
-            for root, dirs, files in os.walk(ads_folder):
-                # Проверяем наличие текстового файла
-                has_text = False
-                for file in files:
-                    if file.lower().endswith('.txt') or file.lower() == 'info':
-                        has_text = True
-                        break
+            for pub in publications:
+                folder_name = pub.get('folder_name')
+                chat_id = pub.get('group_id')
+                created_at = pub.get('created_at')
                 
-                if has_text:
-                    folder_name = os.path.relpath(root, ads_folder)
-                    if folder_name == '.':
-                        continue
-                    
-                    logger.info(f"📄 Обработка папки: {folder_name}")
-                    
-                    info = self.parse_info_file(root)
-                    
-                    # Получаем время публикации из БД
-                    pub_time = self.db.get_publication_time(user_id, folder_name)
-                    
-                    if pub_time:
-                        if isinstance(pub_time, str):
-                            pub_time = datetime.fromisoformat(pub_time)
-                        pub_time = pub_time.astimezone(moscow_tz)
-                        time_str = pub_time.strftime('%Y-%m-%d %H:%M:%S')
-                    else:
-                        time_str = datetime.now(moscow_tz).strftime('%Y-%m-%d %H:%M:%S')
-                    
-                    # Формируем ссылку на пост
-                    chat_id = self.fm.extract_chat_id_from_name(folder_name)
-                    post_link = f"https://max.ru/post/{chat_id}" if chat_id else ""
-                    
-                    # Считаем количество фото
-                    photo_count = self.count_images_in_folder(root)
-                    
-                    report_data.append({
-                        '№': len(report_data) + 1,
-                        'Папка': folder_name,
-                        'Время публикации (МСК)': time_str,
-                        'Ссылка на пост': post_link,
-                        'Ссылка (источник)': info.get('Ссылка', ''),
-                        'Марка/модель': info.get('Название', ''),
-                        'Код предложения': info.get('Код предложения', ''),
-                        'Цена в лизинге': info.get('Цена в лизинге', ''),
-                        'Количество фото': photo_count,
-                        'Текст объявления': info.get('Полный текст', '')[:200] + '...' if len(info.get('Полный текст', '')) > 200 else info.get('Полный текст', '')
-                    })
+                # Получаем метаданные из БД
+                metadata = self.db.get_ad_metadata(user_id, folder_name)
+                
+                # Время публикации
+                if created_at:
+                    if isinstance(created_at, str):
+                        created_at = datetime.fromisoformat(created_at)
+                    created_at = created_at.astimezone(moscow_tz)
+                    time_str = created_at.strftime('%Y-%m-%d %H:%M:%S')
+                else:
+                    time_str = datetime.now(moscow_tz).strftime('%Y-%m-%d %H:%M:%S')
+                
+                # Ссылка на пост
+                post_link = f"https://max.ru/post/{chat_id}" if chat_id else ""
+                
+                report_data.append({
+                    '№': len(report_data) + 1,
+                    'Папка': folder_name,
+                    'Время публикации (МСК)': time_str,
+                    'Ссылка на пост': post_link,
+                    'Ссылка (источник)': metadata.get('Ссылка', ''),
+                    'Марка/модель': metadata.get('Название', ''),
+                    'Код предложения': metadata.get('Код предложения', ''),
+                    'Цена в лизинге': metadata.get('Цена в лизинге', ''),
+                })
             
             if not report_data:
-                logger.warning(f"⚠️ Нет данных для отчета пользователя {user_id}")
                 return None
             
             # Сохраняем в CSV
@@ -182,14 +68,13 @@ class ReportGenerator:
             report_path = os.path.join(user_folder, report_filename)
             
             with open(report_path, 'w', encoding='utf-8-sig', newline='') as f:
-                if report_data:
-                    writer = csv.DictWriter(f, fieldnames=report_data[0].keys())
-                    writer.writeheader()
-                    writer.writerows(report_data)
+                writer = csv.DictWriter(f, fieldnames=report_data[0].keys())
+                writer.writeheader()
+                writer.writerows(report_data)
             
             logger.info(f"📊 Отчет создан: {report_path} ({len(report_data)} записей)")
             
-            # Удаляем временную папку ads/
+            # Очищаем временные данные
             self.cleanup_user_data(user_id, keep_report=True)
             
             return report_path
@@ -201,14 +86,14 @@ class ReportGenerator:
             return None
     
     def cleanup_user_data(self, user_id, keep_report=True):
-        """Удаляет временные данные пользователя, но сохраняет отчет"""
+        """Удаляет временные данные пользователя"""
         try:
             user_folder = self.fm.get_user_folder(user_id)
             if not os.path.exists(user_folder):
                 return
             
             if keep_report:
-                # Удаляем ВСЕ папки, кроме файлов отчетов
+                # Удаляем все папки, кроме файлов отчетов
                 for item in os.listdir(user_folder):
                     item_path = os.path.join(user_folder, item)
                     if os.path.isdir(item_path):
