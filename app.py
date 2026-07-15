@@ -79,7 +79,7 @@ api = APIClient()
 publisher = Publisher(api, fm, db)
 report_gen = ReportGenerator(fm, db)
 
-# ========== СТАРАЯ HTML СТРАНИЦА (НО С НОВЫМИ ЭНДПОИНТАМИ) ==========
+# ========== ПРОСТАЯ И НАДЕЖНАЯ HTML СТРАНИЦА ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -103,8 +103,6 @@ UPLOAD_PAGE = """
         .btn-success:hover { background: #218838; }
         .btn-danger { background: #dc3545; color: white; }
         .btn-danger:hover { background: #c82333; }
-        .btn-warning { background: #ffc107; color: #333; }
-        .btn-warning:hover { background: #e0a800; }
         .status { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
         .status.success { background: #d4edda; color: #155724; display: block; border-left: 4px solid #28a745; }
         .status.error { background: #f8d7da; color: #721c24; display: block; border-left: 4px solid #dc3545; }
@@ -121,7 +119,7 @@ UPLOAD_PAGE = """
         .button-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px; }
         .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
         .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; }
-        .report-btn { margin-top: 15px; }
+        .report-section { margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 10px; border: 1px solid #dee2e6; text-align: center; }
     </style>
 </head>
 <body>
@@ -136,13 +134,13 @@ UPLOAD_PAGE = """
             4️⃣ В тексте используйте разделитель <code>#изъятая</code>:<br>
             &nbsp;&nbsp;• Текст ДО разделителя — публикуется в чат<br>
             &nbsp;&nbsp;• Текст ПОСЛЕ разделителя — идет в отчет<br>
-            5️⃣ Перетащите головную папку в поле ниже<br>
-            6️⃣ Каждая папка отправляется отдельным запросом
+            5️⃣ Перетащите головную папку в поле ниже
         </div>
         
         <div class="drop-zone" id="dropZone">
             <span class="icon">📂</span>
             <p><strong>Перетащите головную папку сюда</strong></p>
+            <p>или</p>
             <button class="btn btn-primary" onclick="document.getElementById('folderInput').click()">Выбрать папку</button>
             <input type="file" id="folderInput" webkitdirectory multiple>
         </div>
@@ -151,7 +149,7 @@ UPLOAD_PAGE = """
             <div class="selected-info" id="selectedInfo"></div>
             <ul class="file-list" id="fileListContent"></ul>
             <div class="button-group">
-                <button class="btn btn-success" onclick="uploadFolders()">🚀 Опубликовать все папки</button>
+                <button class="btn btn-success" id="publishBtn" onclick="uploadFolders()">🚀 Опубликовать все папки</button>
                 <button class="btn btn-danger" onclick="clearFiles()">🗑️ Очистить</button>
             </div>
         </div>
@@ -163,16 +161,20 @@ UPLOAD_PAGE = """
         <div id="status" class="status"></div>
         <div id="log"></div>
         
-        <div class="report-btn">
+        <div class="report-section">
             <button class="btn btn-primary" onclick="getReport()">📊 Скачать отчет</button>
+            <p style="margin-top: 10px; color: #666; font-size: 14px;">После публикации всех папок</p>
         </div>
         
         <div class="footer">⚡ MAX Bot | Загрузка объявлений</div>
     </div>
 
     <script>
+        // Получаем user_id из URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const userId = urlParams.get('user_id') || 151296248;
+        
         let selectedFiles = [];
-        let userId = 151296248;
         
         const dropZone = document.getElementById('dropZone');
         const folderInput = document.getElementById('folderInput');
@@ -183,14 +185,25 @@ UPLOAD_PAGE = """
         const logDiv = document.getElementById('log');
         const progressBar = document.getElementById('progressBar');
         const progress = document.getElementById('progress');
+        const publishBtn = document.getElementById('publishBtn');
 
-        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
-        dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('dragover'); });
+        // Drag and Drop
+        dropZone.addEventListener('dragover', (e) => { 
+            e.preventDefault(); 
+            dropZone.classList.add('dragover'); 
+        });
+        
+        dropZone.addEventListener('dragleave', () => { 
+            dropZone.classList.remove('dragover'); 
+        });
+        
         dropZone.addEventListener('drop', (e) => {
             e.preventDefault();
             dropZone.classList.remove('dragover');
+            
             const items = e.dataTransfer.items;
             const files = [];
+            
             for (let item of items) {
                 if (item.kind === 'file') {
                     const entry = item.webkitGetAsEntry();
@@ -199,6 +212,7 @@ UPLOAD_PAGE = """
                     }
                 }
             }
+            
             if (files.length > 0) {
                 selectedFiles = files;
                 displayFiles(selectedFiles);
@@ -282,13 +296,155 @@ UPLOAD_PAGE = """
             statusDiv.style.display = 'block';
         }
 
+        function getReport() {
+            window.open(`/report/${userId}`, '_blank');
+        }
+
+        // ====== ОСНОВНАЯ ФУНКЦИЯ ПУБЛИКАЦИИ ======
+        async function uploadFolders() {
+            if (selectedFiles.length === 0) {
+                showStatus('error', '❌ Выберите папку для загрузки');
+                return;
+            }
+            
+            // Блокируем кнопку
+            publishBtn.disabled = true;
+            publishBtn.textContent = '⏳ Обработка...';
+            
+            showStatus('info', '⏳ Подготовка данных...');
+            progressBar.style.display = 'block';
+            progress.style.width = '0%';
+            progress.textContent = '0%';
+            logDiv.textContent = '';
+            addLog('🚀 Начинаем публикацию папок...');
+            
+            try {
+                // Группируем файлы по папкам
+                const folders = {};
+                selectedFiles.forEach(file => {
+                    const pathParts = file.webkitRelativePath.split('/');
+                    if (pathParts.length >= 2) {
+                        const folderName = pathParts[0] + '/' + pathParts[1];
+                        if (!folders[folderName]) {
+                            folders[folderName] = [];
+                        }
+                        folders[folderName].push(file);
+                    }
+                });
+                
+                const folderNames = Object.keys(folders);
+                const totalFolders = folderNames.length;
+                
+                addLog(`📁 Найдено ${totalFolders} папок`);
+                showStatus('info', `⏳ Обработка 0/${totalFolders} папок...`);
+                
+                let successCount = 0;
+                let failCount = 0;
+                const results = [];
+                
+                for (let i = 0; i < folderNames.length; i++) {
+                    const folderName = folderNames[i];
+                    const files = folders[folderName];
+                    
+                    // Обновляем прогресс
+                    const percent = Math.round((i / totalFolders) * 100);
+                    progress.style.width = percent + '%';
+                    progress.textContent = `${i}/${totalFolders}`;
+                    showStatus('info', `⏳ Обработка ${i+1}/${totalFolders}: ${folderName}`);
+                    
+                    try {
+                        // Подготавливаем данные для одной папки
+                        const folderData = await prepareFolderData(folderName, files);
+                        
+                        if (!folderData) {
+                            addLog(`⚠️ Пропускаем ${folderName}: нет текстового файла`);
+                            failCount++;
+                            results.push(`❌ ${folderName}: нет текстового файла`);
+                            continue;
+                        }
+                        
+                        // Отправляем на сервер
+                        addLog(`📤 Отправка ${i+1}/${totalFolders}: ${folderName}...`);
+                        
+                        const response = await fetch('/publish_folder', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                user_id: parseInt(userId),
+                                folder: folderData
+                            })
+                        });
+                        
+                        const result = await response.json();
+                        
+                        if (result.success) {
+                            successCount++;
+                            addLog(`✅ ${folderName}: опубликовано`);
+                            results.push(`✅ ${folderName}: успешно`);
+                        } else {
+                            failCount++;
+                            addLog(`❌ ${folderName}: ${result.message}`);
+                            results.push(`❌ ${folderName}: ${result.message}`);
+                        }
+                        
+                    } catch (error) {
+                        failCount++;
+                        addLog(`❌ ${folderName}: ошибка - ${error.message}`);
+                        results.push(`❌ ${folderName}: ${error.message}`);
+                    }
+                    
+                    // Задержка между запросами
+                    await new Promise(r => setTimeout(r, 500));
+                }
+                
+                // Финальный прогресс
+                progress.style.width = '100%';
+                progress.textContent = `${totalFolders}/${totalFolders}`;
+                
+                // Показываем результат
+                const statusType = failCount === 0 ? 'success' : (successCount > 0 ? 'warning' : 'error');
+                const statusMsg = failCount === 0 
+                    ? `✅ Завершено: ${successCount} успешно` 
+                    : `⚠️ Завершено: ${successCount} успешно, ${failCount} ошибок`;
+                showStatus(statusType, statusMsg);
+                
+                addLog(`\\n📊 ИТОГО: ${successCount} успешно, ${failCount} ошибок`);
+                
+                if (results.length > 0) {
+                    addLog('\\n📋 Детали:');
+                    results.slice(0, 20).forEach(r => addLog(r));
+                    if (results.length > 20) {
+                        addLog(`... и еще ${results.length - 20} папок`);
+                    }
+                }
+                
+                if (successCount > 0) {
+                    addLog(`\\n📊 Скачать отчет: /report/${userId}`);
+                    showStatus('success', `✅ Готово! ${successCount} папок опубликовано. Скачайте отчет.`);
+                }
+                
+            } catch (error) {
+                showStatus('error', '❌ Ошибка: ' + error.message);
+                addLog('❌ Ошибка: ' + error.message);
+            }
+            
+            // Разблокируем кнопку
+            publishBtn.disabled = false;
+            publishBtn.textContent = '🚀 Опубликовать все папки';
+        }
+
+        // ====== ПОДГОТОВКА ДАННЫХ ДЛЯ ОДНОЙ ПАПКИ ======
         async function prepareFolderData(folderName, files) {
+            // Находим текстовый файл
             const txtFile = files.find(f => f.name === 'info' || f.name.endsWith('.txt'));
             if (!txtFile) {
                 return null;
             }
             
+            // Читаем текст
             let fullText = await txtFile.text();
+            
+            // Разделяем на текст объявления и метаданные
             let adText = fullText;
             let metadataText = '';
             
@@ -298,7 +454,12 @@ UPLOAD_PAGE = """
                 metadataText = parts[1] ? parts[1].trim() : '';
             }
             
-            const imageFiles = files.filter(f => f.type && f.type.startsWith('image/')).slice(0, 3);
+            // Находим изображения (до 3)
+            const imageFiles = files
+                .filter(f => f.type && f.type.startsWith('image/'))
+                .slice(0, 3);
+            
+            // Конвертируем изображения в бинарный формат
             const images = [];
             for (const img of imageFiles) {
                 try {
@@ -321,120 +482,10 @@ UPLOAD_PAGE = """
             };
         }
 
-        async function uploadFolders() {
-            if (selectedFiles.length === 0) {
-                showStatus('error', '❌ Выберите папку для загрузки');
-                return;
-            }
-            
-            showStatus('info', '⏳ Подготовка данных...');
-            progressBar.style.display = 'block';
-            progress.style.width = '0%';
-            progress.textContent = '0%';
-            logDiv.textContent = '';
-            addLog('🚀 Начинаем публикацию папок по одной...');
-            
-            const folders = {};
-            selectedFiles.forEach(file => {
-                const pathParts = file.webkitRelativePath.split('/');
-                if (pathParts.length >= 2) {
-                    const folderName = pathParts[0] + '/' + pathParts[1];
-                    if (!folders[folderName]) {
-                        folders[folderName] = [];
-                    }
-                    folders[folderName].push(file);
-                }
-            });
-            
-            const folderNames = Object.keys(folders);
-            const totalFolders = folderNames.length;
-            
-            addLog(`📁 Найдено ${totalFolders} папок`);
-            showStatus('info', `⏳ Обработка 0/${totalFolders} папок...`);
-            
-            let successCount = 0;
-            let failCount = 0;
-            const results = [];
-            
-            for (let i = 0; i < folderNames.length; i++) {
-                const folderName = folderNames[i];
-                const files = folders[folderName];
-                
-                const percent = Math.round((i / totalFolders) * 100);
-                progress.style.width = percent + '%';
-                progress.textContent = `${i}/${totalFolders}`;
-                showStatus('info', `⏳ Обработка ${i+1}/${totalFolders}: ${folderName}`);
-                
-                try {
-                    const folderData = await prepareFolderData(folderName, files);
-                    
-                    if (!folderData) {
-                        addLog(`⚠️ Пропускаем ${folderName}: нет текстового файла`);
-                        failCount++;
-                        results.push(`❌ ${folderName}: нет текстового файла`);
-                        continue;
-                    }
-                    
-                    addLog(`📤 Отправка ${i+1}/${totalFolders}: ${folderName}...`);
-                    
-                    const response = await fetch('/publish_folder', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            user_id: userId,
-                            folder: folderData
-                        })
-                    });
-                    
-                    const result = await response.json();
-                    
-                    if (result.success) {
-                        successCount++;
-                        addLog(`✅ ${folderName}: опубликовано`);
-                        results.push(`✅ ${folderName}: успешно`);
-                    } else {
-                        failCount++;
-                        addLog(`❌ ${folderName}: ${result.message}`);
-                        results.push(`❌ ${folderName}: ${result.message}`);
-                    }
-                    
-                } catch (error) {
-                    failCount++;
-                    addLog(`❌ ${folderName}: ошибка - ${error.message}`);
-                    results.push(`❌ ${folderName}: ${error.message}`);
-                }
-                
-                await new Promise(r => setTimeout(r, 500));
-            }
-            
-            progress.style.width = '100%';
-            progress.textContent = `${totalFolders}/${totalFolders}`;
-            
-            const statusType = failCount === 0 ? 'success' : (successCount > 0 ? 'warning' : 'error');
-            const statusMsg = failCount === 0 
-                ? `✅ Завершено: ${successCount} успешно, ${failCount} ошибок` 
-                : `⚠️ Завершено: ${successCount} успешно, ${failCount} ошибок`;
-            showStatus(statusType, statusMsg);
-            
-            addLog(`\n📊 ИТОГО: ${successCount} успешно, ${failCount} ошибок`);
-            
-            if (results.length > 0) {
-                addLog('\n📋 Детали:');
-                results.slice(0, 20).forEach(r => addLog(r));
-                if (results.length > 20) {
-                    addLog(`... и еще ${results.length - 20} папок`);
-                }
-            }
-            
-            if (successCount > 0) {
-                addLog(`\n📊 Скачать отчет: /report/${userId}`);
-                showStatus('success', `✅ Готово! ${successCount} папок опубликовано. Скачайте отчет.`);
-            }
-        }
-
-        function getReport() {
-            window.open(`/report/${userId}`, '_blank');
-        }
+        // Логируем запуск
+        console.log('✅ Страница загружена, user_id:', userId);
+        addLog('📄 Страница загружена');
+        addLog(`👤 user_id: ${userId}`);
     </script>
 </body>
 </html>
@@ -467,7 +518,9 @@ def publish_folder():
         images = folder_data.get('images', [])
         
         logger.info(f"📦 Получена папка: {folder_name} от пользователя {user_id}")
+        logger.info(f"📝 Текст: {len(ad_text)} символов, 🖼️ Фото: {len(images)}")
         
+        # Обрабатываем папку
         success, message = publisher.publish_single_folder(
             user_id, folder_name, ad_text, metadata_text, full_text, images
         )
