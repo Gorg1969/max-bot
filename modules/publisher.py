@@ -5,6 +5,7 @@ import re
 import requests
 import threading
 import base64
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +15,9 @@ class Publisher:
         self.fm = file_manager
         self.db = db
         self.active_publishes = {}
+        self.publish_threads = {}
         self.FOLDER_TIMEOUT = 60  # Таймаут на обработку одной папки (сек)
+        self.STOP_FLAG = {}
 
     def extract_chat_id(self, folder_name):
         """Извлекает chat_id из названия папки"""
@@ -26,14 +29,20 @@ class Publisher:
             return f"-{match.group(1)}"
         return None
 
-    def _upload_file_to_max(self, image_data):
+    def _upload_file_to_max(self, image_data, user_id):
         """
         Загружает одно изображение через POST /uploads и возвращает токен
         Согласно документации: https://dev.max.ru/docs-api/methods/POST/uploads
         """
         try:
+            # Проверяем флаг остановки
+            if self.STOP_FLAG.get(user_id, False):
+                logger.info(f"⏹️ Остановка загрузки для пользователя {user_id}")
+                return None
+
             # 1. Получаем URL для загрузки
             upload_type = "image"
+            
             response = requests.post(
                 f"{self.api.base_url}/uploads",
                 headers={"Authorization": self.api.token},
@@ -43,17 +52,17 @@ class Publisher:
             )
             
             if response.status_code != 200:
-                logger.error(f"❌ Ошибка получения URL для загрузки: {response.status_code} - {response.text}")
+                logger.error(f"❌ Ошибка получения URL: {response.status_code} - {response.text[:200]}")
                 return None
             
             upload_data = response.json()
             upload_url = upload_data.get('url')
             
             if not upload_url:
-                logger.error(f"❌ Не получен URL для загрузки: {upload_data}")
+                logger.error(f"❌ Не получен URL: {upload_data}")
                 return None
             
-            logger.info(f"📤 Получен URL для загрузки: {upload_url[:50]}...")
+            logger.info(f"📤 Получен URL для загрузки: {upload_url[:80]}...")
             
             # 2. Загружаем файл по полученному URL
             # Преобразуем данные обратно в bytes
@@ -64,7 +73,6 @@ class Publisher:
             
             # Определяем MIME тип
             mime_type = 'image/jpeg'
-            # Постараемся определить по сигнатуре файла
             if len(image_bytes) > 4:
                 if image_bytes[:4] == b'\x89PNG':
                     mime_type = 'image/png'
@@ -73,11 +81,11 @@ class Publisher:
                 elif image_bytes[:4] == b'RIFF':
                     mime_type = 'image/webp'
             
+            # Загружаем файл через multipart/form-data
             files = {
                 'data': ('image.jpg', image_bytes, mime_type)
             }
             
-            # Загружаем файл
             upload_response = requests.post(
                 upload_url,
                 files=files,
@@ -86,17 +94,30 @@ class Publisher:
             )
             
             if upload_response.status_code != 200:
-                logger.error(f"❌ Ошибка загрузки файла: {upload_response.status_code} - {upload_response.text}")
+                logger.error(f"❌ Ошибка загрузки файла: {upload_response.status_code} - {upload_response.text[:200]}")
                 return None
             
             upload_result = upload_response.json()
-            token = upload_result.get('token')
+            
+            # Правильно извлекаем токен из структуры ответа
+            # Ответ приходит в формате: {"photos": {"photo_key": {"token": "..."}}}
+            token = None
+            
+            if 'photos' in upload_result and isinstance(upload_result['photos'], dict):
+                for photo_key, photo_data in upload_result['photos'].items():
+                    if isinstance(photo_data, dict) and 'token' in photo_data:
+                        token = photo_data['token']
+                        break
+            
+            # Если не нашли в photos, пробуем найти напрямую
+            if not token and 'token' in upload_result:
+                token = upload_result['token']
             
             if not token:
                 logger.error(f"❌ Не получен токен после загрузки: {upload_result}")
                 return None
             
-            logger.info(f"✅ Файл загружен, получен токен: {token[:10]}...")
+            logger.info(f"✅ Файл загружен, получен токен: {token[:20]}...")
             
             # Делаем паузу после загрузки, чтобы файл обработался на сервере
             time.sleep(1)
@@ -132,9 +153,11 @@ class Publisher:
             payload = {
                 "chat_id": chat_id,
                 "text": text,
-                "format": "markdown",
-                "attachments": attachments
+                "format": "markdown"
             }
+            
+            if attachments:
+                payload["attachments"] = attachments
             
             logger.info(f"📤 Отправка сообщения в чат {chat_id} с {len(attachments)} изображениями")
             
@@ -188,6 +211,11 @@ class Publisher:
         3. Сохраняет метаданные в БД
         """
         try:
+            # Проверяем флаг остановки
+            if self.STOP_FLAG.get(user_id, False):
+                logger.info(f"⏹️ Пропускаем папку {folder_name} - остановка")
+                return False, "Остановка пользователем"
+            
             start_time = time.time()
             
             # 1. Извлекаем chat_id
@@ -197,15 +225,22 @@ class Publisher:
             
             logger.info(f"📤 Публикация папки {folder_name} в чат {chat_id}")
             
-            # 2. Загружаем изображения (с таймаутом)
+            # 2. Загружаем изображения (только 1 для теста)
             image_tokens = []
-            for i, img_data in enumerate(images_data[:6]):
+            max_images = 1  # Для теста берем только 1 фото
+            
+            for i, img_data in enumerate(images_data[:max_images]):
+                # Проверяем флаг остановки
+                if self.STOP_FLAG.get(user_id, False):
+                    logger.info(f"⏹️ Остановка загрузки для пользователя {user_id}")
+                    return False, "Остановка пользователем"
+                
                 # Проверяем таймаут
                 if time.time() - start_time > self.FOLDER_TIMEOUT:
                     logger.warning(f"⏰ Таймаут обработки папки {folder_name} ({self.FOLDER_TIMEOUT} сек)")
                     return False, f"Таймаут обработки папки {folder_name}"
                 
-                logger.info(f"📤 Загрузка изображения {i+1}/{min(len(images_data), 6)} для {folder_name}")
+                logger.info(f"📤 Загрузка изображения {i+1}/{max_images} для {folder_name}")
                 
                 # Получаем данные изображения
                 img_bytes = img_data.get('data')
@@ -213,9 +248,10 @@ class Publisher:
                     continue
                 
                 # Загружаем изображение
-                token = self._upload_file_to_max(img_bytes)
+                token = self._upload_file_to_max(img_bytes, user_id)
                 if token:
                     image_tokens.append(token)
+                    logger.info(f"✅ Изображение {i+1} загружено, токен: {token[:20]}...")
                 else:
                     logger.warning(f"⚠️ Не удалось загрузить изображение {i+1} для {folder_name}")
             
@@ -246,12 +282,35 @@ class Publisher:
         return False
 
     def stop(self, user_id):
-        """Останавливает публикацию"""
-        if self.active_publishes.get(user_id, False):
-            self.active_publishes[user_id] = False
-            logger.info(f"⏹️ Публикация остановлена для {user_id}")
-            return True
-        return False
+        """Останавливает публикацию и удаляет все файлы из очереди"""
+        logger.info(f"⏹️ Остановка публикации для пользователя {user_id}")
+        
+        # Устанавливаем флаг остановки
+        self.STOP_FLAG[user_id] = True
+        
+        # Очищаем очередь
+        if user_id in self.publish_threads:
+            self.publish_threads[user_id] = None
+        
+        # Удаляем временные файлы пользователя
+        try:
+            user_folder = self.fm.get_user_folder(user_id)
+            if os.path.exists(user_folder):
+                import shutil
+                shutil.rmtree(user_folder)
+                os.makedirs(user_folder, exist_ok=True)
+                logger.info(f"🗑️ Удалены все файлы пользователя {user_id}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка удаления файлов: {e}")
+        
+        # Сбрасываем флаг через некоторое время
+        def reset_stop_flag():
+            time.sleep(5)
+            self.STOP_FLAG[user_id] = False
+        
+        threading.Thread(target=reset_stop_flag, daemon=True).start()
+        
+        return True
 
     def is_running(self, user_id):
-        return self.active_publishes.get(user_id, False)
+        return self.STOP_FLAG.get(user_id, False)
