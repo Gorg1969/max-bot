@@ -121,14 +121,9 @@ UPLOAD_PAGE = """
         .button-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px; }
         .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
         .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; }
-        .publish-controls { margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 10px; border: 1px solid #dee2e6; }
-        .publish-controls h3 { margin-top: 0; }
-        .status-badge { display: inline-block; padding: 5px 15px; border-radius: 20px; font-size: 14px; font-weight: bold; }
-        .status-badge.running { background: #28a745; color: white; }
-        .status-badge.stopped { background: #dc3545; color: white; }
-        .status-badge.idle { background: #6c757d; color: white; }
         .summary { background: #e8f5e9; padding: 15px; border-radius: 5px; margin: 10px 0; border-left: 4px solid #4caf50; }
         .summary.error { background: #ffebee; border-left-color: #f44336; }
+        .report-btn { margin-top: 10px; }
     </style>
 </head>
 <body>
@@ -144,7 +139,7 @@ UPLOAD_PAGE = """
             &nbsp;&nbsp;• Текст ДО разделителя — публикуется в чат<br>
             &nbsp;&nbsp;• Текст ПОСЛЕ разделителя — идет в отчет<br>
             5️⃣ Перетащите головную папку в поле ниже<br>
-            6️⃣ Фото обрабатываются на клиенте, затем отправляются по 1 папке за запрос
+            6️⃣ Каждая папка отправляется отдельным запросом
         </div>
         
         <div class="drop-zone" id="dropZone">
@@ -170,15 +165,15 @@ UPLOAD_PAGE = """
         <div id="status" class="status"></div>
         <div id="log"></div>
         
-        <div class="publish-controls">
-            <h3>📊 Управление</h3>
+        <div style="margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 10px; border: 1px solid #dee2e6;">
+            <h3>📊 Отчет</h3>
             <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
-                <span>Статус: <span id="publishStatus" class="status-badge idle">Неактивна</span></span>
-                <button class="btn btn-primary" onclick="getReport()">📊 Скачать отчет</button>
+                <button class="btn btn-primary" onclick="getReport()">📥 Скачать отчет</button>
+                <span style="color: #666; font-size: 14px;">После публикации всех папок</span>
             </div>
         </div>
         
-        <div class="footer">⚡ MAX Bot | Загрузка объявлений</div>
+        <div class="footer">⚡ MAX Bot | Загрузка объявлений | 1 папка = 1 запрос</div>
     </div>
 
     <script>
@@ -468,17 +463,6 @@ UPLOAD_PAGE = """
         function getReport() {
             window.open(`/report/${userId}`, '_blank');
         }
-
-        function updateStatusBadge(status) {
-            const badge = document.getElementById('publishStatus');
-            badge.className = 'status-badge ' + status;
-            const texts = {
-                'running': '🔄 Выполняется',
-                'idle': '⏸️ Неактивна',
-                'stopped': '⏹️ Остановлена'
-            };
-            badge.textContent = texts[status] || status;
-        }
     </script>
 </body>
 </html>
@@ -570,7 +554,8 @@ def webhook():
                 "📋 **Инструкция:**\n"
                 "1. Подготовьте папки с объявлениями\n"
                 "2. Используйте разделитель #изъятая\n"
-                "3. Фото до 3 шт на объявление"
+                "3. Фото до 3 шт на объявление\n"
+                "4. Каждая папка отправляется отдельно"
             )
             return jsonify({"ok": True}), 200
         
