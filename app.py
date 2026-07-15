@@ -135,8 +135,7 @@ UPLOAD_PAGE = """
             &nbsp;&nbsp;• Текст ДО разделителя — публикуется в чат<br>
             &nbsp;&nbsp;• Текст ПОСЛЕ разделителя — идет в отчет<br>
             5️⃣ Перетащите головную папку в поле ниже<br>
-            6️⃣ Фото преобразуются в бинарный код на клиенте<br>
-            7️⃣ Каждая папка отправляется отдельным запросом
+            6️⃣ Каждая папка отправляется отдельным запросом
         </div>
         
         <div class="drop-zone" id="dropZone">
@@ -311,24 +310,20 @@ UPLOAD_PAGE = """
                 metadataText = parts[1] ? parts[1].trim() : '';
             }
             
-            // Находим изображения (до 3) и преобразуем в бинарный код НА КЛИЕНТЕ
+            // Находим изображения (до 6) и читаем как ArrayBuffer
             const imageFiles = files
                 .filter(f => f.type && f.type.startsWith('image/'))
-                .slice(0, 3);
+                .slice(0, 6);
             
             const images = [];
             for (const img of imageFiles) {
                 try {
-                    // Читаем файл как ArrayBuffer (бинарные данные)
                     const arrayBuffer = await img.arrayBuffer();
-                    // Преобразуем в Uint8Array для отправки
-                    const uint8Array = new Uint8Array(arrayBuffer);
                     images.push({
                         name: img.name,
-                        data: Array.from(uint8Array), // Преобразуем в обычный массив для JSON
+                        data: Array.from(new Uint8Array(arrayBuffer)),
                         type: img.type || 'image/jpeg'
                     });
-                    addLog(`✅ Фото ${img.name} преобразовано в бинарный код (${uint8Array.length} байт)`);
                 } catch (e) {
                     addLog(`⚠️ Ошибка чтения ${img.name}: ${e.message}`);
                 }
@@ -363,7 +358,6 @@ UPLOAD_PAGE = """
             progress.textContent = '0%';
             logDiv.textContent = '';
             addLog('🚀 Начинаем обработку...');
-            addLog('📱 Преобразование фото в бинарный код на клиенте...');
             
             // Группируем файлы по папкам
             const folders = {};
@@ -398,7 +392,6 @@ UPLOAD_PAGE = """
                 showStatus('info', `⏳ Подготовка ${i+1}/${totalFolders}: ${folderName}`);
                 
                 try {
-                    // ПОДГОТАВЛИВАЕМ ДАННЫЕ НА КЛИЕНТЕ (включая бинарные фото)
                     addLog(`📤 Подготовка ${i+1}/${totalFolders}: ${folderName}...`);
                     const folderData = await prepareFolderData(folderName, files);
                     
@@ -411,7 +404,6 @@ UPLOAD_PAGE = """
                     
                     addLog(`📤 Отправка ${i+1}/${totalFolders}: ${folderName} (${folderData.images.length} фото)`);
                     
-                    // ОТПРАВЛЯЕМ НА СЕРВЕР (1 папка = 1 запрос)
                     const response = await fetch('/publish_folder', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -439,6 +431,7 @@ UPLOAD_PAGE = """
                     results.push(`❌ ${folderName}: ${error.message}`);
                 }
                 
+                // Задержка между папками, чтобы не превысить лимит запросов
                 await new Promise(r => setTimeout(r, 500));
             }
             
@@ -549,8 +542,8 @@ def webhook():
                 "📋 **Инструкция:**\n"
                 "1. Подготовьте папки с объявлениями\n"
                 "2. Используйте разделитель #изъятая\n"
-                "3. Фото до 3 шт на объявление\n"
-                "4. Фото преобразуются в бинарный код на клиенте"
+                "3. Фото до 6 шт на объявление\n"
+                "4. Фото отправляются согласно документации MAX API"
             )
             return jsonify({"ok": True}), 200
         
