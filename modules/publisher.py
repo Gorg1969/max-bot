@@ -15,48 +15,26 @@ class Publisher:
         self.db = db
         self.active_publishes = {}  # user_id -> bool
         self.uploaded_folders = {}  # user_id -> set()
-        self.FOLDER_TIMEOUT = 60  # Максимальное время на обработку одной папки
+        self.FOLDER_TIMEOUT = 60
     
     def extract_chat_id(self, folder_name):
-        """
-        Извлекает chat_id из названия папки
-        Формат: "1 -76868172202744" -> "-76868172202744"
-        Формат: "29 -76868172202744" -> "-76868172202744"
-        Формат: "объявление===/29 -76868172202744" -> "-76868172202744"
-        """
-        # Ищем цифры после дефиса (основной паттерн)
+        """Извлекает chat_id из названия папки"""
         match = re.search(r'-\s*(\d+)', folder_name)
         if match:
             return f"-{match.group(1)}"
-        
-        # Если не нашли, ищем любую последовательность цифр в конце
         match = re.search(r'(\d{10,})$', folder_name)
         if match:
             return f"-{match.group(1)}"
-        
         return None
     
     def extract_folder_number(self, folder_name):
-        """
-        Извлекает порядковый номер папки
-        Формат: "1 -76868172202744" -> "1"
-        Формат: "объявление===/29 -76868172202744" -> "29"
-        """
-        # Ищем число в начале
+        """Извлекает порядковый номер папки"""
         match = re.match(r'^(\d+)', folder_name)
         if match:
             return match.group(1)
-        
-        # Ищем число перед дефисом
-        match = re.search(r'(\d+)\s*-', folder_name)
-        if match:
-            return match.group(1)
-        
-        # Ищем число в пути
         match = re.search(r'/(\d+)\s*-', folder_name)
         if match:
             return match.group(1)
-        
         return None
     
     def get_sorted_images(self, folder_path, max_count=3):
@@ -81,50 +59,119 @@ class Publisher:
         images.sort()
         return images[:max_count]
     
-    def get_ad_text(self, folder_path):
-        """Извлекает текст объявления из info.txt"""
-        info_path = os.path.join(folder_path, 'info.txt')
-        if not os.path.exists(info_path):
+    def get_txt_file(self, folder_path):
+        """
+        Находит текстовый файл в папке
+        Ищет файлы с расширением .txt и файл 'info' без расширения
+        """
+        if not os.path.exists(folder_path):
             return None
         
         try:
-            with open(info_path, 'r', encoding='utf-8') as f:
+            for file in os.listdir(folder_path):
+                file_path = os.path.join(folder_path, file)
+                
+                # Пропускаем изображения
+                if file.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')):
+                    continue
+                
+                # Проверяем, что файл не слишком большой
+                try:
+                    size = os.path.getsize(file_path)
+                    if size == 0 or size > 1024 * 1024:  # Пустой или > 1MB
+                        continue
+                except:
+                    continue
+                
+                # Если файл с расширением .txt
+                if file.lower().endswith('.txt'):
+                    logger.info(f"📄 Найден .txt файл: {file}")
+                    return file_path
+                
+                # Если файл называется 'info' (без расширения)
+                if file.lower() == 'info':
+                    logger.info(f"📄 Найден файл info: {file}")
+                    return file_path
+                
+                # Пробуем прочитать как текстовый файл
+                try:
+                    with open(file_path, 'rb') as f:
+                        content = f.read(1024)
+                        # Если нет нулевых байтов - это текстовый файл
+                        if b'\x00' not in content:
+                            try:
+                                text_content = content.decode('utf-8', errors='ignore')
+                                # Если есть хотя бы одно слово или #изъятая - это наш файл
+                                if any(c.isalpha() for c in text_content) or '#изъятая' in text_content:
+                                    logger.info(f"📄 Найден текстовый файл: {file}")
+                                    return file_path
+                            except:
+                                pass
+                except:
+                    pass
+        except:
+            pass
+        
+        return None
+    
+    def get_ad_text(self, folder_path):
+        """
+        Извлекает текст объявления из текстового файла
+        Текст до #изъятая - тело объявления
+        """
+        txt_file = self.get_txt_file(folder_path)
+        if not txt_file:
+            logger.warning(f"⚠️ Не найден текстовый файл в {folder_path}")
+            return None
+        
+        try:
+            with open(txt_file, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            # Если есть разделитель, берем текст до него
+            # Разделитель #изъятая
             if '#изъятая' in content:
                 text = content.split('#изъятая')[0].strip()
             else:
                 text = content.strip()
             
+            logger.info(f"📝 Текст объявления: {len(text)} символов")
             return text
+            
         except Exception as e:
-            logger.error(f"❌ Ошибка чтения info.txt: {e}")
+            logger.error(f"❌ Ошибка чтения {txt_file}: {e}")
             return None
     
     def get_ad_metadata(self, folder_path):
-        """Извлекает метаданные из info.txt"""
-        info_path = os.path.join(folder_path, 'info.txt')
-        if not os.path.exists(info_path):
+        """
+        Извлекает метаданные из текстового файла (после #изъятая)
+        """
+        txt_file = self.get_txt_file(folder_path)
+        if not txt_file:
             return {}
         
         metadata = {}
         try:
-            with open(info_path, 'r', encoding='utf-8') as f:
+            with open(txt_file, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            fields = {
-                'Название': r'Название:\s*(.+)',
-                'Ссылка': r'Ссылка:\s*(.+)',
-                'Код предложения': r'Код предложения:\s*(.+)',
-                'Цена в лизинге': r'Цена\s*[вВ]\s*лизинге:\s*(.+)',
-            }
-            
-            for key, pattern in fields.items():
-                match = re.search(pattern, content)
-                if match:
-                    metadata[key] = match.group(1).strip()
-            
+            # Ищем метаданные после разделителя
+            if '#изъятая' in content:
+                parts = content.split('#изъятая')
+                if len(parts) > 1:
+                    metadata_content = parts[1].strip()
+                    
+                    fields = {
+                        'Название': r'Название:\s*(.+)',
+                        'Ссылка': r'Ссылка:\s*(.+)',
+                        'Код предложения': r'Код предложения:\s*(.+)',
+                        'Цена в лизинге': r'Цена\s*[вВ]\s*лизинге:\s*(.+)',
+                    }
+                    
+                    for key, pattern in fields.items():
+                        match = re.search(pattern, metadata_content)
+                        if match:
+                            metadata[key] = match.group(1).strip()
+        
         except Exception as e:
             logger.error(f"❌ Ошибка парсинга метаданных: {e}")
         
@@ -140,15 +187,12 @@ class Publisher:
             return None
     
     def _send_message_with_photos(self, chat_id, text, image_paths):
-        """
-        Отправляет сообщение с фото в MAX API
-        """
+        """Отправляет сообщение с фото в MAX API"""
         try:
             if not self.api.token:
                 logger.error("❌ Токен не установлен")
                 return False
             
-            # Подготавливаем файлы
             files = []
             for img_path in image_paths:
                 img_data = self.read_image_data(img_path)
@@ -156,13 +200,11 @@ class Publisher:
                     filename = os.path.basename(img_path)
                     files.append(('file', (filename, img_data, 'image/jpeg')))
             
-            # Формируем данные
             data = {
                 "chat_id": chat_id,
                 "text": text
             }
             
-            # Отправляем
             response = requests.post(
                 f"{self.api.base_url}/messages",
                 headers={"Authorization": self.api.token},
@@ -221,30 +263,25 @@ class Publisher:
             return False
     
     def publish_ad(self, user_id, folder_path, folder_name):
-        """
-        Публикует одно объявление
-        Извлекает chat_id из названия папки
-        """
+        """Публикует одно объявление"""
         try:
-            # 1. Извлекаем chat_id из названия папки
             chat_id = self.extract_chat_id(folder_name)
             if not chat_id:
                 return False, f"Не удалось извлечь ID чата из {folder_name}", None
             
-            # 2. Извлекаем номер папки (для логов)
             folder_num = self.extract_folder_number(folder_name) or folder_name
-            
             logger.info(f"📤 Публикация папки #{folder_num} в чат {chat_id}")
             
-            # 3. Получаем текст
+            # Получаем текст
             text = self.get_ad_text(folder_path)
             if not text:
-                return False, f"Не найден info.txt в {folder_name}", chat_id
+                return False, f"Не найден текстовый файл в {folder_name}", chat_id
             
-            # 4. Получаем изображения (до 3)
+            # Получаем изображения (до 3)
             image_paths = self.get_sorted_images(folder_path, max_count=3)
+            logger.info(f"🖼️ Найдено {len(image_paths)} изображений")
             
-            # 5. Отправляем
+            # Отправляем
             if image_paths:
                 success = self._send_message_with_photos(chat_id, text, image_paths)
             else:
@@ -253,7 +290,7 @@ class Publisher:
             if not success:
                 return False, f"Не удалось отправить в чат {chat_id}", chat_id
             
-            # 6. Сохраняем метаданные
+            # Сохраняем метаданные
             metadata = self.get_ad_metadata(folder_path)
             self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, time.time())
             self.db.add_publication(user_id, folder_name, chat_id)
@@ -265,7 +302,7 @@ class Publisher:
             return False, str(e), None
     
     def start(self, user_id):
-        """Запускает публикацию для пользователя"""
+        """Запускает публикацию"""
         try:
             if self.active_publishes.get(user_id, False):
                 self.api.send_message(user_id, "⚠️ Публикация уже запущена.")
@@ -281,38 +318,24 @@ class Publisher:
                 self.active_publishes[user_id] = False
                 return False
             
-            # Собираем все папки с info.txt
+            # Собираем все папки с текстовыми файлами
             subfolders = []
             for root, dirs, files in os.walk(ads_folder):
-                if 'info.txt' in files:
-                    rel_path = os.path.relpath(root, ads_folder)
-                    if rel_path != '.':
-                        subfolders.append(rel_path)
+                # Проверяем наличие текстового файла
+                for file in files:
+                    if file.lower().endswith('.txt') or file.lower() == 'info':
+                        rel_path = os.path.relpath(root, ads_folder)
+                        if rel_path != '.':
+                            subfolders.append(rel_path)
+                        break
             
             if not subfolders:
-                self.api.send_message(user_id, "❌ Нет папок с объявлениями.")
+                self.api.send_message(user_id, "❌ Нет папок с текстовыми файлами.")
                 self.active_publishes[user_id] = False
                 return False
             
-            # Группируем папки по chat_id для статистики
-            chat_groups = {}
-            for folder in subfolders:
-                chat_id = self.extract_chat_id(folder)
-                if chat_id:
-                    if chat_id not in chat_groups:
-                        chat_groups[chat_id] = []
-                    chat_groups[chat_id].append(folder)
-            
             total = len(subfolders)
-            chat_count = len(chat_groups)
-            
-            # Отправляем информацию о начале публикации
-            info_text = f"📢 Начинаю публикацию {total} объявлений\n"
-            info_text += f"📋 Чатов: {chat_count}\n"
-            for chat_id, folders in chat_groups.items():
-                info_text += f"  • {chat_id}: {len(folders)} объявлений\n"
-            
-            self.api.send_message(user_id, info_text)
+            self.api.send_message(user_id, f"📢 Начинаю публикацию {total} объявлений...")
             
             published = 0
             failed = 0
@@ -337,24 +360,15 @@ class Publisher:
                     results.append(f"❌ {folder_name}: {message}")
                     logger.warning(f"❌ [{idx+1}/{total}] {message}")
                 
-                time.sleep(2)  # Задержка между постами
+                time.sleep(2)
             
             self.active_publishes[user_id] = False
             
-            # Отправляем результат
             result_text = f"📊 **Результат публикации:**\n\n"
             result_text += f"📁 Всего папок: {total}\n"
             result_text += f"✅ Успешно: {published}\n"
             if failed > 0:
                 result_text += f"❌ Ошибок: {failed}\n"
-            
-            # Статистика по чатам
-            if chat_count > 1:
-                result_text += f"\n📋 По чатам:\n"
-                for chat_id, folders in chat_groups.items():
-                    # Считаем сколько опубликовано из этой группы
-                    published_in_chat = sum(1 for f in folders if f in [r.replace('✅ ', '').replace('❌ ', '').split(':')[0] for r in results if '✅' in r])
-                    result_text += f"  • {chat_id}: {published_in_chat}/{len(folders)}\n"
             
             if results:
                 result_text += f"\n📋 Детали:\n" + "\n".join(results[:10])
