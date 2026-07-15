@@ -548,7 +548,9 @@ def webhook():
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/stop':
-            api.send_message(user_id, "⏹️ Публикация остановлена.")
+            # Останавливаем публикацию и удаляем все файлы
+            publisher.stop(user_id)
+            api.send_message(user_id, "⏹️ **Публикация остановлена!**\n\n✅ Все процессы остановлены\n🗑️ Временные файлы удалены")
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/report':
