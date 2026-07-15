@@ -74,16 +74,80 @@ class Publisher:
                 return f.read()
     
     def get_sorted_images(self, folder_path, max_count=10):
+        """Возвращает отсортированный список изображений (до 10)"""
         images = []
         if not os.path.exists(folder_path):
+            logger.warning(f"⚠️ Папка не существует: {folder_path}")
             return images
-        for file in os.listdir(folder_path):
-            if file.lower().endswith(('.jpg', '.jpeg', '.png')):
+        
+        # Логируем все файлы в папке для отладки
+        all_files = os.listdir(folder_path)
+        logger.info(f"📂 Файлы в папке: {all_files}")
+        
+        for file in all_files:
+            # Проверяем расширения (включая большие буквы)
+            if file.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')):
                 if file.startswith('.'):
                     continue
                 images.append(file)
+                logger.info(f"🖼️ Найдено изображение: {file}")
+        
         images.sort()
-        return images[:max_count]
+        result = images[:max_count]
+        logger.info(f"📸 Всего изображений: {len(result)}")
+        return result
+    
+    def parse_info_file(self, info_path):
+        """
+        Парсит info.txt:
+        - До разделителя "#изъятая" - текст для объявления
+        - После разделителя - данные для отчета
+        """
+        try:
+            with open(info_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Разделитель
+            delimiter = "#изъятая"
+            
+            if delimiter in content:
+                parts = content.split(delimiter, 1)
+                ad_text = parts[0].strip()
+                metadata_part = parts[1].strip() if len(parts) > 1 else ""
+            else:
+                # Если разделителя нет - всё содержимое в объявление
+                ad_text = content.strip()
+                metadata_part = ""
+            
+            # Парсим метаданные для отчета
+            metadata = {}
+            if metadata_part:
+                lines = metadata_part.split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if ':' in line:
+                        key, value = line.split(':', 1)
+                        key = key.strip()
+                        value = value.strip()
+                        # Убираем markdown ссылки
+                        if '[' in value and ']' in value and '(' in value and ')' in value:
+                            import re
+                            url_match = re.search(r'\(([^)]+)\)', value)
+                            if url_match:
+                                value = url_match.group(1)
+                        metadata[key] = value
+            
+            return {
+                'ad_text': ad_text,       # Только для объявления
+                'metadata': metadata      # Только для отчета
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка парсинга info.txt: {e}")
+            return {
+                'ad_text': content,
+                'metadata': {}
+            }
     
     def start(self, user_id):
         try:
@@ -95,9 +159,8 @@ class Publisher:
             logger.info(f"🚀 Запуск публикации для пользователя {user_id}")
             self.user_states[user_id] = UserState.PUBLISHING
             
-            # ===== ИСПОЛЬЗУЕМ ФИКСИРОВАННЫЙ ПУТЬ =====
+            # Получаем папки из ads/
             subfolders = self.fm.get_subfolders(user_id)
-            # =========================================
             
             if not subfolders:
                 self.api.send_message(user_id, "❌ Нет папок с объявлениями для публикации.")
@@ -113,28 +176,32 @@ class Publisher:
                     break
                 
                 try:
-                    # ===== ПУТЬ К ПАПКЕ В ads/ =====
                     folder_path = self.fm.get_folder_path(user_id, folder_name)
-                    # ================================
                     
                     info_path = os.path.join(folder_path, 'info.txt')
                     if not os.path.exists(info_path):
+                        logger.warning(f"⚠️ Нет info.txt в {folder_path}")
                         continue
                     
-                    with open(info_path, 'r', encoding='utf-8') as f:
-                        text = f.read()
+                    # ===== ПАРСИМ INFO.TXT =====
+                    parsed = self.parse_info_file(info_path)
+                    ad_text = parsed['ad_text']          # Только для объявления
+                    metadata = parsed['metadata']        # Только для отчета
+                    # =============================
                     
                     chat_id = self.extract_chat_id(folder_name)
                     if not chat_id:
                         logger.warning(f"⚠️ Не удалось извлечь ID чата из {folder_name}")
                         continue
                     
+                    # ===== ПОЛУЧАЕМ ИЗОБРАЖЕНИЯ =====
                     images = self.get_sorted_images(folder_path, max_count=10)
-                    logger.info(f"📤 Публикация в чат {chat_id}: {folder_name}, фото: {len(images)}")
+                    # ================================
                     
                     if self.user_states.get(user_id) == UserState.STOPPED:
                         break
                     
+                    # Подготавливаем фото
                     photo_files = []
                     for img_name in images:
                         img_path = os.path.join(folder_path, img_name)
@@ -146,20 +213,30 @@ class Publisher:
                         except Exception as e:
                             logger.error(f"❌ Ошибка подготовки {img_name}: {e}")
                     
+                    # Отправляем
                     if photo_files:
                         success = self.api.send_photos_to_chat(
                             chat_id=chat_id,
                             photo_files=photo_files,
-                            text=text
+                            text=ad_text
                         )
                     else:
-                        success = self.api.send_message_to_chat(chat_id, text)
+                        success = self.api.send_message_to_chat(chat_id, ad_text)
                     
                     if not success:
                         logger.error(f"❌ Не удалось отправить объявление в {chat_id}")
                         continue
                     
+                    # Сохраняем в БД с метаданными для отчета
                     self.db.add_publication(user_id, folder_name, chat_id)
+                    self.db.save_ad_metadata(
+                        user_id=user_id,
+                        folder_name=folder_name,
+                        chat_id=chat_id,
+                        metadata=metadata,
+                        published_at=time.time()
+                    )
+                    
                     published += 1
                     logger.info(f"✅ Опубликовано: {folder_name}")
                     time.sleep(2)
@@ -172,6 +249,9 @@ class Publisher:
             
             if published > 0:
                 self.api.send_message(user_id, f"✅ Публикация завершена! Опубликовано {published} объявлений.")
+                # Очищаем папку после публикации
+                self.fm.clear_ads_folder(user_id)
+                logger.info(f"🗑️ Папка ads пользователя {user_id} очищена после публикации")
             else:
                 self.api.send_message(user_id, "❌ Не удалось опубликовать ни одного объявления.")
             
