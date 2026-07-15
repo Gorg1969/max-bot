@@ -3,7 +3,7 @@ import os
 import time
 import re
 from enum import Enum
-from PIL import Image, ExifTags
+import requests
 import io
 
 logger = logging.getLogger(__name__)
@@ -18,33 +18,41 @@ class Publisher:
         self.api = api
         self.fm = file_manager
         self.db = db
-        self.user_states = {}  # user_id -> UserState
+        self.user_states = {}
     
     def extract_chat_id(self, folder_name):
+        """Извлекает chat_id из названия папки"""
         match = re.search(r'-\s*(\d+)', folder_name)
         if match:
             return f"-{match.group(1)}"
         return None
     
-    def get_sorted_images(self, folder_path, max_count=10):
-        """Возвращает отсортированный список изображений (до 10) - РЕГИСТРОНЕЗАВИСИМО!"""
+    def get_sorted_images(self, folder_path, max_count=6):
+        """
+        Возвращает отсортированный список изображений (до 6)
+        Сортировка по имени файла
+        """
         images = []
         if not os.path.exists(folder_path):
+            logger.warning(f"⚠️ Папка не существует: {folder_path}")
             return images
         
-        # Разрешенные расширения (все регистры)
+        # Разрешенные расширения
         allowed_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')
         
         for file in os.listdir(folder_path):
             if file.startswith('.'):
                 continue
-            # Приводим к нижнему регистру для проверки
             if file.lower().endswith(allowed_extensions):
                 images.append(file)
                 logger.info(f"🖼️ Найдено изображение: {file}")
         
+        # Сортируем по имени
         images.sort()
-        return images[:max_count]
+        # Берем первые 6
+        result = images[:max_count]
+        logger.info(f"📸 Найдено {len(images)} изображений, взято {len(result)}")
+        return result
     
     def parse_info_file(self, info_path):
         """
@@ -75,8 +83,8 @@ class Publisher:
                         key, value = line.split(':', 1)
                         key = key.strip()
                         value = value.strip()
+                        # Извлекаем URL из скобок
                         if '[' in value and ']' in value and '(' in value and ')' in value:
-                            import re
                             url_match = re.search(r'\(([^)]+)\)', value)
                             if url_match:
                                 value = url_match.group(1)
@@ -95,9 +103,12 @@ class Publisher:
             }
     
     def start(self, user_id):
+        """Запускает публикацию объявлений"""
         try:
+            logger.info(f"🚀 ЗАПУСК ПУБЛИКАЦИИ ДЛЯ ПОЛЬЗОВАТЕЛЯ {user_id}")
+            
             if self.user_states.get(user_id) == UserState.PUBLISHING:
-                logger.warning(f"⚠️ Публикация уже запущена")
+                logger.warning(f"⚠️ Публикация уже запущена для {user_id}")
                 self.api.send_message(user_id, "⚠️ Публикация уже запущена. Дождитесь завершения.")
                 return False
             
@@ -105,7 +116,10 @@ class Publisher:
             self.user_states[user_id] = UserState.PUBLISHING
             
             # Получаем папки из ads/
+            logger.info(f"📁 Поиск папок с info.txt для пользователя {user_id}")
             subfolders = self.fm.get_subfolders(user_id)
+            
+            logger.info(f"📁 Найдено папок: {len(subfolders)}")
             
             if not subfolders:
                 self.api.send_message(user_id, "❌ Нет папок с объявлениями для публикации.")
@@ -116,7 +130,9 @@ class Publisher:
             published = 0
             failed = 0
             
-            for folder_name in subfolders:
+            for idx, folder_name in enumerate(subfolders, 1):
+                logger.info(f"📝 Обработка папки {idx}/{len(subfolders)}: {folder_name}")
+                
                 # Проверяем остановку
                 if self.user_states.get(user_id) == UserState.STOPPED:
                     logger.info(f"⏹️ Публикация остановлена пользователем {user_id}")
@@ -124,6 +140,7 @@ class Publisher:
                 
                 try:
                     folder_path = self.fm.get_folder_path(user_id, folder_name)
+                    logger.info(f"📂 Путь к папке: {folder_path}")
                     
                     info_path = os.path.join(folder_path, 'info.txt')
                     if not os.path.exists(info_path):
@@ -134,19 +151,22 @@ class Publisher:
                     parsed = self.parse_info_file(info_path)
                     ad_text = parsed['ad_text']
                     metadata = parsed['metadata']
+                    logger.info(f"📄 Текст объявления: {ad_text[:100]}...")
                     
                     chat_id = self.extract_chat_id(folder_name)
                     if not chat_id:
                         logger.warning(f"⚠️ Не удалось извлечь ID чата из {folder_name}")
                         continue
                     
-                    # Получаем изображения
-                    images = self.get_sorted_images(folder_path, max_count=10)
+                    logger.info(f"💬 Chat ID: {chat_id}")
+                    
+                    # Получаем изображения (до 6)
+                    images = self.get_sorted_images(folder_path, max_count=6)
                     
                     if self.user_states.get(user_id) == UserState.STOPPED:
                         break
                     
-                    # Подготавливаем фото
+                    # Подготавливаем фото для загрузки через API MAX
                     photo_files = []
                     for img_name in images:
                         img_path = os.path.join(folder_path, img_name)
@@ -160,8 +180,9 @@ class Publisher:
                         except Exception as e:
                             logger.error(f"❌ Ошибка чтения {img_name}: {e}")
                     
-                    # Отправляем
+                    # Отправляем через API MAX
                     if photo_files:
+                        logger.info(f"📤 Отправка {len(photo_files)} фото в чат {chat_id}")
                         success = self.api.send_photos_to_chat(
                             chat_id=chat_id,
                             photo_files=photo_files,
@@ -187,27 +208,38 @@ class Publisher:
                     )
                     
                     published += 1
-                    logger.info(f"✅ Опубликовано: {folder_name}")
+                    logger.info(f"✅ Опубликовано: {folder_name} ({published}/{len(subfolders)})")
+                    
+                    # Отправляем прогресс пользователю
+                    if published % 5 == 0 or published == len(subfolders):
+                        self.api.send_message(user_id, f"📊 Прогресс: {published}/{len(subfolders)} объявлений опубликовано")
+                    
+                    # Пауза между публикациями
                     time.sleep(2)
                     
                 except Exception as e:
                     logger.error(f"❌ Ошибка при публикации {folder_name}: {e}")
+                    import traceback
+                    traceback.print_exc()
                     failed += 1
                     continue
             
             self.user_states[user_id] = UserState.IDLE
             
-            # Очищаем папку ТОЛЬКО ПОСЛЕ ВСЕХ ПУБЛИКАЦИЙ
+            # Очищаем папку ads после всех публикаций
             self.fm.clear_ads_folder(user_id)
             logger.info(f"🗑️ Папка ads пользователя {user_id} очищена после публикации")
             
+            # Отправляем итоговое сообщение
             if published > 0:
                 self.api.send_message(user_id, f"✅ Публикация завершена! Опубликовано {published} объявлений.")
                 if failed > 0:
                     self.api.send_message(user_id, f"⚠️ {failed} объявлений не опубликованы (ошибки).")
+                self.api.send_message(user_id, f"📊 Для получения отчета напишите /report")
             else:
                 self.api.send_message(user_id, "❌ Не удалось опубликовать ни одного объявления.")
             
+            logger.info(f"🏁 Публикация завершена для {user_id}: опубликовано {published}, ошибок {failed}")
             return True
             
         except Exception as e:
@@ -219,6 +251,7 @@ class Publisher:
             return False
     
     def stop(self, user_id):
+        """Останавливает публикацию"""
         current_state = self.user_states.get(user_id, UserState.IDLE)
         if current_state == UserState.PUBLISHING:
             self.user_states[user_id] = UserState.STOPPED
