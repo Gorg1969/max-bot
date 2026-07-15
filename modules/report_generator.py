@@ -74,7 +74,7 @@ class ReportGenerator:
             
             logger.info(f"📊 Отчет создан: {report_path} ({len(report_data)} записей)")
             
-            # Очищаем временные данные
+            # Очищаем временные данные (но оставляем отчет)
             self.cleanup_user_data(user_id, keep_report=True)
             
             return report_path
