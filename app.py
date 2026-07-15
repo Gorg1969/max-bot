@@ -79,7 +79,7 @@ api = APIClient()
 publisher = Publisher(api, fm, db)
 report_gen = ReportGenerator(fm, db)
 
-# ========== HTML СТРАНИЦА ==========
+# ========== СТАРАЯ HTML СТРАНИЦА (НО С НОВЫМИ ЭНДПОИНТАМИ) ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -87,7 +87,7 @@ UPLOAD_PAGE = """
     <meta charset="UTF-8">
     <title>Загрузка объявлений</title>
     <style>
-        body { font-family: Arial; max-width: 900px; margin: 50px auto; padding: 20px; background: #f5f5f5; }
+        body { font-family: Arial; max-width: 800px; margin: 50px auto; padding: 20px; background: #f5f5f5; }
         .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
         h1 { color: #333; margin-top: 0; }
         .drop-zone { border: 2px dashed #007bff; padding: 40px; margin: 20px 0; border-radius: 10px; background: #f8f9fa; text-align: center; cursor: pointer; transition: all 0.3s; }
@@ -117,13 +117,11 @@ UPLOAD_PAGE = """
         .progress-bar .progress { height: 100%; background: linear-gradient(90deg, #28a745, #20c997); transition: width 0.3s; width: 0%; display: flex; align-items: center; justify-content: center; color: white; font-size: 12px; font-weight: bold; }
         .instructions { background: #fff3cd; padding: 15px 20px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107; }
         .instructions code { background: #f8f9fa; padding: 2px 8px; border-radius: 3px; font-size: 14px; color: #d63384; }
-        #log { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; font-family: 'Courier New', monospace; font-size: 12px; max-height: 400px; overflow-y: auto; margin: 20px 0; display: none; white-space: pre-wrap; line-height: 1.5; }
+        #log { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; font-family: 'Courier New', monospace; font-size: 12px; max-height: 300px; overflow-y: auto; margin: 20px 0; display: none; white-space: pre-wrap; line-height: 1.5; }
         .button-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px; }
         .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
         .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; }
-        .summary { background: #e8f5e9; padding: 15px; border-radius: 5px; margin: 10px 0; border-left: 4px solid #4caf50; }
-        .summary.error { background: #ffebee; border-left-color: #f44336; }
-        .report-btn { margin-top: 10px; }
+        .report-btn { margin-top: 15px; }
     </style>
 </head>
 <body>
@@ -153,7 +151,7 @@ UPLOAD_PAGE = """
             <div class="selected-info" id="selectedInfo"></div>
             <ul class="file-list" id="fileListContent"></ul>
             <div class="button-group">
-                <button class="btn btn-success" onclick="uploadFoldersOneByOne()">🚀 Опубликовать все папки</button>
+                <button class="btn btn-success" onclick="uploadFolders()">🚀 Опубликовать все папки</button>
                 <button class="btn btn-danger" onclick="clearFiles()">🗑️ Очистить</button>
             </div>
         </div>
@@ -165,15 +163,11 @@ UPLOAD_PAGE = """
         <div id="status" class="status"></div>
         <div id="log"></div>
         
-        <div style="margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 10px; border: 1px solid #dee2e6;">
-            <h3>📊 Отчет</h3>
-            <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
-                <button class="btn btn-primary" onclick="getReport()">📥 Скачать отчет</button>
-                <span style="color: #666; font-size: 14px;">После публикации всех папок</span>
-            </div>
+        <div class="report-btn">
+            <button class="btn btn-primary" onclick="getReport()">📊 Скачать отчет</button>
         </div>
         
-        <div class="footer">⚡ MAX Bot | Загрузка объявлений | 1 папка = 1 запрос</div>
+        <div class="footer">⚡ MAX Bot | Загрузка объявлений</div>
     </div>
 
     <script>
@@ -289,20 +283,12 @@ UPLOAD_PAGE = """
         }
 
         async function prepareFolderData(folderName, files) {
-            // Находим текстовый файл
-            const txtFile = files.find(f => 
-                f.name === 'info' || 
-                f.name.endsWith('.txt')
-            );
-            
+            const txtFile = files.find(f => f.name === 'info' || f.name.endsWith('.txt'));
             if (!txtFile) {
                 return null;
             }
             
-            // Читаем текст
             let fullText = await txtFile.text();
-            
-            // Разделяем на текст объявления и метаданные
             let adText = fullText;
             let metadataText = '';
             
@@ -312,12 +298,7 @@ UPLOAD_PAGE = """
                 metadataText = parts[1] ? parts[1].trim() : '';
             }
             
-            // Находим изображения (до 3)
-            const imageFiles = files
-                .filter(f => f.type && f.type.startsWith('image/'))
-                .slice(0, 3);
-            
-            // Конвертируем изображения в бинарный формат
+            const imageFiles = files.filter(f => f.type && f.type.startsWith('image/')).slice(0, 3);
             const images = [];
             for (const img of imageFiles) {
                 try {
@@ -340,7 +321,7 @@ UPLOAD_PAGE = """
             };
         }
 
-        async function uploadFoldersOneByOne() {
+        async function uploadFolders() {
             if (selectedFiles.length === 0) {
                 showStatus('error', '❌ Выберите папку для загрузки');
                 return;
@@ -351,9 +332,8 @@ UPLOAD_PAGE = """
             progress.style.width = '0%';
             progress.textContent = '0%';
             logDiv.textContent = '';
-            addLog('🚀 Начинаем загрузку папок по одной...');
+            addLog('🚀 Начинаем публикацию папок по одной...');
             
-            // Группируем файлы по папкам
             const folders = {};
             selectedFiles.forEach(file => {
                 const pathParts = file.webkitRelativePath.split('/');
@@ -380,14 +360,12 @@ UPLOAD_PAGE = """
                 const folderName = folderNames[i];
                 const files = folders[folderName];
                 
-                // Обновляем прогресс
                 const percent = Math.round((i / totalFolders) * 100);
                 progress.style.width = percent + '%';
                 progress.textContent = `${i}/${totalFolders}`;
                 showStatus('info', `⏳ Обработка ${i+1}/${totalFolders}: ${folderName}`);
                 
                 try {
-                    // Подготавливаем данные для одной папки
                     const folderData = await prepareFolderData(folderName, files);
                     
                     if (!folderData) {
@@ -397,7 +375,6 @@ UPLOAD_PAGE = """
                         continue;
                     }
                     
-                    // Отправляем одну папку
                     addLog(`📤 Отправка ${i+1}/${totalFolders}: ${folderName}...`);
                     
                     const response = await fetch('/publish_folder', {
@@ -427,15 +404,12 @@ UPLOAD_PAGE = """
                     results.push(`❌ ${folderName}: ${error.message}`);
                 }
                 
-                // Небольшая задержка между запросами
                 await new Promise(r => setTimeout(r, 500));
             }
             
-            // Финальный прогресс
             progress.style.width = '100%';
             progress.textContent = `${totalFolders}/${totalFolders}`;
             
-            // Показываем результат
             const statusType = failCount === 0 ? 'success' : (successCount > 0 ? 'warning' : 'error');
             const statusMsg = failCount === 0 
                 ? `✅ Завершено: ${successCount} успешно, ${failCount} ошибок` 
@@ -444,7 +418,6 @@ UPLOAD_PAGE = """
             
             addLog(`\n📊 ИТОГО: ${successCount} успешно, ${failCount} ошибок`);
             
-            // Показываем детали
             if (results.length > 0) {
                 addLog('\n📋 Детали:');
                 results.slice(0, 20).forEach(r => addLog(r));
@@ -453,7 +426,6 @@ UPLOAD_PAGE = """
                 }
             }
             
-            // Если есть успешные - предлагаем отчет
             if (successCount > 0) {
                 addLog(`\n📊 Скачать отчет: /report/${userId}`);
                 showStatus('success', `✅ Готово! ${successCount} папок опубликовано. Скачайте отчет.`);
@@ -480,9 +452,6 @@ def upload_page():
 
 @app.route('/publish_folder', methods=['POST'])
 def publish_folder():
-    """
-    Принимает данные ОДНОЙ папки от клиента
-    """
     try:
         data = request.get_json()
         user_id = data.get('user_id')
@@ -498,23 +467,15 @@ def publish_folder():
         images = folder_data.get('images', [])
         
         logger.info(f"📦 Получена папка: {folder_name} от пользователя {user_id}")
-        logger.info(f"📝 Текст: {len(ad_text)} символов, 🖼️ Фото: {len(images)}")
         
-        # Обрабатываем папку
         success, message = publisher.publish_single_folder(
             user_id, folder_name, ad_text, metadata_text, full_text, images
         )
         
         if success:
-            return jsonify({
-                'success': True,
-                'message': f'Папка {folder_name} опубликована'
-            })
+            return jsonify({'success': True, 'message': f'Папка {folder_name} опубликована'})
         else:
-            return jsonify({
-                'success': False,
-                'message': message
-            }), 500
+            return jsonify({'success': False, 'message': message}), 500
         
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
@@ -554,8 +515,7 @@ def webhook():
                 "📋 **Инструкция:**\n"
                 "1. Подготовьте папки с объявлениями\n"
                 "2. Используйте разделитель #изъятая\n"
-                "3. Фото до 3 шт на объявление\n"
-                "4. Каждая папка отправляется отдельно"
+                "3. Фото до 3 шт на объявление"
             )
             return jsonify({"ok": True}), 200
         
