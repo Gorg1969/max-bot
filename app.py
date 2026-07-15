@@ -134,7 +134,7 @@ UPLOAD_PAGE = """
             &nbsp;&nbsp;• Текст ДО разделителя — публикуется в чат<br>
             &nbsp;&nbsp;• Текст ПОСЛЕ разделителя — идет в отчет<br>
             5️⃣ Перетащите головную папку в поле ниже<br>
-            6️⃣ <strong>Фото сжимаются на клиенте</strong> (макс. ширина 1200px, качество 85%)<br>
+            6️⃣ Фото преобразуются в бинарный код на клиенте<br>
             7️⃣ Каждая папка отправляется отдельным запросом
         </div>
         
@@ -170,7 +170,6 @@ UPLOAD_PAGE = """
     </div>
 
     <script>
-        // Получаем user_id из URL
         const urlParams = new URLSearchParams(window.location.search);
         const userId = urlParams.get('user_id') || 151296248;
         
@@ -289,63 +288,6 @@ UPLOAD_PAGE = """
             window.open(`/report/${userId}`, '_blank');
         }
 
-        // ====== СЖАТИЕ ИЗОБРАЖЕНИЯ НА КЛИЕНТЕ ======
-        function compressImage(file, maxWidth=1200, quality=0.85) {
-            return new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = function(e) {
-                    const img = new Image();
-                    img.onload = function() {
-                        let width = img.width;
-                        let height = img.height;
-                        
-                        if (width > maxWidth) {
-                            const ratio = maxWidth / width;
-                            width = maxWidth;
-                            height = height * ratio;
-                        }
-                        
-                        const canvas = document.createElement('canvas');
-                        canvas.width = width;
-                        canvas.height = height;
-                        const ctx = canvas.getContext('2d');
-                        ctx.drawImage(img, 0, 0, width, height);
-                        
-                        const compressedDataUrl = canvas.toDataURL('image/jpeg', quality);
-                        const compressedBlob = dataURLToBlob(compressedDataUrl);
-                        
-                        resolve({
-                            blob: compressedBlob,
-                            name: file.name.replace(/\\.[^.]+$/, '') + '.jpg',
-                            size: compressedBlob.size,
-                            originalSize: file.size
-                        });
-                    };
-                    img.onerror = function() {
-                        reject(new Error('Ошибка загрузки изображения'));
-                    };
-                    img.src = e.target.result;
-                };
-                reader.onerror = function() {
-                    reject(new Error('Ошибка чтения файла'));
-                };
-                reader.readAsDataURL(file);
-            });
-        }
-
-        function dataURLToBlob(dataUrl) {
-            const parts = dataUrl.split(';base64,');
-            const contentType = parts[0].split(':')[1];
-            const raw = window.atob(parts[1]);
-            const rawLength = raw.length;
-            const uInt8Array = new Uint8Array(rawLength);
-            for (let i = 0; i < rawLength; ++i) {
-                uInt8Array[i] = raw.charCodeAt(i);
-            }
-            return new Blob([uInt8Array], {type: contentType});
-        }
-
-        // ====== ПОДГОТОВКА ДАННЫХ ДЛЯ ОДНОЙ ПАПКИ (НА КЛИЕНТЕ) ======
         async function prepareFolderData(folderName, files) {
             const txtFile = files.find(f => f.name === 'info' || f.name.endsWith('.txt'));
             if (!txtFile) {
@@ -365,30 +307,22 @@ UPLOAD_PAGE = """
             
             const imageFiles = files
                 .filter(f => f.type && f.type.startsWith('image/'))
-                .slice(0, 6);
+                .slice(0, 3);
             
             const images = [];
-            let totalCompressed = 0;
-            
             for (const img of imageFiles) {
                 try {
-                    addLog(`🔄 Сжатие ${img.name}...`);
-                    const compressed = await compressImage(img, 1200, 0.85);
+                    const arrayBuffer = await img.arrayBuffer();
                     images.push({
-                        name: compressed.name,
-                        data: await blobToArrayBuffer(compressed.blob),
-                        type: 'image/jpeg',
-                        size: compressed.size,
-                        originalSize: compressed.originalSize
+                        name: img.name,
+                        data: Array.from(new Uint8Array(arrayBuffer)),
+                        type: img.type || 'image/jpeg'
                     });
-                    totalCompressed++;
-                    addLog(`✅ ${img.name} сжат: ${(compressed.size/1024).toFixed(1)} КБ (было ${(compressed.originalSize/1024).toFixed(1)} КБ)`);
+                    addLog(`✅ Фото ${img.name} преобразовано в бинарный код`);
                 } catch (e) {
-                    addLog(`⚠️ Ошибка сжатия ${img.name}: ${e.message}`);
+                    addLog(`⚠️ Ошибка чтения ${img.name}: ${e.message}`);
                 }
             }
-            
-            addLog(`📦 Сжато ${totalCompressed} изображений`);
             
             return {
                 folderName: folderName,
@@ -399,20 +333,6 @@ UPLOAD_PAGE = """
             };
         }
 
-        function blobToArrayBuffer(blob) {
-            return new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = function() {
-                    resolve(new Uint8Array(reader.result));
-                };
-                reader.onerror = function() {
-                    reject(new Error('Ошибка чтения Blob'));
-                };
-                reader.readAsArrayBuffer(blob);
-            });
-        }
-
-        // ====== ОСНОВНАЯ ФУНКЦИЯ ======
         async function uploadFolder() {
             if (selectedFiles.length === 0) {
                 showStatus('error', '❌ Выберите папку для загрузки');
@@ -432,7 +352,7 @@ UPLOAD_PAGE = """
             progress.textContent = '0%';
             logDiv.textContent = '';
             addLog('🚀 Начинаем обработку...');
-            addLog('🔄 Сжатие изображений на клиенте...');
+            addLog('📱 Преобразование фото в бинарный код на клиенте...');
             
             const folders = {};
             selectedFiles.forEach(file => {
@@ -544,7 +464,7 @@ UPLOAD_PAGE = """
 def index():
     return "🤖 MAX Bot is running!"
 
-@app.route('/upload', methods=['GET'])  # <-- ЭТОТ МАРШРУТ ДОЛЖЕН БЫТЬ!
+@app.route('/upload', methods=['GET'])
 def upload_page():
     return render_template_string(UPLOAD_PAGE)
 
@@ -615,8 +535,8 @@ def webhook():
                 "📋 **Инструкция:**\n"
                 "1. Подготовьте папки с объявлениями\n"
                 "2. Используйте разделитель #изъятая\n"
-                "3. Фото до 6 шт на объявление\n"
-                "4. Фото сжимаются на клиенте перед отправкой"
+                "3. Фото до 3 шт на объявление\n"
+                "4. Фото преобразуются в бинарный код на клиенте"
             )
             return jsonify({"ok": True}), 200
         
