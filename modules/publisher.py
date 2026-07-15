@@ -37,6 +37,7 @@ class Publisher:
             if self.STOP_FLAG.get(user_id, False):
                 return None
 
+            # 1. Получаем URL для загрузки
             response = requests.post(
                 f"{self.api.base_url}/uploads",
                 headers={"Authorization": self.api.token},
@@ -56,6 +57,7 @@ class Publisher:
                 logger.error(f"❌ Не получен URL: {upload_data}")
                 return None
             
+            # 2. Извлекаем байты из разных форматов
             if isinstance(image_data, dict):
                 if 'data' in image_data:
                     img_data = image_data['data']
@@ -65,6 +67,7 @@ class Publisher:
                             img_data = value
                             break
                     else:
+                        logger.error(f"❌ В словаре нет данных: {image_data.keys()}")
                         return None
             else:
                 img_data = image_data
@@ -74,8 +77,10 @@ class Publisher:
             elif isinstance(img_data, (bytes, bytearray)):
                 image_bytes = bytes(img_data)
             else:
+                logger.error(f"❌ Неподдерживаемый тип данных: {type(img_data)}")
                 return None
             
+            # 3. Отправляем файл
             files = {'data': ('image.jpg', image_bytes, 'image/jpeg')}
             
             upload_response = requests.post(
@@ -91,6 +96,7 @@ class Publisher:
             
             upload_result = upload_response.json()
             
+            # 4. Извлекаем токен
             token = None
             if 'photos' in upload_result and isinstance(upload_result['photos'], dict):
                 for photo_data in upload_result['photos'].values():
@@ -105,6 +111,8 @@ class Publisher:
                 logger.error(f"❌ Не получен токен: {upload_result}")
                 return None
             
+            logger.info(f"✅ Файл загружен, токен: {token[:20]}...")
+            
             time.sleep(1)
             return token
             
@@ -115,19 +123,22 @@ class Publisher:
     def _send_to_chat(self, chat_id, text, image_tokens):
         """
         Отправляет сообщение в чат.
-        chat_id передается с ДЕФИСОМ в URL параметре.
+        chat_id передается с ДЕФИСОМ в URL параметре (рабочий способ).
+        Максимум 10 фото.
         """
         try:
             if not self.api.token:
                 return False
             
+            # Формируем вложения (максимум 10 фото)
             attachments = []
-            for token in image_tokens[:6]:
+            for token in image_tokens[:10]:
                 attachments.append({
                     "type": "image",
                     "payload": {"token": token}
                 })
             
+            # Формируем payload (без chat_id в теле!)
             payload = {
                 "text": text,
                 "format": "markdown"
@@ -138,6 +149,8 @@ class Publisher:
             
             # Добавляем дефис к chat_id для URL
             chat_id_with_dash = f"-{chat_id}" if not str(chat_id).startswith('-') else chat_id
+            
+            logger.info(f"📤 Отправка в чат {chat_id_with_dash} с {len(attachments)} фото")
             
             response = requests.post(
                 f"{self.api.base_url}/messages?chat_id={chat_id_with_dash}",
@@ -168,7 +181,7 @@ class Publisher:
                 return False
             
             attachments = []
-            for token in image_tokens[:6]:
+            for token in image_tokens[:10]:
                 attachments.append({
                     "type": "image",
                     "payload": {"token": token}
@@ -182,6 +195,8 @@ class Publisher:
             
             if attachments:
                 payload["attachments"] = attachments
+            
+            logger.info(f"📤 Отправка пользователю {user_id} с {len(attachments)} фото")
             
             response = requests.post(
                 f"{self.api.base_url}/messages",
@@ -226,7 +241,12 @@ class Publisher:
         return metadata
 
     def publish_single_folder(self, user_id, folder_name, ad_text, metadata_text, images_data):
-        """Обрабатывает ОДНУ папку"""
+        """
+        Обрабатывает ОДНУ папку:
+        1. Загружает изображения (максимум 10) через POST /uploads
+        2. Отправляет сообщение с текстом и фото в чат
+        3. Сохраняет метаданные в БД
+        """
         try:
             if self.STOP_FLAG.get(user_id, False):
                 logger.info(f"⏹️ Пропускаем папку {folder_name} - остановка")
@@ -234,6 +254,7 @@ class Publisher:
             
             start_time = time.time()
             
+            # 1. Извлекаем chat_id
             chat_id = self.extract_chat_id(folder_name)
             if not chat_id:
                 logger.error(f"❌ Не удалось извлечь chat_id из: {folder_name}")
@@ -241,9 +262,11 @@ class Publisher:
             
             logger.info(f"📤 Извлечен chat_id: {chat_id}")
             
-            # Загружаем изображения
+            # 2. Загружаем изображения (максимум 10)
             image_tokens = []
-            max_images = min(len(images_data), 3) if isinstance(images_data, list) else 0
+            max_images = min(len(images_data), 10) if isinstance(images_data, list) else 0
+            
+            logger.info(f"📸 Найдено {len(images_data)} изображений, загружаем максимум {max_images}")
             
             for i in range(max_images):
                 if self.STOP_FLAG.get(user_id, False):
@@ -267,13 +290,14 @@ class Publisher:
             
             logger.info(f"📦 Загружено {len(image_tokens)} из {max_images} изображений")
             
-            # Отправляем сообщение в чат
+            # 3. Отправляем сообщение в чат
             if image_tokens:
                 success = self._send_to_chat(chat_id, ad_text, image_tokens)
             else:
                 logger.info(f"📤 Отправка только текста в чат {chat_id}")
                 success = self._send_to_chat(chat_id, ad_text, [])
             
+            # Если не удалось отправить в чат, пробуем в личные сообщения
             if not success:
                 logger.warning("⚠️ Отправка в чат не удалась, пробуем в личные сообщения...")
                 if image_tokens:
@@ -284,7 +308,7 @@ class Publisher:
             if not success:
                 return False, "Не удалось отправить сообщение"
             
-            # Сохраняем метаданные
+            # 4. Сохраняем метаданные для отчета
             metadata = self._parse_metadata(metadata_text)
             self.db.save_ad_metadata(user_id, folder_name, f"-{chat_id}", metadata, time.time())
             self.db.add_publication(user_id, folder_name, f"-{chat_id}")
