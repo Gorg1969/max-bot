@@ -13,8 +13,52 @@ class ReportGenerator:
         self.fm = file_manager
         self.db = db
     
-    def parse_info_file(self, info_path):
-        """Парсит info.txt и извлекает нужные поля"""
+    def get_txt_file(self, folder_path):
+        """Находит текстовый файл в папке"""
+        if not os.path.exists(folder_path):
+            return None
+        
+        try:
+            for file in os.listdir(folder_path):
+                file_path = os.path.join(folder_path, file)
+                
+                if file.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')):
+                    continue
+                
+                try:
+                    size = os.path.getsize(file_path)
+                    if size == 0 or size > 1024 * 1024:
+                        continue
+                except:
+                    continue
+                
+                if file.lower().endswith('.txt') or file.lower() == 'info':
+                    return file_path
+                
+                # Пробуем прочитать как текстовый
+                try:
+                    with open(file_path, 'rb') as f:
+                        content = f.read(1024)
+                        if b'\x00' not in content:
+                            try:
+                                text_content = content.decode('utf-8', errors='ignore')
+                                if any(c.isalpha() for c in text_content) or '#изъятая' in text_content:
+                                    return file_path
+                            except:
+                                pass
+                except:
+                    pass
+        except:
+            pass
+        
+        return None
+    
+    def parse_info_file(self, folder_path):
+        """Парсит текстовый файл и извлекает нужные поля"""
+        txt_file = self.get_txt_file(folder_path)
+        if not txt_file:
+            return {}
+        
         data = {
             'Название': '',
             'Ссылка': '',
@@ -22,30 +66,33 @@ class ReportGenerator:
             'Цена в лизинге': '',
             'Полный текст': ''
         }
+        
         try:
-            with open(info_path, 'r', encoding='utf-8') as f:
+            with open(txt_file, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            fields = {
-                'Название': r'Название:\s*(.+)',
-                'Ссылка': r'Ссылка:\s*(.+)',
-                'Код предложения': r'Код предложения:\s*(.+)',
-                'Цена в лизинге': r'Цена\s*[вВ]\s*лизинге:\s*(.+)',
-            }
-            
-            for key, pattern in fields.items():
-                match = re.search(pattern, content)
-                if match:
-                    data[key] = match.group(1).strip()
-            
-            # Полный текст объявления
+            # Извлекаем метаданные после #изъятая
             if '#изъятая' in content:
-                data['Полный текст'] = content.split('#изъятая')[0].strip()
+                parts = content.split('#изъятая')
+                data['Полный текст'] = parts[0].strip()
+                metadata_content = parts[1].strip() if len(parts) > 1 else ''
+                
+                fields = {
+                    'Название': r'Название:\s*(.+)',
+                    'Ссылка': r'Ссылка:\s*(.+)',
+                    'Код предложения': r'Код предложения:\s*(.+)',
+                    'Цена в лизинге': r'Цена\s*[вВ]\s*лизинге:\s*(.+)',
+                }
+                
+                for key, pattern in fields.items():
+                    match = re.search(pattern, metadata_content)
+                    if match:
+                        data[key] = match.group(1).strip()
             else:
                 data['Полный текст'] = content.strip()
                 
         except Exception as e:
-            logger.error(f"❌ Ошибка парсинга {info_path}: {e}")
+            logger.error(f"❌ Ошибка парсинга {txt_file}: {e}")
         
         return data
     
@@ -76,18 +123,23 @@ class ReportGenerator:
             moscow_tz = pytz.timezone('Europe/Moscow')
             report_data = []
             
-            # Рекурсивно ищем все папки с info.txt
+            # Рекурсивно ищем все папки с текстовыми файлами
             for root, dirs, files in os.walk(ads_folder):
-                if 'info.txt' in files:
-                    # Получаем имя папки относительно ads/
+                # Проверяем наличие текстового файла
+                has_text = False
+                for file in files:
+                    if file.lower().endswith('.txt') or file.lower() == 'info':
+                        has_text = True
+                        break
+                
+                if has_text:
                     folder_name = os.path.relpath(root, ads_folder)
                     if folder_name == '.':
                         continue
                     
                     logger.info(f"📄 Обработка папки: {folder_name}")
                     
-                    info_path = os.path.join(root, 'info.txt')
-                    info = self.parse_info_file(info_path)
+                    info = self.parse_info_file(root)
                     
                     # Получаем время публикации из БД
                     pub_time = self.db.get_publication_time(user_id, folder_name)
@@ -137,7 +189,7 @@ class ReportGenerator:
             
             logger.info(f"📊 Отчет создан: {report_path} ({len(report_data)} записей)")
             
-            # ✅ Удаляем временную папку ads/ после создания отчета
+            # Удаляем временную папку ads/
             self.cleanup_user_data(user_id, keep_report=True)
             
             return report_path
@@ -168,7 +220,6 @@ class ReportGenerator:
                     else:
                         logger.info(f"ℹ️ Отчет сохранен: {item}")
             else:
-                # Удаляем всё
                 shutil.rmtree(user_folder)
                 os.makedirs(user_folder, exist_ok=True)
                 logger.info(f"🗑️ Все данные пользователя {user_id} удалены")
