@@ -9,6 +9,7 @@ from .process_links import (
     process_google_drive_link
 )
 from .report_generator import ReportGenerator
+from .download_handler import DownloadHandler
 
 __all__ = [
     'Database',
@@ -16,6 +17,7 @@ __all__ = [
     'Publisher',
     'WebInterface',
     'ReportGenerator',
+    'DownloadHandler',
     'extract_file_id_from_url',
     'convert_to_direct_link',
     'download_file_from_drive',
