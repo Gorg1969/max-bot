@@ -177,7 +177,6 @@ class APIClient:
             
             if not attachments:
                 logger.error("❌ Нет загруженных файлов для отправки")
-                # Если нет фото - отправляем только текст
                 if text:
                     return self.send_message_to_chat(chat_id, text)
                 return False
@@ -270,6 +269,9 @@ UPLOAD_PAGE = """
         .user-input input { padding: 8px 15px; border: 1px solid #ddd; border-radius: 5px; font-size: 16px; width: 200px; }
         .commands { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #17a2b8; display: flex; gap: 20px; flex-wrap: wrap; }
         .commands code { background: #f8f9fa; padding: 2px 8px; border-radius: 3px; font-size: 14px; }
+        .debug-link { margin-top: 20px; padding: 10px; background: #f8f9fa; border-radius: 5px; font-size: 12px; }
+        .debug-link a { color: #007bff; text-decoration: none; }
+        .debug-link a:hover { text-decoration: underline; }
     </style>
 </head>
 <body>
@@ -319,6 +321,11 @@ UPLOAD_PAGE = """
         
         <div id="status" class="status"></div>
         <div id="log"></div>
+        
+        <div class="debug-link">
+            🔍 <a href="#" onclick="checkDebug()">Проверить структуру папок</a>
+        </div>
+        
         <div class="footer">⚡ MAX Bot | Загрузка объявлений | v2.0</div>
     </div>
     
@@ -340,8 +347,17 @@ UPLOAD_PAGE = """
         function setUserId() {
             const input = document.getElementById('userIdInput');
             userId = parseInt(input.value) || 151296248;
+            localStorage.setItem('max_user_id', userId);
             showStatus('info', `✅ ID пользователя установлен: ${userId}`);
             addLog(`👤 ID пользователя: ${userId}`);
+        }
+
+        function checkDebug() {
+            if (!userId) {
+                showStatus('error', '❌ Укажите ID пользователя');
+                return;
+            }
+            window.open(`/debug_folders/${userId}`, '_blank');
         }
 
         dropZone.addEventListener('dragover', (e) => {
@@ -358,15 +374,25 @@ UPLOAD_PAGE = """
             dropZone.classList.remove('dragover');
             const items = e.dataTransfer.items;
             const files = [];
+            let pending = 0;
+            
             for (let item of items) {
                 if (item.kind === 'file') {
                     const entry = item.webkitGetAsEntry();
                     if (entry && entry.isDirectory) {
-                        readDirectory(entry, files, '');
+                        pending++;
+                        readDirectory(entry, files, '', () => {
+                            pending--;
+                            if (pending === 0 && files.length > 0) {
+                                selectedFiles = files;
+                                displayFiles(selectedFiles);
+                            }
+                        });
                     }
                 }
             }
-            if (files.length > 0) {
+            
+            if (pending === 0 && files.length > 0) {
                 selectedFiles = files;
                 displayFiles(selectedFiles);
             }
@@ -380,20 +406,34 @@ UPLOAD_PAGE = """
             }
         });
 
-        function readDirectory(entry, files, path) {
+        function readDirectory(entry, files, path, callback) {
             const reader = entry.createReader();
-            reader.readEntries((entries) => {
-                for (let e of entries) {
-                    if (e.isDirectory) {
-                        readDirectory(e, files, path + e.name + '/');
-                    } else {
-                        e.file((file) => {
-                            file.webkitRelativePath = path + file.name;
-                            files.push(file);
-                        });
+            let entries = [];
+            
+            function readNext() {
+                reader.readEntries((results) => {
+                    if (results.length === 0) {
+                        // Все записи прочитаны
+                        callback && callback();
+                        return;
                     }
-                }
-            });
+                    for (let e of results) {
+                        if (e.isDirectory) {
+                            readDirectory(e, files, path + e.name + '/', () => {
+                                readNext();
+                            });
+                            return;
+                        } else {
+                            e.file((file) => {
+                                file.webkitRelativePath = path + file.name;
+                                files.push(file);
+                                readNext();
+                            });
+                        }
+                    }
+                });
+            }
+            readNext();
         }
 
         function displayFiles(files) {
@@ -516,6 +556,9 @@ UPLOAD_PAGE = """
                         progress.style.width = percent + '%';
                         progress.textContent = percent + '%';
                         addLog(`✅ Пачка ${chunk + 1} загружена (${percent}%)`);
+                        if (result.folders_count) {
+                            addLog(`📁 Найдено ${result.folders_count} объявлений`);
+                        }
                     } else {
                         failed += chunkFiles.length;
                         addLog(`❌ Ошибка пачки ${chunk + 1}: ${result.message}`);
@@ -532,6 +575,7 @@ UPLOAD_PAGE = """
                 addLog(`🚀 Запущена публикация объявлений...`);
                 addLog(`📱 Вам придет уведомление в MAX боте`);
                 addLog(`📊 Для получения отчета напишите /report в боте`);
+                addLog(`🔍 Проверьте логи сервера для отслеживания прогресса`);
             } else {
                 showStatus('error', `❌ Загрузка завершена с ошибками: ${failed} файлов не загружено`);
                 addLog(`❌ ${failed} файлов не загружено`);
@@ -544,6 +588,7 @@ UPLOAD_PAGE = """
         if (userIdParam) {
             userId = parseInt(userIdParam) || 151296248;
             document.getElementById('userIdInput').value = userId;
+            localStorage.setItem('max_user_id', userId);
             addLog(`👤 ID пользователя из URL: ${userId}`);
         }
 
@@ -576,38 +621,75 @@ def upload_page():
 def upload_folder():
     """Обработка загрузки папки с файлами"""
     try:
+        logger.info("=" * 60)
+        logger.info("📥 ПОЛУЧЕН ЗАПРОС НА ЗАГРУЗКУ")
+        
         if 'files[]' not in request.files:
+            logger.error("❌ files[] не найден в запросе")
             return jsonify({'success': False, 'message': 'Файлы не найдены'}), 400
         
         files = request.files.getlist('files[]')
         if not files:
+            logger.error("❌ Список файлов пуст")
             return jsonify({'success': False, 'message': 'Файлы не выбраны'}), 400
         
         user_id = request.form.get('user_id')
+        logger.info(f"👤 user_id из формы: {user_id}")
+        
         if not user_id:
+            logger.error("❌ user_id не указан")
             return jsonify({'success': False, 'message': 'user_id не указан'}), 400
         
         try:
             user_id = int(user_id)
         except ValueError:
+            logger.error(f"❌ Неверный user_id: {user_id}")
             return jsonify({'success': False, 'message': 'Неверный user_id'}), 400
         
         logger.info(f"📦 Получено {len(files)} файлов для пользователя {user_id}")
         
+        # Логируем первые 10 файлов для проверки
+        logger.info("📄 Первые 10 файлов:")
+        for i, f in enumerate(files[:10]):
+            logger.info(f"  {i+1}. {f.filename}")
+        
         # Сохраняем файлы
+        logger.info("💾 Сохранение файлов...")
         result = fm.save_uploaded_files_stream(files, user_id, append=False)
         
         if not result['success']:
+            logger.error(f"❌ Ошибка сохранения: {result.get('error')}")
             return jsonify({'success': False, 'message': result.get('error', 'Ошибка сохранения')}), 500
         
+        logger.info(f"✅ Сохранено {result['saved_count']} файлов")
+        
+        # Проверяем, есть ли папки с info.txt
+        logger.info("🔍 Проверка наличия папок с info.txt...")
+        subfolders = fm.get_subfolders(user_id)
+        logger.info(f"📁 Найдено папок с info.txt: {len(subfolders)}")
+        for sf in subfolders:
+            logger.info(f"  📁 {sf}")
+        
+        if not subfolders:
+            # Отправляем сообщение пользователю
+            api.send_message(user_id, "⚠️ Файлы загружены, но не найдено папок с info.txt.\n\n"
+                                   "📌 Убедитесь, что в каждой папке есть файл info.txt\n"
+                                   "📌 Названия папок должны содержать chat_id: `Название -123456789`")
+        
         # Запускаем публикацию в фоновом потоке
-        api.send_message(user_id, f"📢 Начинаю публикацию {result['saved_count']} файлов...")
-        threading.Thread(target=publisher.start, args=(user_id,)).start()
+        logger.info(f"🚀 Запуск публикации для пользователя {user_id}")
+        api.send_message(user_id, f"📢 Начинаю публикацию {len(subfolders)} объявлений...")
+        
+        thread = threading.Thread(target=publisher.start, args=(user_id,))
+        thread.daemon = True
+        thread.start()
+        logger.info(f"✅ Поток публикации запущен (thread_id: {thread.ident})")
         
         return jsonify({
             'success': True,
             'saved_count': result['saved_count'],
-            'message': f'Сохранено {result["saved_count"]} файлов, публикация запущена'
+            'folders_count': len(subfolders),
+            'message': f'Сохранено {result["saved_count"]} файлов, найдено {len(subfolders)} объявлений'
         })
         
     except Exception as e:
@@ -818,6 +900,94 @@ def download_report(user_id, filename):
     except Exception as e:
         logger.error(f"❌ Ошибка скачивания отчета: {e}")
         return str(e), 500
+
+@app.route('/debug_folders/<int:user_id>')
+def debug_folders(user_id):
+    """Отладочный эндпоинт для проверки структуры папок"""
+    try:
+        user_folder = fm.get_user_folder(user_id)
+        ads_folder = fm.get_ads_folder(user_id)
+        
+        result = {
+            'user_id': user_id,
+            'user_folder': user_folder,
+            'ads_folder': ads_folder,
+            'exists': os.path.exists(ads_folder),
+            'subfolders': fm.get_subfolders(user_id),
+            'structure': []
+        }
+        
+        if os.path.exists(ads_folder):
+            for root, dirs, files in os.walk(ads_folder):
+                rel_path = os.path.relpath(root, ads_folder)
+                if rel_path == '.':
+                    rel_path = 'корень'
+                result['structure'].append({
+                    'path': rel_path,
+                    'files': files,
+                    'has_info': 'info.txt' in files,
+                    'images': [f for f in files if f.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'))]
+                })
+        
+        # Возвращаем в читаемом виде
+        html = f"""
+        <html>
+        <head><title>Отладка папок</title>
+        <style>
+            body {{ font-family: 'Courier New', monospace; margin: 20px; background: #f5f5f5; }}
+            .container {{ background: white; padding: 20px; border-radius: 10px; }}
+            h1 {{ color: #333; }}
+            .folder {{ margin: 10px 0; padding: 10px; background: #f8f9fa; border-radius: 5px; border-left: 3px solid #007bff; }}
+            .folder.ok {{ border-left-color: #28a745; }}
+            .folder.warning {{ border-left-color: #ffc107; }}
+            .folder.error {{ border-left-color: #dc3545; }}
+            .files {{ margin-left: 20px; font-size: 12px; color: #666; }}
+            .badge {{ display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; margin: 2px; }}
+            .badge-success {{ background: #d4edda; color: #155724; }}
+            .badge-warning {{ background: #fff3cd; color: #856404; }}
+            .badge-danger {{ background: #f8d7da; color: #721c24; }}
+            .badge-info {{ background: #d1ecf1; color: #0c5460; }}
+        </style>
+        </head>
+        <body>
+        <div class="container">
+            <h1>🔍 Отладка структуры папок</h1>
+            <p><strong>User ID:</strong> {user_id}</p>
+            <p><strong>Папка:</strong> {ads_folder}</p>
+            <p><strong>Существует:</strong> {result['exists']}</p>
+            <p><strong>Найдено папок с info.txt:</strong> {len(result['subfolders'])}</p>
+            <hr>
+            <h2>📁 Структура:</h2>
+        """
+        
+        for item in result['structure']:
+            status = 'ok' if item['has_info'] else ('warning' if item['files'] else 'error')
+            html += f"""
+            <div class="folder {status}">
+                <strong>📂 {item['path']}</strong>
+                <span class="badge badge-info">{len(item['files'])} файлов</span>
+                <span class="badge {'badge-success' if item['has_info'] else 'badge-danger'}">
+                    {'✅ info.txt' if item['has_info'] else '❌ нет info.txt'}
+                </span>
+                <span class="badge badge-info">📸 {len(item['images'])} фото</span>
+                <div class="files">
+                    {', '.join(item['files'])}
+                </div>
+            </div>
+            """
+        
+        html += """
+            <hr>
+            <p><a href="/upload?user_id=""" + str(user_id) + """">⬅️ Вернуться к загрузке</a></p>
+        </div>
+        </body>
+        </html>
+        """
+        
+        return html
+        
+    except Exception as e:
+        return f"❌ Ошибка: {str(e)}", 500
 
 @app.route('/health')
 def health():
