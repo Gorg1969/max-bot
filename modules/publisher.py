@@ -116,14 +116,13 @@ class Publisher:
         """
         Отправляет сообщение в чат.
         chat_id передается с ДЕФИСОМ в URL параметре.
-        Максимум 3 фото.
         """
         try:
             if not self.api.token:
                 return False
             
             attachments = []
-            for token in image_tokens[:3]:
+            for token in image_tokens[:6]:
                 attachments.append({
                     "type": "image",
                     "payload": {"token": token}
@@ -137,6 +136,7 @@ class Publisher:
             if attachments:
                 payload["attachments"] = attachments
             
+            # Добавляем дефис к chat_id для URL
             chat_id_with_dash = f"-{chat_id}" if not str(chat_id).startswith('-') else chat_id
             
             response = requests.post(
@@ -168,7 +168,7 @@ class Publisher:
                 return False
             
             attachments = []
-            for token in image_tokens[:3]:
+            for token in image_tokens[:6]:
                 attachments.append({
                     "type": "image",
                     "payload": {"token": token}
@@ -226,7 +226,7 @@ class Publisher:
         return metadata
 
     def publish_single_folder(self, user_id, folder_name, ad_text, metadata_text, images_data):
-        """Обрабатывает ОДНУ папку (максимум 3 фото)"""
+        """Обрабатывает ОДНУ папку"""
         try:
             if self.STOP_FLAG.get(user_id, False):
                 logger.info(f"⏹️ Пропускаем папку {folder_name} - остановка")
@@ -241,7 +241,7 @@ class Publisher:
             
             logger.info(f"📤 Извлечен chat_id: {chat_id}")
             
-            # Загружаем изображения (максимум 3)
+            # Загружаем изображения
             image_tokens = []
             max_images = min(len(images_data), 3) if isinstance(images_data, list) else 0
             
