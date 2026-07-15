@@ -78,7 +78,7 @@ api = APIClient()
 publisher = Publisher(api, fm, db)
 report_gen = ReportGenerator(fm, db)
 
-# ========== HTML СТРАНИЦА ==========
+# ========== HTML СТРАНИЦА С КЛИЕНТСКИМ СЖАТИЕМ ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -134,7 +134,8 @@ UPLOAD_PAGE = """
             &nbsp;&nbsp;• Текст ДО разделителя — публикуется в чат<br>
             &nbsp;&nbsp;• Текст ПОСЛЕ разделителя — идет в отчет<br>
             5️⃣ Перетащите головную папку в поле ниже<br>
-            6️⃣ Каждая папка отправляется отдельным запросом
+            6️⃣ <strong>Фото сжимаются на клиенте</strong> (макс. ширина 1200px, качество 85%)<br>
+            7️⃣ Каждая папка отправляется отдельным запросом
         </div>
         
         <div class="drop-zone" id="dropZone">
@@ -288,6 +289,65 @@ UPLOAD_PAGE = """
             window.open(`/report/${userId}`, '_blank');
         }
 
+        // ====== СЖАТИЕ ИЗОБРАЖЕНИЯ НА КЛИЕНТЕ ======
+        function compressImage(file, maxWidth=1200, quality=0.85) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const img = new Image();
+                    img.onload = function() {
+                        // Вычисляем новые размеры
+                        let width = img.width;
+                        let height = img.height;
+                        
+                        if (width > maxWidth) {
+                            const ratio = maxWidth / width;
+                            width = maxWidth;
+                            height = height * ratio;
+                        }
+                        
+                        // Создаем canvas и рисуем сжатое изображение
+                        const canvas = document.createElement('canvas');
+                        canvas.width = width;
+                        canvas.height = height;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, width, height);
+                        
+                        // Конвертируем в JPEG с заданным качеством
+                        const compressedDataUrl = canvas.toDataURL('image/jpeg', quality);
+                        const compressedBlob = dataURLToBlob(compressedDataUrl);
+                        
+                        resolve({
+                            blob: compressedBlob,
+                            name: file.name.replace(/\\.[^.]+$/, '') + '.jpg',
+                            size: compressedBlob.size,
+                            originalSize: file.size
+                        });
+                    };
+                    img.onerror = function() {
+                        reject(new Error('Ошибка загрузки изображения'));
+                    };
+                    img.src = e.target.result;
+                };
+                reader.onerror = function() {
+                    reject(new Error('Ошибка чтения файла'));
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+
+        function dataURLToBlob(dataUrl) {
+            const parts = dataUrl.split(';base64,');
+            const contentType = parts[0].split(':')[1];
+            const raw = window.atob(parts[1]);
+            const rawLength = raw.length;
+            const uInt8Array = new Uint8Array(rawLength);
+            for (let i = 0; i < rawLength; ++i) {
+                uInt8Array[i] = raw.charCodeAt(i);
+            }
+            return new Blob([uInt8Array], {type: contentType});
+        }
+
         // ====== ПОДГОТОВКА ДАННЫХ ДЛЯ ОДНОЙ ПАПКИ (НА КЛИЕНТЕ) ======
         async function prepareFolderData(folderName, files) {
             // Находим текстовый файл
@@ -309,24 +369,33 @@ UPLOAD_PAGE = """
                 metadataText = parts[1] ? parts[1].trim() : '';
             }
             
-            // Находим изображения (до 6) и читаем как ArrayBuffer
+            // Находим изображения (до 6) и сжимаем на клиенте
             const imageFiles = files
                 .filter(f => f.type && f.type.startsWith('image/'))
                 .slice(0, 6);
             
             const images = [];
+            let totalCompressed = 0;
+            
             for (const img of imageFiles) {
                 try {
-                    const arrayBuffer = await img.arrayBuffer();
+                    addLog(`🔄 Сжатие ${img.name}...`);
+                    const compressed = await compressImage(img, 1200, 0.85);
                     images.push({
-                        name: img.name,
-                        data: Array.from(new Uint8Array(arrayBuffer)),
-                        type: img.type || 'image/jpeg'
+                        name: compressed.name,
+                        data: await blobToArrayBuffer(compressed.blob),
+                        type: 'image/jpeg',
+                        size: compressed.size,
+                        originalSize: compressed.originalSize
                     });
+                    totalCompressed++;
+                    addLog(`✅ ${img.name} сжат: ${(compressed.size/1024).toFixed(1)} КБ (было ${(compressed.originalSize/1024).toFixed(1)} КБ)`);
                 } catch (e) {
-                    addLog(`⚠️ Ошибка чтения ${img.name}: ${e.message}`);
+                    addLog(`⚠️ Ошибка сжатия ${img.name}: ${e.message}`);
                 }
             }
+            
+            addLog(`📦 Сжато ${totalCompressed} изображений`);
             
             return {
                 folderName: folderName,
@@ -335,6 +404,19 @@ UPLOAD_PAGE = """
                 fullText: fullText,
                 images: images
             };
+        }
+
+        function blobToArrayBuffer(blob) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = function() {
+                    resolve(new Uint8Array(reader.result));
+                };
+                reader.onerror = function() {
+                    reject(new Error('Ошибка чтения Blob'));
+                };
+                reader.readAsArrayBuffer(blob);
+            });
         }
 
         // ====== ОСНОВНАЯ ФУНКЦИЯ ======
@@ -357,6 +439,7 @@ UPLOAD_PAGE = """
             progress.textContent = '0%';
             logDiv.textContent = '';
             addLog('🚀 Начинаем обработку...');
+            addLog('🔄 Сжатие изображений на клиенте...');
             
             // Группируем файлы по папкам
             const folders = {};
@@ -542,12 +625,11 @@ def webhook():
                 "1. Подготовьте папки с объявлениями\n"
                 "2. Используйте разделитель #изъятая\n"
                 "3. Фото до 6 шт на объявление\n"
-                "4. Фото отправляются согласно документации MAX API"
+                "4. Фото сжимаются на клиенте перед отправкой"
             )
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/stop':
-            # Останавливаем публикацию и удаляем все файлы
             publisher.stop(user_id)
             api.send_message(user_id, "⏹️ **Публикация остановлена!**\n\n✅ Все процессы остановлены\n🗑️ Временные файлы удалены")
             return jsonify({"ok": True}), 200
