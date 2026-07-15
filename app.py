@@ -78,7 +78,7 @@ api = APIClient()
 publisher = Publisher(api, fm, db)
 report_gen = ReportGenerator(fm, db)
 
-# ========== HTML СТРАНИЦА С КЛИЕНТСКИМ СЖАТИЕМ ==========
+# ========== HTML СТРАНИЦА ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -296,7 +296,6 @@ UPLOAD_PAGE = """
                 reader.onload = function(e) {
                     const img = new Image();
                     img.onload = function() {
-                        // Вычисляем новые размеры
                         let width = img.width;
                         let height = img.height;
                         
@@ -306,14 +305,12 @@ UPLOAD_PAGE = """
                             height = height * ratio;
                         }
                         
-                        // Создаем canvas и рисуем сжатое изображение
                         const canvas = document.createElement('canvas');
                         canvas.width = width;
                         canvas.height = height;
                         const ctx = canvas.getContext('2d');
                         ctx.drawImage(img, 0, 0, width, height);
                         
-                        // Конвертируем в JPEG с заданным качеством
                         const compressedDataUrl = canvas.toDataURL('image/jpeg', quality);
                         const compressedBlob = dataURLToBlob(compressedDataUrl);
                         
@@ -350,16 +347,13 @@ UPLOAD_PAGE = """
 
         // ====== ПОДГОТОВКА ДАННЫХ ДЛЯ ОДНОЙ ПАПКИ (НА КЛИЕНТЕ) ======
         async function prepareFolderData(folderName, files) {
-            // Находим текстовый файл
             const txtFile = files.find(f => f.name === 'info' || f.name.endsWith('.txt'));
             if (!txtFile) {
                 return null;
             }
             
-            // Читаем текст
             let fullText = await txtFile.text();
             
-            // Разделяем на текст объявления и метаданные
             let adText = fullText;
             let metadataText = '';
             
@@ -369,7 +363,6 @@ UPLOAD_PAGE = """
                 metadataText = parts[1] ? parts[1].trim() : '';
             }
             
-            // Находим изображения (до 6) и сжимаем на клиенте
             const imageFiles = files
                 .filter(f => f.type && f.type.startsWith('image/'))
                 .slice(0, 6);
@@ -441,7 +434,6 @@ UPLOAD_PAGE = """
             addLog('🚀 Начинаем обработку...');
             addLog('🔄 Сжатие изображений на клиенте...');
             
-            // Группируем файлы по папкам
             const folders = {};
             selectedFiles.forEach(file => {
                 const pathParts = file.webkitRelativePath.split('/');
@@ -513,7 +505,6 @@ UPLOAD_PAGE = """
                     results.push(`❌ ${folderName}: ${error.message}`);
                 }
                 
-                // Задержка между папками, чтобы не превысить лимит запросов
                 await new Promise(r => setTimeout(r, 500));
             }
             
@@ -553,7 +544,7 @@ UPLOAD_PAGE = """
 def index():
     return "🤖 MAX Bot is running!"
 
-@app.route('/upload', methods=['GET'])
+@app.route('/upload', methods=['GET'])  # <-- ЭТОТ МАРШРУТ ДОЛЖЕН БЫТЬ!
 def upload_page():
     return render_template_string(UPLOAD_PAGE)
 
