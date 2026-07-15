@@ -25,6 +25,7 @@ class FileManager:
         return ads_folder
     
     def clear_ads_folder(self, user_id):
+        """Очищает папку ads ПОСЛЕ публикации"""
         ads_folder = self.get_ads_folder(user_id)
         if os.path.exists(ads_folder):
             for item in os.listdir(ads_folder):
@@ -75,6 +76,7 @@ class FileManager:
             return {'success': False, 'error': str(e)}
     
     def get_subfolders(self, user_id):
+        """Возвращает список подпапок с info.txt из папки ads/"""
         ads_folder = self.get_ads_folder(user_id)
         subfolders = []
         
@@ -82,8 +84,10 @@ class FileManager:
             logger.warning(f"⚠️ Папка ads не существует для пользователя {user_id}")
             return subfolders
         
+        # Рекурсивно обходим папку ads/
         for root, dirs, files in os.walk(ads_folder):
             if 'info.txt' in files:
+                # Получаем путь относительно ads/
                 rel_path = os.path.relpath(root, ads_folder)
                 if rel_path == '.':
                     folder_name = os.path.basename(root)
@@ -96,6 +100,7 @@ class FileManager:
         return subfolders
     
     def get_folder_path(self, user_id, folder_name):
+        """Возвращает путь к конкретной папке в ads/"""
         ads_folder = self.get_ads_folder(user_id)
         return os.path.join(ads_folder, folder_name)
     
