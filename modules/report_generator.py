@@ -18,22 +18,32 @@ class ReportGenerator:
         data = {
             'Название': '',
             'Ссылка': '',
-            'Код предложения': ''
+            'Код предложения': '',
+            'Цена': '',
+            'Полный текст': ''
         }
         try:
             with open(info_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             
+            # Ищем поля
             fields = {
                 'Название': r'Название:\s*(.+)',
                 'Ссылка': r'Ссылка:\s*(.+)',
                 'Код предложения': r'Код предложения:\s*(.+)',
+                'Цена': r'Цена\s*[вВ]\s*лизинге:\s*(.+)',
             }
             
             for key, pattern in fields.items():
                 match = re.search(pattern, content)
                 if match:
                     data[key] = match.group(1).strip()
+            
+            # Полный текст объявления (до разделителя или весь текст)
+            if '#изъятая' in content:
+                data['Полный текст'] = content.split('#изъятая')[0].strip()
+            else:
+                data['Полный текст'] = content.strip()
                 
         except Exception as e:
             logger.error(f"❌ Ошибка парсинга {info_path}: {e}")
@@ -44,48 +54,69 @@ class ReportGenerator:
         """Генерирует отчет в CSV формате"""
         try:
             user_folder = self.fm.get_user_folder(user_id)
-            samosvaly_path = os.path.join(user_folder, "Самосвалы")
+            ads_folder = self.fm.get_ads_folder(user_id)
             
-            if not os.path.exists(samosvaly_path):
-                logger.warning(f"⚠️ Папка Самосвалы не найдена")
+            if not os.path.exists(ads_folder):
+                logger.warning(f"⚠️ Папка ads не найдена для пользователя {user_id}")
                 return None
             
             moscow_tz = pytz.timezone('Europe/Moscow')
             report_data = []
             
-            for folder_name in os.listdir(samosvaly_path):
-                folder_path = os.path.join(samosvaly_path, folder_name)
-                info_path = os.path.join(folder_path, 'info.txt')
-                
-                if not os.path.exists(info_path):
-                    continue
-                
-                info = self.parse_info_file(info_path)
-                pub_time = self.db.get_publication_time(user_id, folder_name)
-                
-                if pub_time:
-                    pub_time = pub_time.astimezone(moscow_tz)
-                    time_str = pub_time.strftime('%Y-%m-%d %H:%M:%S')
-                else:
-                    time_str = datetime.now(moscow_tz).strftime('%Y-%m-%d %H:%M:%S')
-                
-                chat_id = self.fm.extract_chat_id_from_name(folder_name)
-                post_link = f"https://max.ru/post/{chat_id}" if chat_id else ""
-                
-                report_data.append({
-                    'Время по МСК МАХ': time_str,
-                    'Ссылка на опубликованное объявление в МАХ': post_link,
-                    'Ссылка (откуда информация)': info.get('Ссылка', ''),
-                    'Марка/модель': info.get('Название', ''),
-                    'Код предложения': info.get('Код предложения', ''),
-                })
+            # Рекурсивно ищем все папки с info.txt
+            for root, dirs, files in os.walk(ads_folder):
+                if 'info.txt' in files:
+                    # Получаем имя папки относительно ads/
+                    folder_name = os.path.relpath(root, ads_folder)
+                    if folder_name == '.':
+                        continue
+                    
+                    logger.info(f"📄 Обработка папки: {folder_name}")
+                    
+                    info_path = os.path.join(root, 'info.txt')
+                    info = self.parse_info_file(info_path)
+                    
+                    # Получаем время публикации из БД
+                    pub_time = self.db.get_publication_time(user_id, folder_name)
+                    
+                    if pub_time:
+                        if isinstance(pub_time, str):
+                            pub_time = datetime.fromisoformat(pub_time)
+                        pub_time = pub_time.astimezone(moscow_tz)
+                        time_str = pub_time.strftime('%Y-%m-%d %H:%M:%S')
+                    else:
+                        time_str = datetime.now(moscow_tz).strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    # Формируем ссылку на пост
+                    chat_id = self.fm.extract_chat_id_from_name(folder_name)
+                    post_link = f"https://max.ru/post/{chat_id}" if chat_id else ""
+                    
+                    # Считаем количество фото в папке
+                    photo_count = 0
+                    for f in os.listdir(root):
+                        if f.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')):
+                            photo_count += 1
+                    
+                    report_data.append({
+                        '№': len(report_data) + 1,
+                        'Папка': folder_name,
+                        'Время публикации (МСК)': time_str,
+                        'Ссылка на пост': post_link,
+                        'Ссылка (источник)': info.get('Ссылка', ''),
+                        'Марка/модель': info.get('Название', ''),
+                        'Код предложения': info.get('Код предложения', ''),
+                        'Цена в лизинге': info.get('Цена', ''),
+                        'Количество фото': photo_count,
+                        'Текст объявления': info.get('Полный текст', '')[:200] + '...' if len(info.get('Полный текст', '')) > 200 else info.get('Полный текст', '')
+                    })
             
             if not report_data:
-                logger.warning(f"⚠️ Нет данных для отчета")
+                logger.warning(f"⚠️ Нет данных для отчета пользователя {user_id}")
                 return None
             
-            # Сохраняем в CSV (легкий, без pandas)
-            report_filename = f"Отчет_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            # Сохраняем в CSV
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            report_filename = f"Отчет_{timestamp}.csv"
             report_path = os.path.join(user_folder, report_filename)
             
             with open(report_path, 'w', encoding='utf-8-sig', newline='') as f:
@@ -94,21 +125,24 @@ class ReportGenerator:
                     writer.writeheader()
                     writer.writerows(report_data)
             
-            logger.info(f"📊 Отчет создан: {report_path}")
+            logger.info(f"📊 Отчет создан: {report_path} ({len(report_data)} записей)")
             return report_path
             
         except Exception as e:
             logger.error(f"❌ Ошибка создания отчета: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def cleanup_user_data(self, user_id, keep_report=True):
-        """Удаляет данные пользователя"""
+        """Удаляет данные пользователя, но сохраняет отчет если нужно"""
         try:
             user_folder = self.fm.get_user_folder(user_id)
             if not os.path.exists(user_folder):
                 return
             
             if keep_report:
+                # Удаляем все, кроме файлов отчетов
                 for item in os.listdir(user_folder):
                     item_path = os.path.join(user_folder, item)
                     if os.path.isdir(item_path):
@@ -117,6 +151,8 @@ class ReportGenerator:
                     elif not item.startswith('Отчет_'):
                         os.remove(item_path)
                         logger.info(f"🗑️ Удален файл: {item}")
+                    else:
+                        logger.info(f"ℹ️ Отчет сохранен: {item}")
             else:
                 shutil.rmtree(user_folder)
                 os.makedirs(user_folder, exist_ok=True)
