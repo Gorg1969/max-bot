@@ -27,21 +27,40 @@ class Database:
             )
         ''')
         
-        # Таблица публикаций
+        # Таблица публикаций с новыми полями
         c.execute('''
             CREATE TABLE IF NOT EXISTS publications (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 folder_name TEXT NOT NULL,
                 group_id TEXT NOT NULL,
+                message_id TEXT,
+                full_url TEXT,
                 status TEXT DEFAULT 'pending',
+                error_text TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP,
                 error TEXT
             )
         ''')
         
-        # Таблица метаданных для отчетов
+        # Добавляем новые колонки если их нет
+        try:
+            c.execute('ALTER TABLE publications ADD COLUMN message_id TEXT')
+        except sqlite3.OperationalError:
+            pass
+        
+        try:
+            c.execute('ALTER TABLE publications ADD COLUMN full_url TEXT')
+        except sqlite3.OperationalError:
+            pass
+        
+        try:
+            c.execute('ALTER TABLE publications ADD COLUMN error_text TEXT')
+        except sqlite3.OperationalError:
+            pass
+        
+        # Таблица метаданных
         c.execute('''
             CREATE TABLE IF NOT EXISTS ad_metadata (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,17 +80,29 @@ class Database:
         conn.close()
         logger.info("✅ База данных инициализирована")
     
-    def add_publication(self, user_id, folder_name, group_id):
-        """Добавляет запись о публикации"""
+    def add_publication(self, user_id, folder_name, group_id, message_id=None, full_url=None):
+        """Добавляет запись о публикации с полной ссылкой"""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         c.execute('''
-            INSERT INTO publications (user_id, folder_name, group_id, status)
-            VALUES (?, ?, ?, ?)
-        ''', (user_id, folder_name, group_id, 'success'))
+            INSERT INTO publications (user_id, folder_name, group_id, message_id, full_url, status)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (user_id, folder_name, group_id, message_id, full_url, 'success'))
         conn.commit()
         conn.close()
         logger.info(f"📝 Добавлена публикация: {folder_name} -> {group_id}")
+    
+    def add_publication_error(self, user_id, folder_name, group_id, error_text):
+        """Добавляет запись об ошибке публикации"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO publications (user_id, folder_name, group_id, status, error_text)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, folder_name, group_id, 'error', error_text))
+        conn.commit()
+        conn.close()
+        logger.warning(f"⚠️ Ошибка публикации {folder_name}: {error_text}")
     
     def save_ad_metadata(self, user_id, folder_name, chat_id, metadata, published_at):
         """Сохраняет метаданные для отчета"""
@@ -153,6 +184,45 @@ class Database:
                     'group_id': row[1],
                     'status': row[2],
                     'created_at': row[3]
+                })
+            return publications
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения публикаций: {e}")
+            return []
+    
+    def get_publications_with_status(self, user_id, status=None):
+        """Получает публикации с фильтром по статусу"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            c = conn.cursor()
+            
+            query = '''
+                SELECT folder_name, group_id, message_id, full_url, status, error_text, created_at 
+                FROM publications 
+                WHERE user_id = ?
+            '''
+            params = [user_id]
+            
+            if status:
+                query += " AND status = ?"
+                params.append(status)
+            
+            query += " ORDER BY created_at DESC"
+            
+            c.execute(query, params)
+            rows = c.fetchall()
+            conn.close()
+            
+            publications = []
+            for row in rows:
+                publications.append({
+                    'folder_name': row[0],
+                    'group_id': row[1],
+                    'message_id': row[2],
+                    'full_url': row[3],
+                    'status': row[4],
+                    'error_text': row[5],
+                    'created_at': row[6]
                 })
             return publications
         except Exception as e:
