@@ -27,20 +27,18 @@ class PublisherInstance:
         self.total_folders = 0
         self.processed_folders = 0
         self.failed_folders = 0
+        self.max_photos_per_ad = 10  # Увеличено до 10
         
     def is_stopped(self) -> bool:
-        """Проверяет, нужно ли остановить публикацию"""
         return self.stop_flag
     
     def stop(self):
-        """Останавливает публикацию"""
         with self.lock:
             self.stop_flag = True
             self.running = False
             logger.info(f"⏹️ Остановка публикации для пользователя {self.user_id}")
     
     def get_status(self) -> Dict:
-        """Возвращает статус публикации"""
         with self.lock:
             return {
                 'user_id': self.user_id,
@@ -49,11 +47,11 @@ class PublisherInstance:
                 'current_folder': self.current_folder,
                 'total_folders': self.total_folders,
                 'processed_folders': self.processed_folders,
-                'failed_folders': self.failed_folders
+                'failed_folders': self.failed_folders,
+                'max_photos': self.max_photos_per_ad
             }
     
     def extract_chat_id(self, folder_name: str) -> Optional[str]:
-        """Извлекает chat_id из названия папки"""
         match = re.search(r'-\s*(\d+)', folder_name)
         if match:
             chat_id = match.group(1)
@@ -65,7 +63,6 @@ class PublisherInstance:
         return None
     
     def _upload_file_to_max(self, image_data, retry_count: int = 3) -> Optional[str]:
-        """Загружает изображение с повторными попытками"""
         if self.is_stopped():
             return None
         
@@ -74,7 +71,6 @@ class PublisherInstance:
                 if self.is_stopped():
                     return None
                 
-                # Получаем URL для загрузки
                 response = requests.post(
                     f"{self.api.base_url}/uploads",
                     headers={"Authorization": self.api.token},
@@ -96,7 +92,6 @@ class PublisherInstance:
                     time.sleep(2 ** attempt)
                     continue
                 
-                # Извлекаем байты из разных форматов
                 if isinstance(image_data, dict):
                     if 'data' in image_data:
                         img_data = image_data['data']
@@ -119,7 +114,6 @@ class PublisherInstance:
                     logger.error(f"❌ Неподдерживаемый тип данных: {type(img_data)}")
                     continue
                 
-                # Отправляем файл
                 files = {'data': ('image.jpg', image_bytes, 'image/jpeg')}
                 
                 upload_response = requests.post(
@@ -136,7 +130,6 @@ class PublisherInstance:
                 
                 upload_result = upload_response.json()
                 
-                # Извлекаем токен
                 token = None
                 if 'photos' in upload_result and isinstance(upload_result['photos'], dict):
                     for photo_data in upload_result['photos'].values():
@@ -149,7 +142,7 @@ class PublisherInstance:
                 
                 if token:
                     logger.info(f"✅ Файл загружен, токен: {token[:20]}...")
-                    time.sleep(1)
+                    time.sleep(0.5)
                     return token
                 else:
                     logger.warning(f"⚠️ Попытка {attempt + 1}: Не получен токен")
@@ -162,12 +155,12 @@ class PublisherInstance:
         return None
     
     def _send_to_chat(self, chat_id: str, text: str, image_tokens: List[str]) -> bool:
-        """Отправляет сообщение в чат"""
         try:
             if not self.api.token or self.is_stopped():
                 return False
             
             attachments = []
+            # МАКСИМУМ 10 ФОТО (согласно API)
             for token in image_tokens[:10]:
                 attachments.append({
                     "type": "image",
@@ -209,7 +202,6 @@ class PublisherInstance:
             return False
     
     def _parse_metadata(self, metadata_text: str) -> Dict:
-        """Парсит метаданные из текста"""
         metadata = {}
         if not metadata_text:
             return metadata
@@ -230,7 +222,6 @@ class PublisherInstance:
     
     def publish_single_folder(self, folder_name: str, ad_text: str, 
                               metadata_text: str, images_data: List) -> Tuple[bool, str]:
-        """Обрабатывает ОДНУ папку"""
         try:
             with self.lock:
                 self.current_folder = folder_name
@@ -241,7 +232,6 @@ class PublisherInstance:
             
             start_time = time.time()
             
-            # Извлекаем chat_id
             chat_id = self.extract_chat_id(folder_name)
             if not chat_id:
                 logger.error(f"❌ Не удалось извлечь chat_id из: {folder_name}")
@@ -249,12 +239,12 @@ class PublisherInstance:
             
             logger.info(f"📤 Извлечен chat_id: {chat_id}")
             
-            # Загружаем изображения (максимум 10)
-            image_tokens = []
+            # МАКСИМУМ 10 ФОТО
             max_images = min(len(images_data), 10) if isinstance(images_data, list) else 0
             
             logger.info(f"📸 Найдено {len(images_data)} изображений, загружаем максимум {max_images}")
             
+            image_tokens = []
             for i in range(max_images):
                 if self.is_stopped():
                     return False, "Остановка пользователем"
@@ -277,13 +267,11 @@ class PublisherInstance:
             
             logger.info(f"📦 Загружено {len(image_tokens)} из {max_images} изображений")
             
-            # Отправляем сообщение
             success = self._send_to_chat(chat_id, ad_text, image_tokens)
             
             if not success:
                 return False, "Не удалось отправить сообщение"
             
-            # Сохраняем метаданные
             metadata = self._parse_metadata(metadata_text)
             self.db.save_ad_metadata(self.user_id, folder_name, f"-{chat_id}", metadata, time.time())
             self.db.add_publication(self.user_id, folder_name, f"-{chat_id}")
@@ -301,8 +289,6 @@ class PublisherInstance:
 
 
 class Publisher:
-    """Менеджер публикаций для всех пользователей"""
-    
     def __init__(self, api, file_manager, db):
         self.api = api
         self.fm = file_manager
@@ -313,14 +299,12 @@ class Publisher:
         logger.info("✅ Publisher инициализирован")
     
     def _get_lock(self, user_id: int) -> threading.Lock:
-        """Получает блокировку для пользователя"""
         with self._lock:
             if user_id not in self.user_locks:
                 self.user_locks[user_id] = threading.Lock()
             return self.user_locks[user_id]
     
     def _get_publisher(self, user_id: int) -> PublisherInstance:
-        """Получает экземпляр публикатора для пользователя"""
         with self._get_lock(user_id):
             if user_id not in self.user_publishers:
                 self.user_publishers[user_id] = PublisherInstance(
@@ -332,12 +316,10 @@ class Publisher:
     def publish_single_folder(self, user_id: int, folder_name: str, 
                               ad_text: str, metadata_text: str, 
                               images_data: List) -> Tuple[bool, str]:
-        """Публикует папку для пользователя"""
         publisher = self._get_publisher(user_id)
         return publisher.publish_single_folder(folder_name, ad_text, metadata_text, images_data)
     
     def stop(self, user_id: int) -> bool:
-        """Останавливает публикацию для пользователя"""
         with self._get_lock(user_id):
             if user_id in self.user_publishers:
                 self.user_publishers[user_id].stop()
@@ -347,14 +329,12 @@ class Publisher:
             return False
     
     def get_status(self, user_id: int) -> Optional[Dict]:
-        """Получает статус публикации пользователя"""
         with self._get_lock(user_id):
             if user_id not in self.user_publishers:
                 return {'running': False}
             return self.user_publishers[user_id].get_status()
     
     def is_running(self, user_id: int) -> bool:
-        """Проверяет, запущена ли публикация"""
         with self._get_lock(user_id):
             if user_id not in self.user_publishers:
                 return False
