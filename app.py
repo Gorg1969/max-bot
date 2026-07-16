@@ -57,11 +57,32 @@ class APIClient:
             logger.error(f"❌ Ошибка отправки: {e}")
             return False
 
+    def send_message_to_chat(self, chat_id, text):
+        if not self.token:
+            return False
+        try:
+            payload = {"chat_id": chat_id, "text": text, "format": "markdown"}
+            response = requests.post(
+                f"{self.base_url}/messages",
+                headers={"Authorization": self.token, "Content-Type": "application/json"},
+                json=payload,
+                timeout=30,
+                verify=False
+            )
+            if response.status_code == 200:
+                return True
+            else:
+                logger.error(f"❌ Ошибка отправки в чат: {response.status_code} - {response.text}")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки в чат: {e}")
+            return False
+
 api = APIClient()
 publisher = Publisher(api, fm, db)
 report_gen = ReportGenerator(fm, db)
 
-# ========== HTML СТРАНИЦА (ОБНОВЛЕННАЯ) ==========
+# ========== HTML СТРАНИЦА ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -128,7 +149,6 @@ UPLOAD_PAGE = """
             6️⃣ Каждая папка отправляется отдельным запросом
         </div>
         
-        <!-- НОВЫЙ БЛОК НАСТРОЕК -->
         <div class="settings-section">
             <h4>⚙️ Настройки публикации</h4>
             <label>
@@ -360,6 +380,66 @@ UPLOAD_PAGE = """
             }).catch(e => console.error('Ошибка остановки:', e));
         }
 
+        // Функция для безопасного парсинга JSON
+        function safeParseJSON(text) {
+            try {
+                // Пробуем найти первый валидный JSON объект
+                let start = text.indexOf('{');
+                if (start === -1) return null;
+                
+                let depth = 0;
+                let inString = false;
+                let escape = false;
+                let end = -1;
+                
+                for (let i = start; i < text.length; i++) {
+                    const char = text[i];
+                    
+                    if (escape) {
+                        escape = false;
+                        continue;
+                    }
+                    
+                    if (char === '\\\\' && inString) {
+                        escape = true;
+                        continue;
+                    }
+                    
+                    if (char === '"' && !escape) {
+                        inString = !inString;
+                        continue;
+                    }
+                    
+                    if (!inString) {
+                        if (char === '{') depth++;
+                        if (char === '}') {
+                            depth--;
+                            if (depth === 0) {
+                                end = i + 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                if (end === -1) return null;
+                
+                const jsonStr = text.substring(start, end);
+                return JSON.parse(jsonStr);
+            } catch (e) {
+                // Пробуем альтернативный метод - ищем через регулярное выражение
+                try {
+                    const jsonMatch = text.match(/\\{[^{}]*\\}/);
+                    if (jsonMatch) {
+                        return JSON.parse(jsonMatch[0]);
+                    }
+                } catch (e2) {
+                    return null;
+                }
+                return null;
+            }
+        }
+
         async function prepareFolderData(folderName, files, maxPhotos) {
             const txtFile = files.find(f => f.name === 'info' || f.name.endsWith('.txt'));
             if (!txtFile) {
@@ -377,7 +457,6 @@ UPLOAD_PAGE = """
                 metadataText = parts[1] ? parts[1].trim() : '';
             }
             
-            // Используем maxPhotos для ограничения количества фото
             const imageFiles = files
                 .filter(f => f.type && f.type.startsWith('image/'))
                 .slice(0, maxPhotos);
@@ -417,7 +496,6 @@ UPLOAD_PAGE = """
                 return;
             }
             
-            // Получаем настройки
             const maxPhotos = parseInt(document.getElementById('maxPhotos').value) || 3;
             const delayBetween = parseInt(document.getElementById('delayBetween').value) || 2;
             const queueMode = document.getElementById('queueMode').value;
@@ -435,7 +513,6 @@ UPLOAD_PAGE = """
             addLog(`⏱️ Задержка: ${delayBetween} сек`);
             addLog(`📋 Режим очереди: ${queueMode}`);
             
-            // Собираем папки
             const folders = {};
             selectedFiles.forEach(file => {
                 const pathParts = file.webkitRelativePath.split('/');
@@ -451,7 +528,6 @@ UPLOAD_PAGE = """
             const folderNames = Object.keys(folders);
             const totalFolders = folderNames.length;
             
-            // Обновляем очередь
             folderQueue = folderNames.map(name => ({
                 name: name,
                 status: 'pending'
@@ -465,7 +541,6 @@ UPLOAD_PAGE = """
             let failedFolders = 0;
             const results = [];
             
-            // Функция обработки одной папки
             async function processFolder(index) {
                 const folderName = folderNames[index];
                 const files = folders[folderName];
@@ -495,7 +570,18 @@ UPLOAD_PAGE = """
                         })
                     });
                     
-                    const result = await response.json();
+                    const responseText = await response.text();
+                    
+                    // Безопасный парсинг JSON
+                    let result = safeParseJSON(responseText);
+                    
+                    if (!result) {
+                        addLog(`⚠️ ${folderName}: сервер вернул не JSON: ${responseText.substring(0, 100)}...`);
+                        failedFolders++;
+                        updateFolderStatus(folderName, 'error');
+                        results.push(`❌ ${folderName}: сервер вернул не JSON`);
+                        return;
+                    }
                     
                     if (result.success) {
                         uploadedFolders++;
@@ -504,9 +590,9 @@ UPLOAD_PAGE = """
                         results.push(`✅ ${folderName}: успешно`);
                     } else {
                         failedFolders++;
-                        addLog(`❌ ${folderName}: ${result.message}`);
+                        addLog(`❌ ${folderName}: ${result.message || 'Неизвестная ошибка'}`);
                         updateFolderStatus(folderName, 'error');
-                        results.push(`❌ ${folderName}: ${result.message}`);
+                        results.push(`❌ ${folderName}: ${result.message || 'Неизвестная ошибка'}`);
                     }
                     
                 } catch (error) {
@@ -521,9 +607,7 @@ UPLOAD_PAGE = """
                 progress.textContent = `${index+1}/${totalFolders}`;
             }
             
-            // Обработка в зависимости от режима
             if (queueMode === 'parallel') {
-                // Параллельная (до 3 одновременно)
                 const maxParallel = 3;
                 let activePromises = [];
                 
@@ -546,7 +630,6 @@ UPLOAD_PAGE = """
                 await Promise.all(activePromises);
                 
             } else {
-                // Последовательная
                 for (let i = 0; i < totalFolders; i++) {
                     if (isStopped) break;
                     await processFolder(i);
@@ -786,4 +869,3 @@ if __name__ == "__main__":
     if TOKEN:
         logger.info(f"✅ Токен найден (первые 10): {TOKEN[:10]}...")
     app.run(host='0.0.0.0', port=port, threaded=True)
-    
