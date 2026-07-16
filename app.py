@@ -464,7 +464,7 @@ UPLOAD_PAGE = """
                     results.push(`❌ ${folderName}: ${error.message}`);
                 }
                 
-                await new Promise(r => setTimeout(r, 2000));
+                await new Promise(r => setTimeout(r, 30000));
             }
             
             progress.style.width = '100%';
