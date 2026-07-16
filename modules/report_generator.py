@@ -191,4 +191,4 @@ class ReportGenerator:
                 logger.info(f"🗑️ Все данные пользователя {user_id} удалены")
                 
         except Exception as e:
-            logger.error(f"❌ Ошибка очистки: {e}")с
+            logger.error(f"❌ Ошибка очистки: {e}")
