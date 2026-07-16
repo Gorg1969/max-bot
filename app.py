@@ -1,4 +1,4 @@
-# app.py - с возвратом старого интерфейса и очередью
+# app.py - исправленная версия с обработкой ошибок
 from flask import Flask, request, jsonify, render_template_string, send_file
 import requests
 import logging
@@ -136,7 +136,6 @@ UPLOAD_PAGE = """
             6️⃣ Каждая папка отправляется отдельным запросом
         </div>
         
-        <!-- НАСТРОЙКИ -->
         <div class="settings-section">
             <h4>⚙️ Настройки публикации</h4>
             <label>
@@ -278,7 +277,6 @@ UPLOAD_PAGE = """
             
             const sortedFolders = Array.from(folders.keys()).sort();
             
-            // Сохраняем все папки для очереди
             folderQueue = sortedFolders.map(folder => ({
                 name: folder,
                 files: folders.get(folder),
@@ -387,7 +385,6 @@ UPLOAD_PAGE = """
             addLog('⏹️ Публикация остановлена пользователем');
             showStatus('warning', '⏹️ Публикация остановлена');
             
-            // Отправляем запрос на остановку на сервер
             fetch('/stop_publish', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -412,7 +409,6 @@ UPLOAD_PAGE = """
                 metadataText = parts[1] ? parts[1].trim() : '';
             }
             
-            // Используем настройку maxPhotos
             const imageFiles = files
                 .filter(f => f.type && f.type.startsWith('image/'))
                 .slice(0, maxPhotos);
@@ -451,7 +447,6 @@ UPLOAD_PAGE = """
                 return;
             }
             
-            // Получаем настройки
             const maxPhotos = parseInt(document.getElementById('maxPhotos').value) || 3;
             const delayBetween = parseInt(document.getElementById('delayBetween').value) || 2;
             const queueMode = document.getElementById('queueMode').value;
@@ -470,7 +465,6 @@ UPLOAD_PAGE = """
             addLog(`⏱️ Задержка: ${delayBetween} сек`);
             addLog(`📋 Режим очереди: ${queueMode}`);
             
-            // Сбрасываем статусы
             folderQueue.forEach((f, i) => {
                 updateFolderStatus(i, 'pending');
             });
@@ -482,7 +476,6 @@ UPLOAD_PAGE = """
             let uploadedFolders = 0;
             let failedFolders = 0;
             
-            // Функция для обработки одной папки
             async function processFolder(index) {
                 if (isStopped) return;
                 
@@ -517,7 +510,18 @@ UPLOAD_PAGE = """
                         })
                     });
                     
-                    const result = await response.json();
+                    // ПРОВЕРЯЕМ ОТВЕТ
+                    let result;
+                    const responseText = await response.text();
+                    
+                    try {
+                        result = JSON.parse(responseText);
+                    } catch (parseError) {
+                        addLog(`⚠️ Сервер вернул не JSON: ${responseText.substring(0, 200)}...`);
+                        failedFolders++;
+                        updateFolderStatus(index, 'error', 'Ошибка сервера: не JSON ответ');
+                        return;
+                    }
                     
                     if (result.success) {
                         uploadedFolders++;
@@ -525,8 +529,8 @@ UPLOAD_PAGE = """
                         updateFolderStatus(index, 'done', 'Успешно');
                     } else {
                         failedFolders++;
-                        addLog(`❌ ${folderName}: ${result.message}`);
-                        updateFolderStatus(index, 'error', result.message);
+                        addLog(`❌ ${folderName}: ${result.message || 'Неизвестная ошибка'}`);
+                        updateFolderStatus(index, 'error', result.message || 'Неизвестная ошибка');
                     }
                     
                 } catch (error) {
@@ -535,22 +539,18 @@ UPLOAD_PAGE = """
                     updateFolderStatus(index, 'error', error.message);
                 }
                 
-                // Обновляем прогресс
                 const progressPercent = Math.round(((index + 1) / totalFolders) * 100);
                 progress.style.width = progressPercent + '%';
                 progress.textContent = `${index+1}/${totalFolders}`;
             }
             
-            // Обработка в зависимости от режима очереди
             if (queueMode === 'parallel') {
-                // Параллельная обработка (макс 3)
                 const maxParallel = 3;
                 let activePromises = [];
                 
                 for (let i = 0; i < totalFolders; i++) {
                     if (isStopped) break;
                     
-                    // Ждем пока освободится место
                     while (activePromises.length >= maxParallel) {
                         await Promise.race(activePromises);
                         activePromises = activePromises.filter(p => !p._resolved);
@@ -561,20 +561,16 @@ UPLOAD_PAGE = """
                     promise.then(() => { promise._resolved = true; });
                     activePromises.push(promise);
                     
-                    // Небольшая задержка между запусками
                     await new Promise(r => setTimeout(r, Math.max(0, delayBetween * 0.5)));
                 }
                 
-                // Ждем завершения всех
                 await Promise.all(activePromises);
                 
             } else {
-                // Последовательная обработка
                 for (let i = 0; i < totalFolders; i++) {
                     if (isStopped) break;
                     await processFolder(i);
                     
-                    // Задержка между папками
                     if (i < totalFolders - 1 && !isStopped) {
                         await new Promise(r => setTimeout(r, delayBetween * 1000));
                     }
@@ -584,13 +580,12 @@ UPLOAD_PAGE = """
             progress.style.width = '100%';
             progress.textContent = `${totalFolders}/${totalFolders}`;
             
-            // Финальный статус
             const done = folderQueue.filter(f => f.status === 'done').length;
             const errors = folderQueue.filter(f => f.status === 'error').length;
             
             if (isStopped) {
-                showStatus('warning', `⏹️ Остановлено. Загружено ${uploadedFolders} папок, ${errors} с ошибками`);
-                addLog(`⏹️ Остановлено. Загружено ${uploadedFolders} папок, ${errors} с ошибками`);
+                showStatus('warning', `⏹️ Остановлено. Загружено ${done} папок, ${errors} с ошибками`);
+                addLog(`⏹️ Остановлено. Загружено ${done} папок, ${errors} с ошибками`);
             } else if (errors === 0) {
                 showStatus('success', `✅ Загружено ${done} папок!`);
                 addLog(`✅ ВСЕ ${done} папок загружены!`);
@@ -636,12 +631,15 @@ def publish_folder():
         metadata_text = folder_data.get('metadataText')
         images = folder_data.get('images', [])
         
-        # Ограничиваем количество фото
         if len(images) > max_photos:
             images = images[:max_photos]
         
         logger.info(f"📦 Получена папка: {folder_name} от пользователя {user_id}")
         logger.info(f"📝 Текст: {len(ad_text)} символов, 🖼️ Фото: {len(images)} (макс: {max_photos})")
+        
+        # Проверяем token
+        if not TOKEN:
+            return jsonify({'success': False, 'message': 'Токен не настроен'}), 500
         
         success, message = publisher.publish_single_folder(
             user_id, folder_name, ad_text, metadata_text, images
@@ -654,6 +652,8 @@ def publish_folder():
         
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/stop_publish', methods=['POST'])
@@ -707,8 +707,8 @@ def webhook():
                 "📋 **Инструкция:**\n"
                 "1. Подготовьте папки с объявлениями\n"
                 "2. Используйте разделитель #изъятая\n"
-                "3. Фото до 3 шт на объявление\n\n"
-                "⚙️ **Настройки:**\n"
+                "3. Фото до 10 шт на объявление\n\n"
+                "⚙️ **Настройки в веб-интерфейсе:**\n"
                 "• Максимум фото: 1-10\n"
                 "• Задержка между папками\n"
                 "• Режим очереди: последовательный/параллельный"
