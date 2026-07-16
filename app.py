@@ -1,4 +1,4 @@
-# app.py - обновленная версия
+# app.py - исправленная версия
 from flask import Flask, request, jsonify, render_template_string, send_file
 import requests
 import logging
@@ -8,6 +8,7 @@ import urllib3
 import json
 import threading
 import time
+from typing import Optional, Dict, Any, List, Tuple  # <-- ДОБАВЛЕН ИМПОРТ
 from werkzeug.exceptions import ClientDisconnected
 from modules import Database, FileManager, Publisher, WebInterface
 from modules.report_generator import ReportGenerator
@@ -532,7 +533,18 @@ def webhook():
         if not session_id:
             session = session_manager.get_session_by_user(user_id)
             if session:
-                session_id = session.get('id')
+                # Нужно получить session_id из сессии, но у нас его нет в структуре
+                # Используем другой подход
+                pass
+        
+        # Проверяем существующую сессию
+        session = session_manager.get_session_by_user(user_id)
+        if session:
+            # Находим session_id
+            for sid, s in session_manager.sessions.items():
+                if s.get('user_id') == user_id:
+                    session_id = sid
+                    break
         
         if not session_id:
             # Новая сессия
@@ -628,6 +640,7 @@ def handle_stop(user_id: int) -> str:
     return "⏹️ **Публикация остановлена!**\n\n✅ Все процессы остановлены"
 
 def handle_report(user_id: int) -> str:
+    # Отправляем сообщение о создании отчета
     api.send_message(user_id, "📊 Создаю отчет...")
     report_path = report_gen.generate_report(user_id)
     if report_path:
@@ -653,8 +666,8 @@ def publish_from_session(session_id: str) -> str:
     # Сбрасываем состояние
     session_manager.set_state(session_id, 'idle')
     
-    # Здесь нужно получить изображения
-    images = []
+    # Получаем изображения (если есть)
+    images = session.get('data', {}).get('images', [])
     
     # Выполняем публикацию
     success, message = publisher.publish_single_folder(
