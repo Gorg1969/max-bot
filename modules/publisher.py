@@ -132,7 +132,7 @@ class Publisher:
             
             # Формируем вложения (максимум 10 фото)
             attachments = []
-            for token in image_tokens[:10]:
+            for token in image_tokens[:6]:
                 attachments.append({
                     "type": "image",
                     "payload": {"token": token}
@@ -181,7 +181,7 @@ class Publisher:
                 return False
             
             attachments = []
-            for token in image_tokens[:10]:
+            for token in image_tokens[:6]:
                 attachments.append({
                     "type": "image",
                     "payload": {"token": token}
@@ -264,7 +264,7 @@ class Publisher:
             
             # 2. Загружаем изображения (максимум 10)
             image_tokens = []
-            max_images = min(len(images_data), 10) if isinstance(images_data, list) else 0
+            max_images = min(len(images_data), 6) if isinstance(images_data, list) else 0
             
             logger.info(f"📸 Найдено {len(images_data)} изображений, загружаем максимум {max_images}")
             
