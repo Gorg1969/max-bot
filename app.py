@@ -1,4 +1,4 @@
-# app.py - исправленная версия с обработкой ошибок
+# app.py - с утилиткой отладки
 from flask import Flask, request, jsonify, render_template_string, send_file
 import requests
 import logging
@@ -10,6 +10,7 @@ import threading
 import time
 import queue
 from typing import Optional, Dict, Any, List, Tuple
+from datetime import datetime
 from werkzeug.exceptions import ClientDisconnected
 from modules import Database, FileManager, Publisher, WebInterface
 from modules.report_generator import ReportGenerator
@@ -20,8 +21,16 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-logging.basicConfig(level=logging.INFO)
+# Настройка логирования с детальным выводом
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
+
+# Создаем отдельный логгер для API запросов
+api_logger = logging.getLogger('api_debug')
+api_logger.setLevel(logging.DEBUG)
 
 TOKEN = os.environ.get("MAX_TOKEN") or os.environ.get("MAX_BOT_TOKEN") or os.environ.get("TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
@@ -33,38 +42,480 @@ if not TOKEN:
 db = Database()
 fm = FileManager(DATA_DIR)
 
-class APIClient:
+# ========== УТИЛИТКА ДЛЯ ОТЛАДКИ ==========
+class DebugAPIClient:
+    """Клиент с детальным логированием всех запросов"""
+    
     def __init__(self):
         self.token = TOKEN
         self.base_url = BASE_URL
-
+        self.debug_dir = "/app/debug_logs"
+        os.makedirs(self.debug_dir, exist_ok=True)
+        
+    def _log_request(self, method: str, url: str, headers: dict, data: dict, response: requests.Response):
+        """Логирует запрос и ответ в файл"""
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]
+            log_file = os.path.join(self.debug_dir, f"request_{timestamp}.log")
+            
+            with open(log_file, 'w', encoding='utf-8') as f:
+                f.write("=" * 80 + "\n")
+                f.write(f"TIMESTAMP: {datetime.now().isoformat()}\n")
+                f.write(f"METHOD: {method}\n")
+                f.write(f"URL: {url}\n")
+                f.write("-" * 40 + "\n")
+                f.write("HEADERS:\n")
+                for key, value in headers.items():
+                    # Скрываем токен в логах
+                    if key.lower() == 'authorization':
+                        value = value[:15] + "..." if value else ""
+                    f.write(f"  {key}: {value}\n")
+                f.write("-" * 40 + "\n")
+                f.write("REQUEST DATA:\n")
+                f.write(json.dumps(data, indent=2, ensure_ascii=False) if data else "None\n")
+                f.write("-" * 40 + "\n")
+                f.write("RESPONSE:\n")
+                f.write(f"STATUS: {response.status_code}\n")
+                f.write(f"HEADERS:\n")
+                for key, value in response.headers.items():
+                    f.write(f"  {key}: {value}\n")
+                f.write("-" * 40 + "\n")
+                f.write("BODY (first 2000 chars):\n")
+                body = response.text[:2000] if response.text else "Empty"
+                f.write(body)
+                if response.text and len(response.text) > 2000:
+                    f.write(f"\n... (truncated, total {len(response.text)} chars)")
+                f.write("\n" + "=" * 80 + "\n")
+                
+            logger.info(f"📝 Лог запроса сохранен: {log_file}")
+            return log_file
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка логирования: {e}")
+            return None
+    
+    def _parse_response(self, response: requests.Response) -> tuple:
+        """Парсит ответ с обработкой ошибок"""
+        try:
+            # Пробуем получить JSON
+            if response.status_code == 200:
+                try:
+                    return True, response.json()
+                except json.JSONDecodeError:
+                    return False, f"Не JSON: {response.text[:200]}"
+            else:
+                # Сохраняем тело ответа для анализа
+                body_preview = response.text[:500] if response.text else "Empty"
+                return False, f"Код {response.status_code}: {body_preview}"
+        except Exception as e:
+            return False, str(e)
+    
     def send_message(self, user_id, text, attachments=None):
+        """Отправляет сообщение пользователю с логированием"""
         if not self.token:
             return False
+        
         try:
             payload = {"text": text, "format": "markdown"}
             if attachments:
                 payload["attachments"] = attachments
+            
+            url = f"{self.base_url}/messages"
+            headers = {
+                "Authorization": self.token,
+                "Content-Type": "application/json"
+            }
+            params = {"user_id": user_id}
+            
+            logger.info(f"📤 [API] Отправка сообщения пользователю {user_id}")
+            
             response = requests.post(
-                f"{self.base_url}/messages",
-                headers={"Authorization": self.token, "Content-Type": "application/json"},
-                params={"user_id": user_id},
+                url,
+                headers=headers,
+                params=params,
                 json=payload,
                 timeout=30,
                 verify=False
             )
-            if response.status_code != 200:
-                logger.error(f"❌ Ошибка отправки: {response.text}")
+            
+            self._log_request("POST", url, headers, {"params": params, "payload": payload}, response)
+            
+            success, result = self._parse_response(response)
+            if not success:
+                logger.error(f"❌ Ошибка отправки пользователю {user_id}: {result}")
             return response.status_code == 200
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки: {e}")
+            return False
+    
+    def upload_file(self, image_data) -> Optional[str]:
+        """Загружает файл с логированием"""
+        if not self.token:
+            return None
+        
+        try:
+            # 1. Получаем URL для загрузки
+            url = f"{self.base_url}/uploads"
+            headers = {"Authorization": self.token}
+            params = {"type": "image"}
+            
+            logger.info(f"📤 [API] Запрос URL для загрузки")
+            
+            response = requests.post(
+                url,
+                headers=headers,
+                params=params,
+                timeout=30,
+                verify=False
+            )
+            
+            self._log_request("POST", url, headers, {"params": params}, response)
+            
+            if response.status_code != 200:
+                logger.error(f"❌ Ошибка получения URL: {response.status_code}")
+                return None
+            
+            upload_data = response.json()
+            upload_url = upload_data.get('url')
+            
+            if not upload_url:
+                logger.error(f"❌ Не получен URL: {upload_data}")
+                return None
+            
+            # 2. Извлекаем байты изображения
+            if isinstance(image_data, dict):
+                if 'data' in image_data:
+                    img_data = image_data['data']
+                else:
+                    for key, value in image_data.items():
+                        if isinstance(value, (list, bytes, bytearray)):
+                            img_data = value
+                            break
+                    else:
+                        logger.error(f"❌ В словаре нет данных: {image_data.keys()}")
+                        return None
+            else:
+                img_data = image_data
+            
+            if isinstance(img_data, list):
+                image_bytes = bytes(img_data)
+            elif isinstance(img_data, (bytes, bytearray)):
+                image_bytes = bytes(img_data)
+            else:
+                logger.error(f"❌ Неподдерживаемый тип данных: {type(img_data)}")
+                return None
+            
+            # 3. Отправляем файл
+            files = {'data': ('image.jpg', image_bytes, 'image/jpeg')}
+            
+            logger.info(f"📤 [API] Загрузка файла ({len(image_bytes)} байт)")
+            
+            upload_response = requests.post(
+                upload_url,
+                files=files,
+                timeout=60,
+                verify=False
+            )
+            
+            self._log_request("POST", upload_url, {}, {"files": files}, upload_response)
+            
+            if upload_response.status_code != 200:
+                logger.error(f"❌ Ошибка загрузки: {upload_response.status_code}")
+                return None
+            
+            upload_result = upload_response.json()
+            
+            # 4. Извлекаем токен
+            token = None
+            if 'photos' in upload_result and isinstance(upload_result['photos'], dict):
+                for photo_data in upload_result['photos'].values():
+                    if isinstance(photo_data, dict) and 'token' in photo_data:
+                        token = photo_data['token']
+                        break
+            
+            if not token and 'token' in upload_result:
+                token = upload_result['token']
+            
+            if token:
+                logger.info(f"✅ Файл загружен, токен: {token[:20]}...")
+                return token
+            else:
+                logger.error(f"❌ Не получен токен: {upload_result}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def send_to_chat(self, chat_id: str, text: str, image_tokens: List[str]) -> bool:
+        """Отправляет сообщение в чат с логированием"""
+        if not self.token:
+            return False
+        
+        try:
+            attachments = []
+            for token in image_tokens[:10]:
+                attachments.append({
+                    "type": "image",
+                    "payload": {"token": token}
+                })
+            
+            payload = {
+                "text": text,
+                "format": "markdown"
+            }
+            
+            if attachments:
+                payload["attachments"] = attachments
+            
+            chat_id_with_dash = f"-{chat_id}" if not str(chat_id).startswith('-') else chat_id
+            
+            url = f"{self.base_url}/messages"
+            headers = {
+                "Authorization": self.token,
+                "Content-Type": "application/json"
+            }
+            params = {"chat_id": chat_id_with_dash}
+            
+            logger.info(f"📤 [API] Отправка в чат {chat_id_with_dash} с {len(attachments)} фото")
+            
+            response = requests.post(
+                url,
+                headers=headers,
+                params=params,
+                json=payload,
+                timeout=60,
+                verify=False
+            )
+            
+            self._log_request("POST", url, headers, {"params": params, "payload": payload}, response)
+            
+            if response.status_code == 200:
+                logger.info(f"✅ Сообщение отправлено в чат {chat_id_with_dash}")
+                return True
+            else:
+                logger.error(f"❌ Ошибка: {response.status_code} - {response.text[:200]}")
+                return False
+                
         except Exception as e:
             logger.error(f"❌ Ошибка отправки: {e}")
             return False
 
-api = APIClient()
+# Создаем отладочный клиент
+debug_api = DebugAPIClient()
+
+# Переопределяем Publisher с отладочным клиентом
+class DebugPublisher:
+    def __init__(self, api, file_manager, db):
+        self.api = api
+        self.fm = file_manager
+        self.db = db
+        self.user_publishers: Dict[int, Publisher] = {}
+        self.user_locks: Dict[int, threading.Lock] = {}
+        self._lock = threading.Lock()
+        logger.info("✅ DebugPublisher инициализирован")
+    
+    def _get_lock(self, user_id: int) -> threading.Lock:
+        with self._lock:
+            if user_id not in self.user_locks:
+                self.user_locks[user_id] = threading.Lock()
+            return self.user_locks[user_id]
+    
+    def _get_publisher(self, user_id: int):
+        with self._get_lock(user_id):
+            if user_id not in self.user_publishers:
+                self.user_publishers[user_id] = Publisher(self.api, self.fm, self.db)
+                logger.info(f"📦 Создан публикатор для пользователя {user_id}")
+            return self.user_publishers[user_id]
+    
+    def publish_single_folder(self, user_id: int, folder_name: str, 
+                              ad_text: str, metadata_text: str, 
+                              images_data: List) -> Tuple[bool, str]:
+        publisher = self._get_publisher(user_id)
+        return publisher.publish_single_folder(
+            user_id, folder_name, ad_text, metadata_text, images_data
+        )
+    
+    def stop(self, user_id: int) -> bool:
+        with self._get_lock(user_id):
+            if user_id in self.user_publishers:
+                self.user_publishers[user_id].stop(user_id)
+                del self.user_publishers[user_id]
+                logger.info(f"⏹️ Публикатор для пользователя {user_id} остановлен")
+                return True
+            return False
+
+# Используем обновленный класс Publisher с отладкой
+# Модифицируем Publisher чтобы он использовал debug_api
+class Publisher:
+    def __init__(self, api, file_manager, db):
+        self.api = api  # Используем debug_api
+        self.fm = file_manager
+        self.db = db
+        self.user_publishers: Dict[int, 'PublisherInstance'] = {}
+        self.user_locks: Dict[int, threading.Lock] = {}
+        self._lock = threading.Lock()
+        logger.info("✅ Publisher инициализирован")
+    
+    def _get_lock(self, user_id: int) -> threading.Lock:
+        with self._lock:
+            if user_id not in self.user_locks:
+                self.user_locks[user_id] = threading.Lock()
+            return self.user_locks[user_id]
+    
+    def _get_publisher(self, user_id: int) -> 'PublisherInstance':
+        with self._get_lock(user_id):
+            if user_id not in self.user_publishers:
+                self.user_publishers[user_id] = PublisherInstance(
+                    self.api, self.fm, self.db, user_id
+                )
+                logger.info(f"📦 Создан публикатор для пользователя {user_id}")
+            return self.user_publishers[user_id]
+    
+    def publish_single_folder(self, user_id: int, folder_name: str, 
+                              ad_text: str, metadata_text: str, 
+                              images_data: List) -> Tuple[bool, str]:
+        publisher = self._get_publisher(user_id)
+        return publisher.publish_single_folder(folder_name, ad_text, metadata_text, images_data)
+    
+    def stop(self, user_id: int) -> bool:
+        with self._get_lock(user_id):
+            if user_id in self.user_publishers:
+                self.user_publishers[user_id].stop()
+                del self.user_publishers[user_id]
+                logger.info(f"⏹️ Публикатор для пользователя {user_id} остановлен")
+                return True
+            return False
+
+class PublisherInstance:
+    """Экземпляр публикатора для одного пользователя"""
+    
+    def __init__(self, api, file_manager, db, user_id: int):
+        self.api = api  # debug_api
+        self.fm = file_manager
+        self.db = db
+        self.user_id = user_id
+        self.stop_flag = False
+        self.lock = threading.Lock()
+        self.FOLDER_TIMEOUT = 60
+        self.running = False
+        self.current_folder = None
+        self.total_folders = 0
+        self.processed_folders = 0
+        self.failed_folders = 0
+        self.max_photos_per_ad = 10
+        
+    def is_stopped(self) -> bool:
+        return self.stop_flag
+    
+    def stop(self):
+        with self.lock:
+            self.stop_flag = True
+            self.running = False
+            logger.info(f"⏹️ Остановка публикации для пользователя {self.user_id}")
+    
+    def extract_chat_id(self, folder_name: str) -> Optional[str]:
+        import re
+        match = re.search(r'-\s*(\d+)', folder_name)
+        if match:
+            chat_id = match.group(1)
+            if len(chat_id) >= 10:
+                return chat_id
+        match = re.search(r'(\d{10,})$', folder_name)
+        if match:
+            return match.group(1)
+        return None
+    
+    def publish_single_folder(self, folder_name: str, ad_text: str, 
+                              metadata_text: str, images_data: List) -> Tuple[bool, str]:
+        try:
+            with self.lock:
+                self.current_folder = folder_name
+                self.total_folders += 1
+            
+            if self.is_stopped():
+                return False, "Остановка пользователем"
+            
+            chat_id = self.extract_chat_id(folder_name)
+            if not chat_id:
+                return False, f"Не удалось извлечь chat_id из {folder_name}"
+            
+            logger.info(f"📤 Извлечен chat_id: {chat_id}")
+            
+            # Загружаем фото через debug_api
+            max_images = min(len(images_data), 10) if isinstance(images_data, list) else 0
+            image_tokens = []
+            
+            for i in range(max_images):
+                if self.is_stopped():
+                    return False, "Остановка пользователем"
+                
+                img_data = images_data[i]
+                if not img_data:
+                    continue
+                
+                logger.info(f"📤 Загрузка изображения {i+1}/{max_images}")
+                token = self.api.upload_file(img_data)
+                if token:
+                    image_tokens.append(token)
+                    logger.info(f"✅ Изображение {i+1} загружено")
+                else:
+                    logger.warning(f"⚠️ Не удалось загрузить изображение {i+1}")
+            
+            # Отправляем в чат через debug_api
+            success = self.api.send_to_chat(chat_id, ad_text, image_tokens)
+            
+            if not success:
+                return False, "Не удалось отправить сообщение"
+            
+            # Сохраняем метаданные
+            import time
+            metadata = self._parse_metadata(metadata_text)
+            self.db.save_ad_metadata(self.user_id, folder_name, f"-{chat_id}", metadata, time.time())
+            self.db.add_publication(self.user_id, folder_name, f"-{chat_id}")
+            
+            with self.lock:
+                self.processed_folders += 1
+            
+            return True, f"✅ Папка {folder_name} опубликована с {len(image_tokens)} фото"
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка публикации {folder_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            with self.lock:
+                self.failed_folders += 1
+            return False, str(e)
+    
+    def _parse_metadata(self, metadata_text: str) -> Dict:
+        import re
+        metadata = {}
+        if not metadata_text:
+            return metadata
+        
+        fields = {
+            'Название': r'Название:\s*(.+)',
+            'Ссылка': r'Ссылка:\s*(.+)',
+            'Код предложения': r'Код предложения:\s*(.+)',
+            'Цена в лизинге': r'Цена\s*[вВ]\s*лизинге:\s*(.+)',
+        }
+        
+        for key, pattern in fields.items():
+            match = re.search(pattern, metadata_text, re.IGNORECASE)
+            if match:
+                metadata[key] = match.group(1).strip()
+        
+        return metadata
+
+# Создаем экземпляры с отладкой
+api = debug_api  # Используем отладочный клиент
 publisher = Publisher(api, fm, db)
 report_gen = ReportGenerator(fm, db)
 
-# ========== СТАРЫЙ ИНТЕРФЕЙС (возвращен) ==========
+# ========== HTML СТРАНИЦА (с добавлением кнопки скачать логи) ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -90,6 +541,8 @@ UPLOAD_PAGE = """
         .btn-danger:hover { background: #c82333; }
         .btn-warning { background: #ffc107; color: #333; }
         .btn-warning:hover { background: #e0a800; }
+        .btn-info { background: #17a2b8; color: white; }
+        .btn-info:hover { background: #138496; }
         .status { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
         .status.success { background: #d4edda; color: #155724; display: block; border-left: 4px solid #28a745; }
         .status.error { background: #f8d7da; color: #721c24; display: block; border-left: 4px solid #dc3545; }
@@ -118,6 +571,7 @@ UPLOAD_PAGE = """
         .settings-section select { padding: 5px; border: 1px solid #ccc; border-radius: 5px; }
         .queue-info { background: #f8f9fa; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #17a2b8; }
         .queue-info strong { color: #17a2b8; }
+        .debug-section { background: #f8f9fa; padding: 15px; border-radius: 10px; margin: 10px 0; border: 1px solid #6c757d; }
     </style>
 </head>
 <body>
@@ -129,22 +583,19 @@ UPLOAD_PAGE = """
             1️⃣ Создайте головную папку (любое название)<br>
             2️⃣ Внутри создайте подпапки объявлений: <code>1 -123456789</code>, <code>2 -987654321</code><br>
             3️⃣ В каждой подпапке: <code>info.txt</code> (текст) и фото (1-10 шт)<br>
-            4️⃣ В тексте используйте разделитель <code>#изъятая</code>:<br>
-            &nbsp;&nbsp;• Текст ДО разделителя — публикуется в чат<br>
-            &nbsp;&nbsp;• Текст ПОСЛЕ разделителя — идет в отчет<br>
-            5️⃣ Перетащите головную папку в поле ниже<br>
-            6️⃣ Каждая папка отправляется отдельным запросом
+            4️⃣ В тексте используйте разделитель <code>#изъятая</code><br>
+            5️⃣ Перетащите головную папку в поле ниже
         </div>
         
         <div class="settings-section">
             <h4>⚙️ Настройки публикации</h4>
             <label>
                 📸 Максимум фото:
-                <input type="number" id="maxPhotos" value="3" min="1" max="10">
+                <input type="number" id="maxPhotos" value="6" min="1" max="10">
             </label>
             <label>
                 ⏱️ Задержка между папками (сек):
-                <input type="number" id="delayBetween" value="2" min="0" max="30">
+                <input type="number" id="delayBetween" value="3" min="0" max="30">
             </label>
             <label>
                 📋 Очередь:
@@ -173,6 +624,7 @@ UPLOAD_PAGE = """
                 <button class="btn btn-success" onclick="uploadFolder()">🚀 Загрузить</button>
                 <button class="btn btn-danger" onclick="clearFiles()">🗑️ Очистить</button>
                 <button class="btn btn-warning" onclick="stopPublish()">⏹️ Остановить</button>
+                <button class="btn btn-info" onclick="downloadLogs()">📥 Скачать логи</button>
             </div>
         </div>
         
@@ -186,6 +638,11 @@ UPLOAD_PAGE = """
         <div class="report-section">
             <button class="btn btn-primary" onclick="getReport()">📊 Скачать отчет</button>
             <p style="margin-top: 10px; color: #666; font-size: 14px;">После публикации всех папок</p>
+        </div>
+        
+        <div class="debug-section">
+            <button class="btn btn-info" onclick="downloadLogs()">📥 Скачать логи API</button>
+            <p style="margin-top: 10px; color: #666; font-size: 14px;">Логи всех запросов к MAX API</p>
         </div>
         
         <div class="footer">⚡ MAX Bot | Загрузка объявлений</div>
@@ -379,6 +836,10 @@ UPLOAD_PAGE = """
             window.open(`/report/${userId}`, '_blank');
         }
 
+        function downloadLogs() {
+            window.open(`/download_logs`, '_blank');
+        }
+
         function stopPublish() {
             isStopped = true;
             isProcessing = false;
@@ -510,7 +971,6 @@ UPLOAD_PAGE = """
                         })
                     });
                     
-                    // ПРОВЕРЯЕМ ОТВЕТ
                     let result;
                     const responseText = await response.text();
                     
@@ -518,6 +978,7 @@ UPLOAD_PAGE = """
                         result = JSON.parse(responseText);
                     } catch (parseError) {
                         addLog(`⚠️ Сервер вернул не JSON: ${responseText.substring(0, 200)}...`);
+                        addLog(`📝 Полный ответ сохранен в логах сервера`);
                         failedFolders++;
                         updateFolderStatus(index, 'error', 'Ошибка сервера: не JSON ответ');
                         return;
@@ -615,13 +1076,44 @@ def index():
 def upload_page():
     return render_template_string(UPLOAD_PAGE)
 
+@app.route('/download_logs', methods=['GET'])
+def download_logs():
+    """Скачивает все логи API в zip архив"""
+    try:
+        import zipfile
+        from io import BytesIO
+        
+        debug_dir = "/app/debug_logs"
+        if not os.path.exists(debug_dir):
+            return "❌ Нет логов для скачивания", 404
+        
+        # Создаем zip архив в памяти
+        memory_file = BytesIO()
+        with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for filename in os.listdir(debug_dir):
+                filepath = os.path.join(debug_dir, filename)
+                if os.path.isfile(filepath):
+                    zf.write(filepath, filename)
+        
+        memory_file.seek(0)
+        return send_file(
+            memory_file,
+            as_attachment=True,
+            download_name=f"api_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+            mimetype='application/zip'
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка скачивания логов: {e}")
+        return str(e), 500
+
 @app.route('/publish_folder', methods=['POST'])
 def publish_folder():
     try:
         data = request.get_json()
         user_id = data.get('user_id')
         folder_data = data.get('folder')
-        max_photos = data.get('max_photos', 3)
+        max_photos = data.get('max_photos', 6)
         
         if not user_id or not folder_data:
             return jsonify({'success': False, 'message': 'Нет данных'}), 400
@@ -637,7 +1129,6 @@ def publish_folder():
         logger.info(f"📦 Получена папка: {folder_name} от пользователя {user_id}")
         logger.info(f"📝 Текст: {len(ad_text)} символов, 🖼️ Фото: {len(images)} (макс: {max_photos})")
         
-        # Проверяем token
         if not TOKEN:
             return jsonify({'success': False, 'message': 'Токен не настроен'}), 500
         
