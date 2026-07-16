@@ -17,7 +17,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")
-app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200 МБ
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 МБ
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,107 +32,19 @@ if not TOKEN:
 db = Database()
 fm = FileManager(DATA_DIR)
 
-# ========== НОВЫЙ МЕНЕДЖЕР СЕССИЙ ==========
+# ========== МЕНЕДЖЕР СЕССИЙ ==========
 session_manager = SessionManager(TOKEN, BASE_URL)
 
-# ========== PUBLISHER С НОВЫМ МЕНЕДЖЕРОМ ==========
+# ========== PUBLISHER ==========
 publisher = Publisher(session_manager, fm, db)
 
 # ========== ДИАГНОСТИКА ==========
 diagnostics = Diagnostics(DATA_DIR)
 
-# ========== КЛАСС APIClient ==========
-class APIClient:
-    def __init__(self):
-        self.token = TOKEN
-        self.base_url = BASE_URL
-
-    def send_message(self, user_id, text, attachments=None):
-        if not self.token:
-            return False
-        try:
-            payload = {"text": text, "format": "markdown"}
-            if attachments:
-                payload["attachments"] = attachments
-            response = requests.post(
-                f"{self.base_url}/messages",
-                headers={"Authorization": self.token, "Content-Type": "application/json"},
-                params={"user_id": user_id},
-                json=payload,
-                timeout=30,
-                verify=False
-            )
-            if response.status_code != 200:
-                logger.error(f"❌ Ошибка отправки: {response.text}")
-            return response.status_code == 200
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки: {e}")
-            return False
-
-    def send_message_to_chat(self, chat_id, text):
-        if not self.token:
-            return False
-        try:
-            payload = {"chat_id": chat_id, "text": text, "format": "markdown"}
-            response = requests.post(
-                f"{self.base_url}/messages",
-                headers={"Authorization": self.token, "Content-Type": "application/json"},
-                json=payload,
-                timeout=30,
-                verify=False
-            )
-            if response.status_code == 200:
-                return True
-            else:
-                logger.error(f"❌ Ошибка отправки в чат: {response.status_code} - {response.text}")
-                return False
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки в чат: {e}")
-            return False
-
-    def send_message_with_attachments(self, chat_id, text, tokens):
-        if not self.token:
-            return False
-        try:
-            attachments = []
-            for token in tokens[:3]:
-                attachments.append({
-                    "type": "image",
-                    "payload": {"token": token}
-                })
-            
-            payload = {
-                "chat_id": chat_id,
-                "text": text,
-                "format": "markdown",
-                "attachments": attachments
-            }
-            
-            response = requests.post(
-                f"{self.base_url}/messages",
-                headers={"Authorization": self.token, "Content-Type": "application/json"},
-                json=payload,
-                timeout=60,
-                verify=False
-            )
-            
-            if response.status_code == 200:
-                logger.info(f"✅ Сообщение с фото отправлено в чат {chat_id}")
-                return True
-            else:
-                logger.error(f"❌ Ошибка: {response.status_code} - {response.text}")
-                return False
-        except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
-            return False
-
-api = APIClient()
-
 # ========== ОСТАЛЬНЫЕ КОМПОНЕНТЫ ==========
 report_gen = ReportGenerator(fm, db)
-web_interface = WebInterface(fm, publisher)
 
-# ========== HTML СТРАНИЦА (КАК В СТАРОЙ ВЕРСИИ) ==========
+# ========== HTML СТРАНИЦА С МУЛЬТИ-ЗАГРУЗКОЙ ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -140,7 +52,7 @@ UPLOAD_PAGE = """
     <meta charset="UTF-8">
     <title>Загрузка объявлений</title>
     <style>
-        body { font-family: Arial; max-width: 800px; margin: 50px auto; padding: 20px; background: #f5f5f5; }
+        body { font-family: Arial; max-width: 900px; margin: 50px auto; padding: 20px; background: #f5f5f5; }
         .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
         h1 { color: #333; margin-top: 0; }
         .drop-zone { border: 2px dashed #007bff; padding: 40px; margin: 20px 0; border-radius: 10px; background: #f8f9fa; text-align: center; cursor: pointer; transition: all 0.3s; }
@@ -175,7 +87,7 @@ UPLOAD_PAGE = """
         .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
         .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; }
         .report-section { margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 10px; border: 1px solid #dee2e6; text-align: center; }
-        .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin: 15px 0; padding: 15px; background: #f8f9fa; border-radius: 10px; }
+        .settings-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; margin: 15px 0; padding: 15px; background: #f8f9fa; border-radius: 10px; }
         .settings-group label { display: block; font-weight: bold; margin-bottom: 5px; font-size: 14px; color: #333; }
         .settings-group input, .settings-group select { width: 100%; padding: 8px 12px; border: 1px solid #ddd; border-radius: 5px; font-size: 14px; }
         .settings-group small { display: block; color: #666; font-size: 12px; margin-top: 3px; }
@@ -186,21 +98,19 @@ UPLOAD_PAGE = """
         <h1>📤 Загрузка объявлений</h1>
         
         <div class="instructions">
-            <strong>📌 Как подготовить папку:</strong><br>
+            <strong>📌 Как подготовить папки:</strong><br>
             1️⃣ Создайте головную папку (любое название)<br>
-            2️⃣ Внутри создайте подпапки объявлений: <code>1 -123456789</code>, <code>2 -987654321</code><br>
+            2️⃣ Внутри создайте подпапки объявлений: <code>Название -123456789</code><br>
             3️⃣ В каждой подпапке: <code>info.txt</code> (текст) и фото (1-10 шт)<br>
-            4️⃣ В тексте используйте разделитель <code>#изъятая</code>:<br>
-            &nbsp;&nbsp;• Текст ДО разделителя — публикуется в чат<br>
-            &nbsp;&nbsp;• Текст ПОСЛЕ разделителя — идет в отчет<br>
-            5️⃣ Перетащите головную папку в поле ниже<br>
+            4️⃣ В тексте используйте разделитель <code>#изъятая</code><br>
+            5️⃣ Можно загрузить до 5 головных папок одновременно<br>
             6️⃣ Каждая подпапка отправляется отдельным запросом
         </div>
         
         <div class="drop-zone" id="dropZone">
             <span class="icon">📂</span>
-            <p><strong>Перетащите головную папку сюда</strong></p>
-            <button class="btn btn-primary" onclick="document.getElementById('folderInput').click()">Выбрать папку</button>
+            <p><strong>Перетащите папки сюда (до 5)</strong></p>
+            <button class="btn btn-primary" onclick="document.getElementById('folderInput').click()">Выбрать папки</button>
             <input type="file" id="folderInput" webkitdirectory multiple>
         </div>
         
@@ -215,13 +125,20 @@ UPLOAD_PAGE = """
                     <small>Рекомендуется: 120-300 сек</small>
                 </div>
                 <div class="settings-group">
-                    <label>📷 Максимум фото на объявление</label>
+                    <label>📷 Максимум фото</label>
                     <input type="number" id="maxPhotos" value="3" min="1" max="10">
+                </div>
+                <div class="settings-group">
+                    <label>📋 Порядок публикации</label>
+                    <select id="order">
+                        <option value="sequential">По порядку</option>
+                        <option value="shuffle">Случайный</option>
+                    </select>
                 </div>
             </div>
             
             <div class="button-group">
-                <button class="btn btn-success" onclick="uploadFolder()">🚀 Загрузить</button>
+                <button class="btn btn-success" onclick="uploadFolders()">🚀 Загрузить</button>
                 <button class="btn btn-danger" onclick="clearFiles()">🗑️ Очистить</button>
             </div>
         </div>
@@ -305,31 +222,44 @@ UPLOAD_PAGE = """
         }
 
         function displayFiles(files) {
-            fileListContent.innerHTML = '';
-            const folders = new Set();
-            const fileCount = {};
+            const rootFolders = new Set();
+            const folderCount = {};
             
             files.forEach(f => {
                 const parts = f.webkitRelativePath.split('/');
-                if (parts.length >= 2) {
-                    const folder = parts[0] + '/' + parts[1];
-                    folders.add(folder);
-                    if (!fileCount[folder]) fileCount[folder] = 0;
-                    fileCount[folder]++;
+                if (parts.length >= 1) {
+                    const root = parts[0];
+                    rootFolders.add(root);
+                    if (!folderCount[root]) folderCount[root] = 0;
+                    folderCount[root]++;
                 }
             });
             
-            const sortedFolders = Array.from(folders).sort();
+            if (rootFolders.size > 5) {
+                showStatus('error', '❌ Можно загрузить не более 5 головных папок');
+                return;
+            }
+            
+            fileListContent.innerHTML = '';
+            const sortedFolders = Array.from(rootFolders).sort();
             
             sortedFolders.forEach(folder => {
                 const li = document.createElement('li');
-                const count = fileCount[folder] || 0;
-                const displayName = folder.includes('/') ? folder.split('/')[1] : folder;
-                li.innerHTML = `<span>📁 <strong>${displayName}</strong></span><span class="count">${count} файлов</span>`;
+                const count = folderCount[folder] || 0;
+                li.innerHTML = `<span>📁 <strong>${folder}</strong></span><span class="count">${count} файлов</span>`;
                 fileListContent.appendChild(li);
             });
             
-            selectedInfo.textContent = `✅ Выбрано ${sortedFolders.length} папок, всего ${files.length} файлов`;
+            // Считаем подпапки
+            const subFolders = new Set();
+            files.forEach(f => {
+                const parts = f.webkitRelativePath.split('/');
+                if (parts.length >= 2) {
+                    subFolders.add(parts[0] + '/' + parts[1]);
+                }
+            });
+            
+            selectedInfo.textContent = `✅ ${rootFolders.size} головных папок, ${subFolders.size} объявлений, всего ${files.length} файлов`;
             fileList.style.display = 'block';
             showStatus('info', '📦 Нажмите "Загрузить" для отправки');
         }
@@ -396,7 +326,6 @@ UPLOAD_PAGE = """
                         data: Array.from(new Uint8Array(arrayBuffer)),
                         type: img.type || 'image/jpeg'
                     });
-                    addLog(`✅ Фото ${img.name} преобразовано`);
                 } catch (e) {
                     addLog(`⚠️ Ошибка чтения ${img.name}: ${e.message}`);
                 }
@@ -406,14 +335,13 @@ UPLOAD_PAGE = """
                 folderName: folderName,
                 adText: adText,
                 metadataText: metadataText,
-                fullText: fullText,
                 images: images
             };
         }
 
-        async function uploadFolder() {
+        async function uploadFolders() {
             if (selectedFiles.length === 0) {
-                showStatus('error', '❌ Выберите папку для загрузки');
+                showStatus('error', '❌ Выберите папки для загрузки');
                 return;
             }
             
@@ -432,7 +360,9 @@ UPLOAD_PAGE = """
             addLog('🚀 Начинаем обработку...');
             
             const delay = parseInt(document.getElementById('delay').value) || 180;
+            const order = document.getElementById('order').value;
             
+            // Группируем по подпапкам
             const folders = {};
             selectedFiles.forEach(file => {
                 const pathParts = file.webkitRelativePath.split('/');
@@ -447,6 +377,14 @@ UPLOAD_PAGE = """
             
             const folderNames = Object.keys(folders);
             const totalFolders = folderNames.length;
+            
+            if (order === 'shuffle') {
+                for (let i = folderNames.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [folderNames[i], folderNames[j]] = [folderNames[j], folderNames[i]];
+                }
+                addLog('🔄 Папки перемешаны случайно');
+            }
             
             addLog(`📁 Найдено ${totalFolders} папок`);
             showStatus('info', `⏳ Подготовка 0/${totalFolders} папок...`);
@@ -486,7 +424,15 @@ UPLOAD_PAGE = """
                         })
                     });
                     
-                    const result = await response.json();
+                    let result;
+                    try {
+                        result = await response.json();
+                    } catch (e) {
+                        addLog(`⚠️ Ошибка парсинга ответа: ${e.message}`);
+                        const text = await response.text();
+                        addLog(`📄 Ответ сервера: ${text.substring(0, 200)}`);
+                        throw new Error('Сервер вернул не JSON');
+                    }
                     
                     if (result.success) {
                         uploadedFolders++;
@@ -509,7 +455,7 @@ UPLOAD_PAGE = """
                     addLog(`⏳ Задержка ${delay} секунд...`);
                     for (let s = 0; s < delay; s++) {
                         await new Promise(r => setTimeout(r, 1000));
-                        if (s % 10 === 0) {
+                        if (s % 10 === 0 && s > 0) {
                             progress.textContent = `${i}/${totalFolders} (${Math.round((i / totalFolders) * 100)}%) - ждем ${delay-s}с`;
                         }
                     }
@@ -611,9 +557,11 @@ def webhook():
         logger.info(f"💬 user_id={user_id}, text={text}")
         
         if text and text.strip() == '/start':
-            api.send_message(
-                user_id,
-                "🏠 **Главное меню**\n\n"
+            # Отправляем через session_manager
+            session_manager.send_message(
+                user_id=user_id,
+                chat_id=None,
+                text="🏠 **Главное меню**\n\n"
                 "🌐 **Загрузить папку:**\n"
                 f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
                 "📊 **Получить отчет:**\n"
@@ -622,28 +570,45 @@ def webhook():
                 "📋 **Инструкция:**\n"
                 "1. Подготовьте папки с объявлениями\n"
                 "2. Используйте разделитель #изъятая\n"
-                "3. Фото до 3 шт на объявление"
+                "3. Фото до 3 шт на объявление",
+                is_user=True
             )
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/stop':
             publisher.stop(user_id)
-            api.send_message(user_id, "⏹️ **Публикация остановлена!**\n\n✅ Все процессы остановлены\n🗑️ Временные файлы удалены")
+            session_manager.send_message(
+                user_id=user_id,
+                chat_id=None,
+                text="⏹️ **Публикация остановлена!**",
+                is_user=True
+            )
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/report':
-            api.send_message(user_id, "📊 Создаю отчет...")
+            session_manager.send_message(
+                user_id=user_id,
+                chat_id=None,
+                text="📊 Создаю отчет...",
+                is_user=True
+            )
             report_path = report_gen.generate_report(user_id)
             if report_path:
                 filename = os.path.basename(report_path)
                 download_url = f"https://maxbot.bothost.tech/download_report/{user_id}/{filename}"
-                api.send_message(
-                    user_id,
-                    f"📊 **Отчет создан!**\n\n"
-                    f"🔗 [Скачать отчет]({download_url})"
+                session_manager.send_message(
+                    user_id=user_id,
+                    chat_id=None,
+                    text=f"📊 **Отчет создан!**\n\n🔗 [Скачать отчет]({download_url})",
+                    is_user=True
                 )
             else:
-                api.send_message(user_id, "❌ Нет данных для отчета.")
+                session_manager.send_message(
+                    user_id=user_id,
+                    chat_id=None,
+                    text="❌ Нет данных для отчета.",
+                    is_user=True
+                )
             return jsonify({"ok": True}), 200
         
         return jsonify({"ok": True}), 200
@@ -742,7 +707,7 @@ def setup_webhook():
 def too_large(e):
     return jsonify({
         'success': False,
-        'message': 'Слишком большой файл. Максимальный размер: 200 МБ'
+        'message': 'Слишком большой файл. Максимальный размер: 500 МБ'
     }), 413
 
 if __name__ == "__main__":
