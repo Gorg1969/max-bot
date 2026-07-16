@@ -347,7 +347,7 @@ UPLOAD_PAGE = """
             
             const imageFiles = files
                 .filter(f => f.type && f.type.startsWith('image/'))
-                .slice(0, 3);
+                .slice(0, 6);
             
             const images = [];
             for (const img of imageFiles) {
