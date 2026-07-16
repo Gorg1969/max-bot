@@ -6,3 +6,4 @@ Pillow==10.1.0
 maxapi
 pytz==2023.3
 python-dotenv==1.0.0
+openpyxl==3.1.2
