@@ -10,17 +10,18 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 class Publisher:
-    def __init__(self, api, file_manager, db):
-        self.api = api
+    def __init__(self, session_manager, file_manager, db):
+        self.session_manager = session_manager
         self.fm = file_manager
         self.db = db
         self.active_publishes = {}
         self.publish_threads = {}
         self.FOLDER_TIMEOUT = 60
         self.STOP_FLAG = {}
+        self.PAUSE_FLAG = {}
 
     def extract_chat_id(self, folder_name):
-        """Извлекает chat_id из названия папки (возвращает БЕЗ дефиса)"""
+        """Извлекает chat_id из названия папки"""
         match = re.search(r'-\s*(\d+)', folder_name)
         if match:
             chat_id = match.group(1)
@@ -37,10 +38,9 @@ class Publisher:
             if self.STOP_FLAG.get(user_id, False):
                 return None
 
-            # 1. Получаем URL для загрузки
             response = requests.post(
-                f"{self.api.base_url}/uploads",
-                headers={"Authorization": self.api.token},
+                f"{self.session_manager.base_url}/uploads",
+                headers={"Authorization": self.session_manager.token},
                 params={"type": "image"},
                 timeout=30,
                 verify=False
@@ -57,7 +57,7 @@ class Publisher:
                 logger.error(f"❌ Не получен URL: {upload_data}")
                 return None
             
-            # 2. Извлекаем байты из разных форматов
+            # Извлекаем байты
             if isinstance(image_data, dict):
                 if 'data' in image_data:
                     img_data = image_data['data']
@@ -80,7 +80,6 @@ class Publisher:
                 logger.error(f"❌ Неподдерживаемый тип данных: {type(img_data)}")
                 return None
             
-            # 3. Отправляем файл
             files = {'data': ('image.jpg', image_bytes, 'image/jpeg')}
             
             upload_response = requests.post(
@@ -96,7 +95,6 @@ class Publisher:
             
             upload_result = upload_response.json()
             
-            # 4. Извлекаем токен
             token = None
             if 'photos' in upload_result and isinstance(upload_result['photos'], dict):
                 for photo_data in upload_result['photos'].values():
@@ -112,7 +110,6 @@ class Publisher:
                 return None
             
             logger.info(f"✅ Файл загружен, токен: {token[:20]}...")
-            
             time.sleep(1)
             return token
             
@@ -120,105 +117,35 @@ class Publisher:
             logger.error(f"❌ Ошибка загрузки: {e}")
             return None
 
-    def _send_to_chat(self, chat_id, text, image_tokens):
-        """
-        Отправляет сообщение в чат.
-        chat_id передается с ДЕФИСОМ в URL параметре (рабочий способ).
-        Максимум 10 фото.
-        """
+    def _send_to_chat(self, user_id, chat_id, text, image_tokens):
+        """Отправляет сообщение через сессию пользователя"""
         try:
-            if not self.api.token:
-                return False
-            
-            # Формируем вложения (максимум 10 фото)
             attachments = []
-            for token in image_tokens[:6]:
+            for token in image_tokens[:10]:
                 attachments.append({
                     "type": "image",
                     "payload": {"token": token}
                 })
             
-            # Формируем payload (без chat_id в теле!)
-            payload = {
-                "text": text,
-                "format": "markdown"
-            }
-            
-            if attachments:
-                payload["attachments"] = attachments
-            
-            # Добавляем дефис к chat_id для URL
             chat_id_with_dash = f"-{chat_id}" if not str(chat_id).startswith('-') else chat_id
             
-            logger.info(f"📤 Отправка в чат {chat_id_with_dash} с {len(attachments)} фото")
-            
-            response = requests.post(
-                f"{self.api.base_url}/messages?chat_id={chat_id_with_dash}",
-                headers={
-                    "Authorization": self.api.token,
-                    "Content-Type": "application/json"
-                },
-                json=payload,
-                timeout=60,
-                verify=False
+            success, message_id = self.session_manager.send_message(
+                user_id=user_id,
+                chat_id=chat_id_with_dash,
+                text=text,
+                attachments=attachments
             )
             
-            if response.status_code == 200:
-                logger.info(f"✅ Сообщение отправлено в чат {chat_id_with_dash}")
-                return True
-            else:
-                logger.error(f"❌ Ошибка: {response.status_code} - {response.text}")
-                return False
-                
+            if success and message_id:
+                full_url = f"https://max.ru/c/{chat_id_with_dash}/{message_id}"
+                logger.info(f"🔗 Ссылка на сообщение: {full_url}")
+                return True, full_url
+            
+            return False, None
+            
         except Exception as e:
             logger.error(f"❌ Ошибка отправки: {e}")
-            return False
-
-    def _send_to_user(self, user_id, text, image_tokens):
-        """Отправляет сообщение в личные сообщения пользователя"""
-        try:
-            if not self.api.token:
-                return False
-            
-            attachments = []
-            for token in image_tokens[:6]:
-                attachments.append({
-                    "type": "image",
-                    "payload": {"token": token}
-                })
-            
-            payload = {
-                "user_id": user_id,
-                "text": text,
-                "format": "markdown"
-            }
-            
-            if attachments:
-                payload["attachments"] = attachments
-            
-            logger.info(f"📤 Отправка пользователю {user_id} с {len(attachments)} фото")
-            
-            response = requests.post(
-                f"{self.api.base_url}/messages",
-                headers={
-                    "Authorization": self.api.token,
-                    "Content-Type": "application/json"
-                },
-                json=payload,
-                timeout=60,
-                verify=False
-            )
-            
-            if response.status_code == 200:
-                logger.info(f"✅ Сообщение отправлено пользователю {user_id}")
-                return True
-            else:
-                logger.error(f"❌ Ошибка: {response.status_code} - {response.text}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки: {e}")
-            return False
+            return False, None
 
     def _parse_metadata(self, metadata_text):
         """Парсит метаданные из текста после #изъятая"""
@@ -240,108 +167,169 @@ class Publisher:
         
         return metadata
 
-    def publish_single_folder(self, user_id, folder_name, ad_text, metadata_text, images_data):
-        """
-        Обрабатывает ОДНУ папку:
-        1. Загружает изображения (максимум 10) через POST /uploads
-        2. Отправляет сообщение с текстом и фото в чат
-        3. Сохраняет метаданные в БД
-        """
+    def publish_multi(self, user_id, folders_data, settings):
+        """Публикует объявления из нескольких папок с настройками"""
         try:
-            if self.STOP_FLAG.get(user_id, False):
-                logger.info(f"⏹️ Пропускаем папку {folder_name} - остановка")
-                return False, "Остановка пользователем"
+            # Собираем все объявления
+            all_ads = []
+            for folder in folders_data:
+                folder_name = folder.get('folderName')
+                ads = folder.get('ads', [])
+                
+                for ad in ads:
+                    all_ads.append({
+                        'folder_name': folder_name,
+                        'sub_folder': ad.get('subFolder', ''),
+                        'ad_text': ad.get('adText', ''),
+                        'metadata_text': ad.get('metadataText', ''),
+                        'images': ad.get('images', [])
+                    })
             
-            start_time = time.time()
+            logger.info(f"📊 Всего объявлений: {len(all_ads)}")
             
-            # 1. Извлекаем chat_id
-            chat_id = self.extract_chat_id(folder_name)
-            if not chat_id:
-                logger.error(f"❌ Не удалось извлечь chat_id из: {folder_name}")
-                return False, f"Не удалось извлечь chat_id из {folder_name}"
+            # Порядок публикации
+            order = settings.get('order', 'sequential')
+            if order == 'shuffle':
+                import random
+                random.shuffle(all_ads)
+                logger.info("🔄 Перемешаны случайно")
+            elif order == 'round_robin':
+                grouped = {}
+                for ad in all_ads:
+                    key = ad['folder_name']
+                    if key not in grouped:
+                        grouped[key] = []
+                    grouped[key].append(ad)
+                
+                all_ads = []
+                max_len = max(len(v) for v in grouped.values())
+                for i in range(max_len):
+                    for folder_name, ads in grouped.items():
+                        if i < len(ads):
+                            all_ads.append(ads[i])
+                logger.info(f"🔄 Круговой порядок: {len(all_ads)}")
             
-            logger.info(f"📤 Извлечен chat_id: {chat_id}")
+            delay = settings.get('delay', 180)
+            max_photos = settings.get('maxPhotos', 3)
+            on_error = settings.get('onError', 'continue')
             
-            # 2. Загружаем изображения (максимум 10)
-            image_tokens = []
-            max_images = min(len(images_data), 6) if isinstance(images_data, list) else 0
+            success_count = 0
+            error_count = 0
+            errors = []
             
-            logger.info(f"📸 Найдено {len(images_data)} изображений, загружаем максимум {max_images}")
-            
-            for i in range(max_images):
+            for i, ad in enumerate(all_ads):
                 if self.STOP_FLAG.get(user_id, False):
-                    return False, "Остановка пользователем"
+                    logger.info(f"⏹️ Остановка на {i+1}")
+                    break
                 
-                if time.time() - start_time > self.FOLDER_TIMEOUT:
-                    return False, f"Таймаут обработки папки {folder_name}"
+                progress = ((i + 1) / len(all_ads)) * 100
+                logger.info(f"📤 {i+1}/{len(all_ads)} ({progress:.1f}%)")
                 
-                logger.info(f"📤 Загрузка изображения {i+1}/{max_images}")
+                images = ad['images'][:max_photos]
                 
-                img_data = images_data[i]
-                if not img_data:
-                    continue
+                success = False
+                attempts = 0
+                max_attempts = 3 if on_error == 'retry' else 1
                 
-                token = self._upload_file_to_max(img_data, user_id)
-                if token:
-                    image_tokens.append(token)
-                    logger.info(f"✅ Изображение {i+1} загружено")
-                else:
-                    logger.warning(f"⚠️ Не удалось загрузить изображение {i+1}")
+                while not success and attempts < max_attempts:
+                    attempts += 1
+                    try:
+                        folder_name = ad['sub_folder'] or ad['folder_name']
+                        chat_id = self.extract_chat_id(folder_name)
+                        
+                        if not chat_id:
+                            raise ValueError(f"Не удалось извлечь chat_id из {folder_name}")
+                        
+                        # Загружаем изображения
+                        image_tokens = []
+                        for img_data in images:
+                            token = self._upload_file_to_max(img_data, user_id)
+                            if token:
+                                image_tokens.append(token)
+                        
+                        # Отправляем
+                        success, full_url = self._send_to_chat(
+                            user_id, chat_id, ad['ad_text'], image_tokens
+                        )
+                        
+                        if success:
+                            metadata = self._parse_metadata(ad.get('metadata_text', ''))
+                            self.db.save_ad_metadata(
+                                user_id, folder_name, f"-{chat_id}", metadata, time.time()
+                            )
+                            self.db.add_publication(
+                                user_id, folder_name, f"-{chat_id}", 
+                                full_url.split('/')[-1] if full_url else None,
+                                full_url
+                            )
+                            success_count += 1
+                            logger.info(f"✅ {folder_name} - успешно")
+                        else:
+                            raise Exception("Не удалось отправить сообщение")
+                        
+                    except Exception as e:
+                        error_msg = str(e)
+                        logger.error(f"❌ Ошибка {ad.get('sub_folder')}: {error_msg}")
+                        
+                        if attempts >= max_attempts:
+                            error_count += 1
+                            errors.append({
+                                'folder': ad.get('sub_folder'),
+                                'error': error_msg
+                            })
+                            chat_id = self.extract_chat_id(ad.get('sub_folder', '')) or 'unknown'
+                            self.db.add_publication_error(
+                                user_id, ad.get('sub_folder'), chat_id, error_msg
+                            )
+                            
+                            if on_error == 'stop':
+                                return {
+                                    'success': False,
+                                    'success_count': success_count,
+                                    'error_count': error_count,
+                                    'message': f'Остановлено: {error_msg}'
+                                }
+                        else:
+                            logger.info(f"🔄 Повтор {attempts}/{max_attempts}")
+                            time.sleep(5)
+                
+                # Задержка
+                if i < len(all_ads) - 1 and success:
+                    logger.info(f"⏳ Задержка {delay}с")
+                    for _ in range(delay):
+                        if self.STOP_FLAG.get(user_id, False):
+                            break
+                        time.sleep(1)
             
-            logger.info(f"📦 Загружено {len(image_tokens)} из {max_images} изображений")
-            
-            # 3. Отправляем сообщение в чат
-            if image_tokens:
-                success = self._send_to_chat(chat_id, ad_text, image_tokens)
-            else:
-                logger.info(f"📤 Отправка только текста в чат {chat_id}")
-                success = self._send_to_chat(chat_id, ad_text, [])
-            
-            # Если не удалось отправить в чат, пробуем в личные сообщения
-            if not success:
-                logger.warning("⚠️ Отправка в чат не удалась, пробуем в личные сообщения...")
-                if image_tokens:
-                    success = self._send_to_user(user_id, ad_text, image_tokens)
-                else:
-                    success = self._send_to_user(user_id, ad_text, [])
-            
-            if not success:
-                return False, "Не удалось отправить сообщение"
-            
-            # 4. Сохраняем метаданные для отчета
-            metadata = self._parse_metadata(metadata_text)
-            self.db.save_ad_metadata(user_id, folder_name, f"-{chat_id}", metadata, time.time())
-            self.db.add_publication(user_id, folder_name, f"-{chat_id}")
-            
-            return True, f"✅ Папка {folder_name} опубликована с {len(image_tokens)} фото"
+            return {
+                'success': True,
+                'success_count': success_count,
+                'error_count': error_count,
+                'total': len(all_ads),
+                'errors': errors,
+                'message': f'Успешно: {success_count}, Ошибок: {error_count}'
+            }
             
         except Exception as e:
-            logger.error(f"❌ Ошибка публикации {folder_name}: {e}")
+            logger.error(f"❌ Ошибка: {e}")
             import traceback
             traceback.print_exc()
-            return False, str(e)
+            return {'success': False, 'message': str(e)}
 
     def stop(self, user_id):
-        """Останавливает публикацию и удаляет все файлы пользователя"""
-        logger.info(f"⏹️ Остановка публикации для пользователя {user_id}")
+        """Останавливает публикацию"""
         self.STOP_FLAG[user_id] = True
-        
         try:
             user_folder = self.fm.get_user_folder(user_id)
             if os.path.exists(user_folder):
                 import shutil
                 shutil.rmtree(user_folder)
                 os.makedirs(user_folder, exist_ok=True)
-                logger.info(f"🗑️ Удалены все файлы пользователя {user_id}")
         except Exception as e:
-            logger.error(f"❌ Ошибка удаления файлов: {e}")
+            logger.error(f"❌ Ошибка удаления: {e}")
         
-        def reset_stop_flag():
+        def reset():
             time.sleep(5)
             self.STOP_FLAG[user_id] = False
-        
-        threading.Thread(target=reset_stop_flag, daemon=True).start()
+        threading.Thread(target=reset, daemon=True).start()
         return True
-
-    def is_running(self, user_id):
-        return self.STOP_FLAG.get(user_id, False)
