@@ -1,3 +1,4 @@
+# app.py - обновленная версия
 from flask import Flask, request, jsonify, render_template_string, send_file
 import requests
 import logging
@@ -10,6 +11,7 @@ import time
 from werkzeug.exceptions import ClientDisconnected
 from modules import Database, FileManager, Publisher, WebInterface
 from modules.report_generator import ReportGenerator
+from modules.session_manager import SessionManager
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -29,6 +31,7 @@ if not TOKEN:
 
 db = Database()
 fm = FileManager(DATA_DIR)
+session_manager = SessionManager(session_timeout=300)  # 5 минут
 
 class APIClient:
     def __init__(self):
@@ -76,43 +79,6 @@ class APIClient:
                 return False
         except Exception as e:
             logger.error(f"❌ Ошибка отправки в чат: {e}")
-            return False
-
-    def send_message_with_attachments(self, chat_id, text, tokens):
-        """Отправляет сообщение с вложениями (фото) в чат"""
-        if not self.token:
-            return False
-        try:
-            attachments = []
-            for token in tokens[:3]:
-                attachments.append({
-                    "type": "image",
-                    "payload": {"token": token}
-                })
-            
-            payload = {
-                "chat_id": chat_id,
-                "text": text,
-                "format": "markdown",
-                "attachments": attachments
-            }
-            
-            response = requests.post(
-                f"{self.base_url}/messages",
-                headers={"Authorization": self.token, "Content-Type": "application/json"},
-                json=payload,
-                timeout=60,
-                verify=False
-            )
-            
-            if response.status_code == 200:
-                logger.info(f"✅ Сообщение с фото отправлено в чат {chat_id}")
-                return True
-            else:
-                logger.error(f"❌ Ошибка: {response.status_code} - {response.text}")
-                return False
-        except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
             return False
 
 api = APIClient()
@@ -548,6 +514,7 @@ def webhook():
         
         user_id = None
         text = None
+        session_id = data.get('session_id')
         
         if 'message' in data:
             msg = data['message']
@@ -561,46 +528,143 @@ def webhook():
         
         logger.info(f"💬 user_id={user_id}, text={text}")
         
-        if text and text.strip() == '/start':
-            api.send_message(
-                user_id,
-                "🏠 **Главное меню**\n\n"
-                "🌐 **Загрузить папку:**\n"
-                f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
-                "📊 **Получить отчет:**\n"
-                f"🔗 https://maxbot.bothost.tech/report/{user_id}\n\n"
-                "⏹ **Остановить публикацию:** `/stop`\n\n"
-                "📋 **Инструкция:**\n"
-                "1. Подготовьте папки с объявлениями\n"
-                "2. Используйте разделитель #изъятая\n"
-                "3. Фото до 3 шт на объявление"
-            )
-            return jsonify({"ok": True}), 200
+        # Получаем или создаем сессию
+        if not session_id:
+            session = session_manager.get_session_by_user(user_id)
+            if session:
+                session_id = session.get('id')
         
-        if text and text.strip() == '/stop':
-            publisher.stop(user_id)
-            api.send_message(user_id, "⏹️ **Публикация остановлена!**\n\n✅ Все процессы остановлены\n🗑️ Временные файлы удалены")
-            return jsonify({"ok": True}), 200
+        if not session_id:
+            # Новая сессия
+            session_id = session_manager.create_session(user_id, {'state': 'idle'})
+            logger.info(f"🆕 Создана сессия {session_id[:8]} для пользователя {user_id}")
         
-        if text and text.strip() == '/report':
-            api.send_message(user_id, "📊 Создаю отчет...")
-            report_path = report_gen.generate_report(user_id)
-            if report_path:
-                filename = os.path.basename(report_path)
-                download_url = f"https://maxbot.bothost.tech/download_report/{user_id}/{filename}"
-                api.send_message(
-                    user_id,
-                    f"📊 **Отчет создан!**\n\n"
-                    f"🔗 [Скачать отчет]({download_url})"
-                )
-            else:
-                api.send_message(user_id, "❌ Нет данных для отчета.")
-            return jsonify({"ok": True}), 200
+        # Добавляем сообщение в сессию
+        session_manager.add_message(session_id, text)
+        
+        # Обрабатываем сообщение в контексте сессии
+        response = process_session_message(session_id)
+        
+        if response:
+            api.send_message(user_id, response)
         
         return jsonify({"ok": True}), 200
+        
     except Exception as e:
         logger.error(f"❌ ОШИБКА: {e}")
         return jsonify({"ok": False}), 500
+
+def process_session_message(session_id: str) -> Optional[str]:
+    """Обрабатывает сообщение в контексте сессии"""
+    session = session_manager.get_session(session_id)
+    if not session:
+        return "⚠️ Сессия истекла. Начните заново с /start"
+    
+    user_id = session['user_id']
+    current_state = session.get('state', 'idle')
+    
+    # Получаем сообщение из очереди
+    message = session_manager.get_next_message(session_id)
+    if not message:
+        return None
+    
+    logger.info(f"📨 Обработка сообщения в сессии {session_id[:8]}: '{message}'")
+    
+    # Логика обработки в зависимости от состояния
+    if current_state == 'idle':
+        if message.strip() == '/start':
+            return show_main_menu(user_id)
+        elif message.strip() == '/stop':
+            return handle_stop(user_id)
+        elif message.strip() == '/report':
+            return handle_report(user_id)
+        elif message.strip() == '/publish':
+            session_manager.set_state(session_id, 'waiting_folder')
+            return "📁 Введите название папки для публикации"
+        else:
+            return "❓ Неизвестная команда. Используйте /start"
+    
+    elif current_state == 'waiting_folder':
+        session_manager.set_data(session_id, 'folder_name', message)
+        session_manager.set_state(session_id, 'waiting_text')
+        return f"📝 Папка '{message}' выбрана. Введите текст объявления (используйте #изъятая для разделения)"
+    
+    elif current_state == 'waiting_text':
+        session_manager.set_data(session_id, 'ad_text', message)
+        session_manager.set_state(session_id, 'waiting_images')
+        return "🖼️ Отправьте фото для объявления (до 3-х).\nИли напишите 'пропустить' если фото нет"
+    
+    elif current_state == 'waiting_images':
+        if message.lower() == 'пропустить':
+            # Публикуем без фото
+            return publish_from_session(session_id)
+        else:
+            # Сохраняем фото (в реальном приложении нужно получать файлы)
+            session_manager.set_data(session_id, 'images', [])
+            session_manager.set_state(session_id, 'confirm')
+            return "✅ Готово к публикации! Напишите 'да' для подтверждения или 'нет' для отмены"
+    
+    elif current_state == 'confirm':
+        if message.lower() == 'да':
+            return publish_from_session(session_id)
+        else:
+            session_manager.set_state(session_id, 'idle')
+            return "❌ Публикация отменена"
+    
+    return "⚠️ Неизвестное состояние"
+
+def show_main_menu(user_id: int) -> str:
+    return (
+        "🏠 **Главное меню**\n\n"
+        "📤 `/publish` - Начать публикацию\n"
+        "📊 `/report` - Получить отчет\n"
+        "⏹ `/stop` - Остановить публикацию\n"
+        "❓ `/help` - Помощь\n\n"
+        f"📂 Загрузить папку: https://maxbot.bothost.tech/upload?user_id={user_id}"
+    )
+
+def handle_stop(user_id: int) -> str:
+    publisher.stop(user_id)
+    return "⏹️ **Публикация остановлена!**\n\n✅ Все процессы остановлены"
+
+def handle_report(user_id: int) -> str:
+    api.send_message(user_id, "📊 Создаю отчет...")
+    report_path = report_gen.generate_report(user_id)
+    if report_path:
+        filename = os.path.basename(report_path)
+        download_url = f"https://maxbot.bothost.tech/download_report/{user_id}/{filename}"
+        return f"📊 **Отчет создан!**\n\n🔗 [Скачать отчет]({download_url})"
+    else:
+        return "❌ Нет данных для отчета."
+
+def publish_from_session(session_id: str) -> str:
+    """Публикует из данных сессии"""
+    session = session_manager.get_session(session_id)
+    if not session:
+        return "⚠️ Сессия истекла"
+    
+    user_id = session['user_id']
+    folder_name = session.get('data', {}).get('folder_name')
+    ad_text = session.get('data', {}).get('ad_text')
+    
+    if not folder_name or not ad_text:
+        return "❌ Недостаточно данных для публикации"
+    
+    # Сбрасываем состояние
+    session_manager.set_state(session_id, 'idle')
+    
+    # Здесь нужно получить изображения
+    images = []
+    
+    # Выполняем публикацию
+    success, message = publisher.publish_single_folder(
+        user_id, folder_name, ad_text, '', images
+    )
+    
+    if success:
+        return f"✅ {message}"
+    else:
+        return f"❌ {message}"
 
 @app.route('/report/<int:user_id>')
 def report_page(user_id):
