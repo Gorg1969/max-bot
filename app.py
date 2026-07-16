@@ -41,8 +41,95 @@ publisher = Publisher(session_manager, fm, db)
 # ========== ДИАГНОСТИКА ==========
 diagnostics = Diagnostics(DATA_DIR)
 
-# ========== ОСТАЛЬНЫЕ КОМПОНЕНТЫ ==========
+# ========== КЛАСС APIClient (ДОЛЖЕН БЫТЬ ДО ИСПОЛЬЗОВАНИЯ) ==========
+class APIClient:
+    def __init__(self):
+        self.token = TOKEN
+        self.base_url = BASE_URL
+
+    def send_message(self, user_id, text, attachments=None):
+        if not self.token:
+            return False
+        try:
+            payload = {"text": text, "format": "markdown"}
+            if attachments:
+                payload["attachments"] = attachments
+            response = requests.post(
+                f"{self.base_url}/messages",
+                headers={"Authorization": self.token, "Content-Type": "application/json"},
+                params={"user_id": user_id},
+                json=payload,
+                timeout=30,
+                verify=False
+            )
+            if response.status_code != 200:
+                logger.error(f"❌ Ошибка отправки: {response.text}")
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки: {e}")
+            return False
+
+    def send_message_to_chat(self, chat_id, text):
+        if not self.token:
+            return False
+        try:
+            payload = {"chat_id": chat_id, "text": text, "format": "markdown"}
+            response = requests.post(
+                f"{self.base_url}/messages",
+                headers={"Authorization": self.token, "Content-Type": "application/json"},
+                json=payload,
+                timeout=30,
+                verify=False
+            )
+            if response.status_code == 200:
+                return True
+            else:
+                logger.error(f"❌ Ошибка отправки в чат: {response.status_code} - {response.text}")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки в чат: {e}")
+            return False
+
+    def send_message_with_attachments(self, chat_id, text, tokens):
+        if not self.token:
+            return False
+        try:
+            attachments = []
+            for token in tokens[:3]:
+                attachments.append({
+                    "type": "image",
+                    "payload": {"token": token}
+                })
+            
+            payload = {
+                "chat_id": chat_id,
+                "text": text,
+                "format": "markdown",
+                "attachments": attachments
+            }
+            
+            response = requests.post(
+                f"{self.base_url}/messages",
+                headers={"Authorization": self.token, "Content-Type": "application/json"},
+                json=payload,
+                timeout=60,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                logger.info(f"✅ Сообщение с фото отправлено в чат {chat_id}")
+                return True
+            else:
+                logger.error(f"❌ Ошибка: {response.status_code} - {response.text}")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Ошибка: {e}")
+            return False
+
+# ========== СОЗДАЕМ API ПОСЛЕ ОПРЕДЕЛЕНИЯ КЛАССА ==========
 api = APIClient()
+
+# ========== ОСТАЛЬНЫЕ КОМПОНЕНТЫ ==========
 report_gen = ReportGenerator(fm, db)
 web_interface = WebInterface(fm, publisher)
 
@@ -712,93 +799,6 @@ UPLOAD_PAGE_MULTI = """
 </body>
 </html>
 """
-
-# ========== КЛАСС APIClient (ДЛЯ ОБРАТНОЙ СОВМЕСТИМОСТИ) ==========
-class APIClient:
-    def __init__(self):
-        self.token = TOKEN
-        self.base_url = BASE_URL
-
-    def send_message(self, user_id, text, attachments=None):
-        if not self.token:
-            return False
-        try:
-            payload = {"text": text, "format": "markdown"}
-            if attachments:
-                payload["attachments"] = attachments
-            response = requests.post(
-                f"{self.base_url}/messages",
-                headers={"Authorization": self.token, "Content-Type": "application/json"},
-                params={"user_id": user_id},
-                json=payload,
-                timeout=30,
-                verify=False
-            )
-            if response.status_code != 200:
-                logger.error(f"❌ Ошибка отправки: {response.text}")
-            return response.status_code == 200
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки: {e}")
-            return False
-
-    def send_message_to_chat(self, chat_id, text):
-        if not self.token:
-            return False
-        try:
-            payload = {"chat_id": chat_id, "text": text, "format": "markdown"}
-            response = requests.post(
-                f"{self.base_url}/messages",
-                headers={"Authorization": self.token, "Content-Type": "application/json"},
-                json=payload,
-                timeout=30,
-                verify=False
-            )
-            if response.status_code == 200:
-                return True
-            else:
-                logger.error(f"❌ Ошибка отправки в чат: {response.status_code} - {response.text}")
-                return False
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки в чат: {e}")
-            return False
-
-    def send_message_with_attachments(self, chat_id, text, tokens):
-        if not self.token:
-            return False
-        try:
-            attachments = []
-            for token in tokens[:3]:
-                attachments.append({
-                    "type": "image",
-                    "payload": {"token": token}
-                })
-            
-            payload = {
-                "chat_id": chat_id,
-                "text": text,
-                "format": "markdown",
-                "attachments": attachments
-            }
-            
-            response = requests.post(
-                f"{self.base_url}/messages",
-                headers={"Authorization": self.token, "Content-Type": "application/json"},
-                json=payload,
-                timeout=60,
-                verify=False
-            )
-            
-            if response.status_code == 200:
-                logger.info(f"✅ Сообщение с фото отправлено в чат {chat_id}")
-                return True
-            else:
-                logger.error(f"❌ Ошибка: {response.status_code} - {response.text}")
-                return False
-        except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
-            return False
-
-api = APIClient()
 
 # ========== МАРШРУТЫ ==========
 
