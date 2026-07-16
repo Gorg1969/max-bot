@@ -17,7 +17,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")
-app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1 ГБ
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ publisher = Publisher(session_manager, fm, db)
 # ========== ДИАГНОСТИКА ==========
 diagnostics = Diagnostics(DATA_DIR)
 
-# ========== КЛАСС APIClient (ДОЛЖЕН БЫТЬ ДО ИСПОЛЬЗОВАНИЯ) ==========
+# ========== КЛАСС APIClient ==========
 class APIClient:
     def __init__(self):
         self.token = TOKEN
@@ -126,14 +126,13 @@ class APIClient:
             logger.error(f"❌ Ошибка: {e}")
             return False
 
-# ========== СОЗДАЕМ API ПОСЛЕ ОПРЕДЕЛЕНИЯ КЛАССА ==========
 api = APIClient()
 
 # ========== ОСТАЛЬНЫЕ КОМПОНЕНТЫ ==========
 report_gen = ReportGenerator(fm, db)
 web_interface = WebInterface(fm, publisher)
 
-# ========== HTML СТРАНИЦА МУЛЬТИ-ЗАГРУЗКИ ==========
+# ========== HTML СТРАНИЦА МУЛЬТИ-ЗАГРУЗКИ (ПОДПАПКИ ПО ОДНОЙ) ==========
 UPLOAD_PAGE_MULTI = """
 <!DOCTYPE html>
 <html>
@@ -331,6 +330,23 @@ UPLOAD_PAGE_MULTI = """
             color: #999;
             font-size: 14px;
         }
+        
+        .ad-item {
+            background: #f8f9fa;
+            padding: 10px 15px;
+            margin: 5px 0;
+            border-radius: 5px;
+            border-left: 3px solid #28a745;
+            font-size: 13px;
+        }
+        .ad-item .ad-name {
+            font-weight: bold;
+            color: #1a1a2e;
+        }
+        .ad-item .ad-status {
+            font-size: 12px;
+            color: #666;
+        }
     </style>
 </head>
 <body>
@@ -339,19 +355,19 @@ UPLOAD_PAGE_MULTI = """
         
         <div class="instructions">
             <strong>📌 Как подготовить папки:</strong><br>
-            1️⃣ Создайте папки с объявлениями (можно до 5 корневых папок)<br>
-            2️⃣ Внутри каждой: подпапки вида <code>Название -123456789</code><br>
+            1️⃣ Создайте корневую папку (можно до 5 корневых папок)<br>
+            2️⃣ Внутри корневой: подпапки вида <code>Название -123456789</code><br>
             3️⃣ В каждой подпапке: <code>info.txt</code> (текст) и фото (до 10 шт)<br>
             4️⃣ Используйте разделитель <code>#изъятая</code> для метаданных<br>
-            5️⃣ Перетащите папки в поле ниже или выберите через диалог<br>
-            6️⃣ Настройте параметры публикации и нажмите "Загрузить"
+            5️⃣ <strong>Каждая подпапка = 1 объявление</strong><br>
+            6️⃣ Перетащите корневые папки в поле ниже
         </div>
         
         <!-- Зона загрузки -->
         <div class="drop-zone" id="dropZone">
             <span class="icon">📂</span>
-            <p><strong>Перетащите папки сюда</strong></p>
-            <p style="color: #666; font-size: 14px;">или</p>
+            <p><strong>Перетащите корневые папки сюда</strong></p>
+            <p style="color: #666; font-size: 14px;">(до 5 корневых папок)</p>
             <button class="btn btn-primary" onclick="document.getElementById('folderInput').click()">Выбрать папки</button>
             <input type="file" id="folderInput" webkitdirectory multiple>
             <div class="limit">Максимум 5 корневых папок</div>
@@ -364,6 +380,12 @@ UPLOAD_PAGE_MULTI = """
             <div class="button-group">
                 <button class="btn btn-secondary" onclick="clearFolders()">🗑️ Очистить все</button>
             </div>
+        </div>
+        
+        <!-- Список объявлений -->
+        <div id="adsList" style="display:none; margin-top: 20px;">
+            <h3>📋 Найдено объявлений: <span id="adsCount">0</span></h3>
+            <div id="adsContent"></div>
         </div>
         
         <!-- Настройки -->
@@ -379,9 +401,8 @@ UPLOAD_PAGE_MULTI = """
                 <select id="order">
                     <option value="sequential">По порядку (папка за папкой)</option>
                     <option value="shuffle">Случайный (перемешать все)</option>
-                    <option value="round_robin">Круговой (по одному из каждой)</option>
                 </select>
-                <small>Как публиковать объявления из разных папок</small>
+                <small>Как публиковать объявления</small>
             </div>
             
             <div class="settings-group">
@@ -402,7 +423,7 @@ UPLOAD_PAGE_MULTI = """
         </div>
         
         <div class="button-group">
-            <button class="btn btn-success" onclick="uploadFolders()" id="uploadBtn">🚀 Загрузить</button>
+            <button class="btn btn-success" onclick="uploadFolders()" id="uploadBtn">🚀 Опубликовать</button>
             <button class="btn btn-danger" onclick="stopPublish()" id="stopBtn" style="display:none;">⏹️ Остановить</button>
         </div>
         
@@ -419,7 +440,7 @@ UPLOAD_PAGE_MULTI = """
             <p style="margin-top: 10px; color: #666; font-size: 14px;">После завершения публикации</p>
         </div>
         
-        <div class="footer">⚡ MAX Bot v2.0 | Мульти-загрузка объявлений</div>
+        <div class="footer">⚡ MAX Bot v2.0 | Каждая подпапка = 1 объявление</div>
     </div>
 
     <script>
@@ -429,12 +450,16 @@ UPLOAD_PAGE_MULTI = """
         let selectedFolders = {};
         let isProcessing = false;
         let isStopped = false;
+        let allAds = [];
         
         // DOM элементы
         const dropZone = document.getElementById('dropZone');
         const folderInput = document.getElementById('folderInput');
         const folderList = document.getElementById('folderList');
         const folderListContent = document.getElementById('folderListContent');
+        const adsList = document.getElementById('adsList');
+        const adsContent = document.getElementById('adsContent');
+        const adsCount = document.getElementById('adsCount');
         const statusDiv = document.getElementById('status');
         const logDiv = document.getElementById('log');
         const progressBar = document.getElementById('progressBar');
@@ -516,7 +541,7 @@ UPLOAD_PAGE_MULTI = """
             const newFolders = Object.keys(folders);
             
             if (currentCount + newFolders.length > 5) {
-                showStatus('warning', '⚠️ Можно выбрать не более 5 папок. Сейчас выбрано ' + currentCount);
+                showStatus('warning', '⚠️ Можно выбрать не более 5 корневых папок. Сейчас выбрано ' + currentCount);
                 return;
             }
             
@@ -534,6 +559,8 @@ UPLOAD_PAGE_MULTI = """
                 renderFolderList();
                 showStatus('info', '✅ Добавлено ' + added + ' папок. Всего: ' + Object.keys(selectedFolders).length + '/5');
                 addLog('📁 Добавлена папка: ' + Object.keys(folders).join(', '), 'info');
+                // Обновляем список объявлений
+                updateAdsList();
             }
         }
         
@@ -585,6 +612,9 @@ UPLOAD_PAGE_MULTI = """
             
             if (Object.keys(selectedFolders).length === 0) {
                 folderList.style.display = 'none';
+                adsList.style.display = 'none';
+            } else {
+                updateAdsList();
             }
         }
         
@@ -592,7 +622,74 @@ UPLOAD_PAGE_MULTI = """
             selectedFolders = {};
             renderFolderList();
             folderList.style.display = 'none';
+            adsList.style.display = 'none';
             addLog('🗑️ Все папки очищены', 'warning');
+        }
+        
+        function updateAdsList() {
+            // Собираем все объявления из всех папок
+            allAds = [];
+            const folderNames = Object.keys(selectedFolders);
+            
+            for (const folderName of folderNames) {
+                const files = selectedFolders[folderName];
+                const ads = getAdsFromFolder(folderName, files);
+                allAds = allAds.concat(ads);
+            }
+            
+            if (allAds.length === 0) {
+                adsList.style.display = 'none';
+                return;
+            }
+            
+            adsList.style.display = 'block';
+            adsCount.textContent = allAds.length;
+            adsContent.innerHTML = '';
+            
+            allAds.forEach((ad, index) => {
+                const div = document.createElement('div');
+                div.className = 'ad-item';
+                div.innerHTML = `
+                    <span class="ad-name">${index + 1}. ${ad.subFolder}</span>
+                    <span class="ad-status">(${ad.images.length} фото, ${ad.adText.length} симв.)</span>
+                `;
+                adsContent.appendChild(div);
+            });
+        }
+        
+        function getAdsFromFolder(folderName, files) {
+            const ads = {};
+            
+            files.forEach(file => {
+                const parts = file.webkitRelativePath.split('/');
+                if (parts.length >= 2) {
+                    const subFolder = parts[1];
+                    if (!ads[subFolder]) {
+                        ads[subFolder] = [];
+                    }
+                    ads[subFolder].push(file);
+                }
+            });
+            
+            const result = [];
+            
+            for (const [subFolder, subFiles] of Object.entries(ads)) {
+                const txtFile = subFiles.find(f => f.name === 'info' || f.name.endsWith('.txt'));
+                if (!txtFile) continue;
+                
+                const imageFiles = subFiles
+                    .filter(f => f.type && f.type.startsWith('image/'))
+                    .slice(0, 10);
+                
+                result.push({
+                    folderName: folderName,
+                    subFolder: subFolder,
+                    txtFile: txtFile,
+                    imageFiles: imageFiles
+                });
+            }
+            
+            return result;
         }
         
         function addLog(message, type) {
@@ -641,7 +738,12 @@ UPLOAD_PAGE_MULTI = """
             const folderNames = Object.keys(selectedFolders);
             
             if (folderNames.length === 0) {
-                showStatus('error', '❌ Выберите хотя бы одну папку');
+                showStatus('error', '❌ Выберите хотя бы одну корневую папку');
+                return;
+            }
+            
+            if (allAds.length === 0) {
+                showStatus('error', '❌ Нет объявлений для публикации');
                 return;
             }
             
@@ -665,42 +767,69 @@ UPLOAD_PAGE_MULTI = """
             showStatus('info', '⏳ Подготовка данных...');
             logDiv.innerHTML = '';
             addLog('🚀 Начинаем публикацию...', 'info');
-            addLog('📁 Папок: ' + folderNames.length, 'info');
+            addLog('📁 Корневых папок: ' + folderNames.length, 'info');
+            addLog('📋 Всего объявлений: ' + allAds.length, 'info');
             addLog('⚙️ Настройки: задержка ' + settings.delay + 'с, порядок ' + settings.order, 'info');
             
             try {
-                const allAds = [];
-                let totalAds = 0;
+                // Подготавливаем данные для каждого объявления (по одной подпапке)
+                const adsData = [];
                 
-                for (const folderName of folderNames) {
-                    const files = selectedFolders[folderName];
-                    const ads = await prepareFolderAds(folderName, files);
-                    if (ads && ads.length > 0) {
-                        allAds.push({
-                            folderName: folderName,
-                            ads: ads
+                for (const ad of allAds) {
+                    try {
+                        const fullText = await ad.txtFile.text();
+                        
+                        let adText = fullText;
+                        let metadataText = '';
+                        
+                        if (fullText.includes('#изъятая')) {
+                            const parts = fullText.split('#изъятая');
+                            adText = parts[0].trim();
+                            metadataText = parts[1] ? parts[1].trim() : '';
+                        }
+                        
+                        const images = [];
+                        for (const img of ad.imageFiles) {
+                            try {
+                                const arrayBuffer = await img.arrayBuffer();
+                                images.push({
+                                    name: img.name,
+                                    data: Array.from(new Uint8Array(arrayBuffer)),
+                                    type: img.type || 'image/jpeg'
+                                });
+                            } catch (e) {
+                                addLog('⚠️ Ошибка чтения ' + img.name + ': ' + e.message, 'warning');
+                            }
+                        }
+                        
+                        adsData.push({
+                            folderName: ad.folderName,
+                            subFolder: ad.subFolder,
+                            adText: adText,
+                            metadataText: metadataText,
+                            images: images
                         });
-                        totalAds += ads.length;
-                        addLog('📤 Папка "' + folderName + '": ' + ads.length + ' объявлений', 'info');
-                    } else {
-                        addLog('⚠️ Папка "' + folderName + '": нет объявлений', 'warning');
+                        
+                    } catch (e) {
+                        addLog('⚠️ Ошибка обработки ' + ad.subFolder + ': ' + e.message, 'warning');
                     }
                 }
                 
-                if (allAds.length === 0) {
-                    showStatus('error', '❌ Нет объявлений для публикации');
+                if (adsData.length === 0) {
+                    showStatus('error', '❌ Нет данных для публикации');
                     return;
                 }
                 
-                addLog('📊 Всего объявлений: ' + totalAds, 'success');
+                addLog('📊 Подготовлено объявлений: ' + adsData.length, 'success');
                 updateProgress(0, 'Начинаем...');
                 
-                const response = await fetch('/publish_multi', {
+                // Отправляем на сервер (каждая подпапка = 1 объявление)
+                const response = await fetch('/publish_ads', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         user_id: userId,
-                        folders: allAds,
+                        ads: adsData,
                         settings: settings
                     })
                 });
@@ -730,71 +859,6 @@ UPLOAD_PAGE_MULTI = """
             uploadBtn.style.display = 'inline-block';
             stopBtn.style.display = 'none';
         }
-        
-        async function prepareFolderAds(folderName, files) {
-            const ads = {};
-            
-            files.forEach(file => {
-                const parts = file.webkitRelativePath.split('/');
-                if (parts.length >= 2) {
-                    const subFolder = parts[1];
-                    if (!ads[subFolder]) {
-                        ads[subFolder] = [];
-                    }
-                    ads[subFolder].push(file);
-                }
-            });
-            
-            const result = [];
-            
-            for (const [subFolder, subFiles] of Object.entries(ads)) {
-                const txtFile = subFiles.find(f => f.name === 'info' || f.name.endsWith('.txt'));
-                if (!txtFile) continue;
-                
-                try {
-                    let fullText = await txtFile.text();
-                    
-                    let adText = fullText;
-                    let metadataText = '';
-                    
-                    if (fullText.includes('#изъятая')) {
-                        const parts = fullText.split('#изъятая');
-                        adText = parts[0].trim();
-                        metadataText = parts[1] ? parts[1].trim() : '';
-                    }
-                    
-                    const imageFiles = subFiles
-                        .filter(f => f.type && f.type.startsWith('image/'))
-                        .slice(0, 10);
-                    
-                    const images = [];
-                    for (const img of imageFiles) {
-                        try {
-                            const arrayBuffer = await img.arrayBuffer();
-                            images.push({
-                                name: img.name,
-                                data: Array.from(new Uint8Array(arrayBuffer)),
-                                type: img.type || 'image/jpeg'
-                            });
-                        } catch (e) {
-                            addLog('⚠️ Ошибка чтения ' + img.name + ': ' + e.message, 'warning');
-                        }
-                    }
-                    
-                    result.push({
-                        subFolder: subFolder,
-                        adText: adText,
-                        metadataText: metadataText,
-                        images: images
-                    });
-                    
-                } catch (e) {
-                    addLog('⚠️ Ошибка обработки ' + subFolder + ': ' + e.message, 'warning');
-                }
-            }
-            
-            return result;
-        }
     </script>
 </body>
 </html>
@@ -808,12 +872,36 @@ def index():
 
 @app.route('/upload', methods=['GET'])
 def upload_page():
-    """Страница загрузки с мульти-загрузкой"""
+    """Страница загрузки с мульти-загрузкой (каждая подпапка = 1 объявление)"""
     return render_template_string(UPLOAD_PAGE_MULTI)
+
+@app.route('/publish_ads', methods=['POST'])
+def publish_ads():
+    """Публикация объявлений (каждое объявление = 1 подпапка)"""
+    try:
+        data = request.get_json()
+        user_id = data.get('user_id')
+        ads = data.get('ads', [])
+        settings = data.get('settings', {})
+        
+        if not user_id or not ads:
+            return jsonify({'success': False, 'message': 'Нет данных'}), 400
+        
+        logger.info(f"📦 Публикация {len(ads)} объявлений для пользователя {user_id}")
+        logger.info(f"⚙️ Настройки: {settings}")
+        
+        result = publisher.publish_ads(user_id, ads, settings)
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка публикации: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/publish_multi', methods=['POST'])
 def publish_multi():
-    """Публикация из нескольких папок с настройками"""
+    """Старый метод - для обратной совместимости"""
     try:
         data = request.get_json()
         user_id = data.get('user_id')
@@ -824,9 +912,22 @@ def publish_multi():
             return jsonify({'success': False, 'message': 'Нет данных'}), 400
         
         logger.info(f"📦 Мульти-публикация для пользователя {user_id}")
-        logger.info(f"📁 Папок: {len(folders)}, Настройки: {settings}")
         
-        result = publisher.publish_multi(user_id, folders, settings)
+        # Преобразуем в формат объявлений
+        ads = []
+        for folder in folders:
+            folder_name = folder.get('folderName')
+            folder_ads = folder.get('ads', [])
+            for ad in folder_ads:
+                ads.append({
+                    'folderName': folder_name,
+                    'subFolder': ad.get('subFolder', ''),
+                    'adText': ad.get('adText', ''),
+                    'metadataText': ad.get('metadataText', ''),
+                    'images': ad.get('images', [])
+                })
+        
+        result = publisher.publish_ads(user_id, ads, settings)
         return jsonify(result)
         
     except Exception as e:
@@ -852,7 +953,6 @@ def publish_folder():
         
         logger.info(f"📦 Получена папка: {folder_name} от пользователя {user_id}")
         
-        # Используем старый метод для обратной совместимости
         success, message = publisher.publish_single_folder(
             user_id, folder_name, ad_text, metadata_text, images
         )
@@ -899,15 +999,15 @@ def webhook():
                 f"🔗 https://maxbot.bothost.tech/report/{user_id}\n\n"
                 "⏹ **Остановить публикацию:** `/stop`\n\n"
                 "📋 **Инструкция:**\n"
-                "1. Подготовьте папки с объявлениями\n"
-                "2. Используйте разделитель #изъятая\n"
-                "3. Фото до 3 шт на объявление"
+                "1. Подготовьте корневую папку с подпапками\n"
+                "2. Каждая подпапка = 1 объявление\n"
+                "3. Используйте разделитель #изъятая"
             )
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/stop':
             publisher.stop(user_id)
-            api.send_message(user_id, "⏹️ **Публикация остановлена!**\n\n✅ Все процессы остановлены\n🗑️ Временные файлы удалены")
+            api.send_message(user_id, "⏹️ **Публикация остановлена!**")
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/report':
