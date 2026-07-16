@@ -1,4 +1,4 @@
-# app.py - с утилиткой отладки
+# app.py - полная исправленная версия
 from flask import Flask, request, jsonify, render_template_string, send_file
 import requests
 import logging
@@ -12,8 +12,6 @@ import queue
 from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime
 from werkzeug.exceptions import ClientDisconnected
-from modules import Database, FileManager, Publisher, WebInterface
-from modules.report_generator import ReportGenerator
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -21,16 +19,12 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-# Настройка логирования с детальным выводом
+# НАСТРОЙКА ЛОГИРОВАНИЯ
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-# Создаем отдельный логгер для API запросов
-api_logger = logging.getLogger('api_debug')
-api_logger.setLevel(logging.DEBUG)
 
 TOKEN = os.environ.get("MAX_TOKEN") or os.environ.get("MAX_BOT_TOKEN") or os.environ.get("TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
@@ -39,21 +33,30 @@ DATA_DIR = "/app/data"
 if not TOKEN:
     logger.error("❌ ТОКЕН НЕ НАЙДЕН!")
 
-db = Database()
-fm = FileManager(DATA_DIR)
+# Импортируем модули
+try:
+    from modules import Database, FileManager, Publisher, WebInterface
+    from modules.report_generator import ReportGenerator
+    
+    db = Database()
+    fm = FileManager(DATA_DIR)
+    logger.info("✅ Модули импортированы успешно")
+except Exception as e:
+    logger.error(f"❌ Ошибка импорта модулей: {e}")
+    import traceback
+    traceback.print_exc()
+    raise
 
 # ========== УТИЛИТКА ДЛЯ ОТЛАДКИ ==========
 class DebugAPIClient:
-    """Клиент с детальным логированием всех запросов"""
-    
     def __init__(self):
         self.token = TOKEN
         self.base_url = BASE_URL
         self.debug_dir = "/app/debug_logs"
         os.makedirs(self.debug_dir, exist_ok=True)
+        logger.info(f"✅ DebugAPIClient инициализирован")
         
     def _log_request(self, method: str, url: str, headers: dict, data: dict, response: requests.Response):
-        """Логирует запрос и ответ в файл"""
         try:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]
             log_file = os.path.join(self.debug_dir, f"request_{timestamp}.log")
@@ -66,13 +69,15 @@ class DebugAPIClient:
                 f.write("-" * 40 + "\n")
                 f.write("HEADERS:\n")
                 for key, value in headers.items():
-                    # Скрываем токен в логах
                     if key.lower() == 'authorization':
                         value = value[:15] + "..." if value else ""
                     f.write(f"  {key}: {value}\n")
                 f.write("-" * 40 + "\n")
                 f.write("REQUEST DATA:\n")
-                f.write(json.dumps(data, indent=2, ensure_ascii=False) if data else "None\n")
+                try:
+                    f.write(json.dumps(data, indent=2, ensure_ascii=False) if data else "None\n")
+                except:
+                    f.write(str(data) if data else "None\n")
                 f.write("-" * 40 + "\n")
                 f.write("RESPONSE:\n")
                 f.write(f"STATUS: {response.status_code}\n")
@@ -94,24 +99,7 @@ class DebugAPIClient:
             logger.error(f"❌ Ошибка логирования: {e}")
             return None
     
-    def _parse_response(self, response: requests.Response) -> tuple:
-        """Парсит ответ с обработкой ошибок"""
-        try:
-            # Пробуем получить JSON
-            if response.status_code == 200:
-                try:
-                    return True, response.json()
-                except json.JSONDecodeError:
-                    return False, f"Не JSON: {response.text[:200]}"
-            else:
-                # Сохраняем тело ответа для анализа
-                body_preview = response.text[:500] if response.text else "Empty"
-                return False, f"Код {response.status_code}: {body_preview}"
-        except Exception as e:
-            return False, str(e)
-    
     def send_message(self, user_id, text, attachments=None):
-        """Отправляет сообщение пользователю с логированием"""
         if not self.token:
             return False
         
@@ -140,10 +128,12 @@ class DebugAPIClient:
             
             self._log_request("POST", url, headers, {"params": params, "payload": payload}, response)
             
-            success, result = self._parse_response(response)
-            if not success:
-                logger.error(f"❌ Ошибка отправки пользователю {user_id}: {result}")
-            return response.status_code == 200
+            if response.status_code == 200:
+                logger.info(f"✅ Сообщение отправлено пользователю {user_id}")
+                return True
+            else:
+                logger.error(f"❌ Ошибка отправки пользователю {user_id}: {response.status_code}")
+                return False
             
         except Exception as e:
             logger.error(f"❌ Ошибка отправки: {e}")
@@ -152,6 +142,7 @@ class DebugAPIClient:
     def upload_file(self, image_data) -> Optional[str]:
         """Загружает файл с логированием"""
         if not self.token:
+            logger.error("❌ [UPLOAD] Токен не установлен")
             return None
         
         try:
@@ -160,7 +151,7 @@ class DebugAPIClient:
             headers = {"Authorization": self.token}
             params = {"type": "image"}
             
-            logger.info(f"📤 [API] Запрос URL для загрузки")
+            logger.info(f"📤 [UPLOAD] Запрос URL для загрузки")
             
             response = requests.post(
                 url,
@@ -173,15 +164,23 @@ class DebugAPIClient:
             self._log_request("POST", url, headers, {"params": params}, response)
             
             if response.status_code != 200:
-                logger.error(f"❌ Ошибка получения URL: {response.status_code}")
+                logger.error(f"❌ [UPLOAD] Ошибка получения URL: {response.status_code}")
+                logger.error(f"  Response: {response.text[:500]}")
                 return None
             
-            upload_data = response.json()
+            try:
+                upload_data = response.json()
+            except Exception as e:
+                logger.error(f"❌ [UPLOAD] Не удалось распарсить JSON: {e}")
+                logger.error(f"  Response: {response.text[:500]}")
+                return None
+            
             upload_url = upload_data.get('url')
-            
             if not upload_url:
-                logger.error(f"❌ Не получен URL: {upload_data}")
+                logger.error(f"❌ [UPLOAD] Не получен URL: {upload_data}")
                 return None
+            
+            logger.info(f"✅ [UPLOAD] Получен URL для загрузки")
             
             # 2. Извлекаем байты изображения
             if isinstance(image_data, dict):
@@ -193,7 +192,7 @@ class DebugAPIClient:
                             img_data = value
                             break
                     else:
-                        logger.error(f"❌ В словаре нет данных: {image_data.keys()}")
+                        logger.error(f"❌ [UPLOAD] В словаре нет данных: {image_data.keys()}")
                         return None
             else:
                 img_data = image_data
@@ -203,13 +202,15 @@ class DebugAPIClient:
             elif isinstance(img_data, (bytes, bytearray)):
                 image_bytes = bytes(img_data)
             else:
-                logger.error(f"❌ Неподдерживаемый тип данных: {type(img_data)}")
+                logger.error(f"❌ [UPLOAD] Неподдерживаемый тип данных: {type(img_data)}")
                 return None
+            
+            logger.info(f"📸 [UPLOAD] Размер изображения: {len(image_bytes)} байт")
             
             # 3. Отправляем файл
             files = {'data': ('image.jpg', image_bytes, 'image/jpeg')}
             
-            logger.info(f"📤 [API] Загрузка файла ({len(image_bytes)} байт)")
+            logger.info(f"📤 [UPLOAD] Отправка файла")
             
             upload_response = requests.post(
                 upload_url,
@@ -218,34 +219,42 @@ class DebugAPIClient:
                 verify=False
             )
             
-            self._log_request("POST", upload_url, {}, {"files": files}, upload_response)
+            self._log_request("POST", upload_url, {}, {"files": "binary data"}, upload_response)
             
             if upload_response.status_code != 200:
-                logger.error(f"❌ Ошибка загрузки: {upload_response.status_code}")
+                logger.error(f"❌ [UPLOAD] Ошибка загрузки: {upload_response.status_code}")
+                logger.error(f"  Response: {upload_response.text[:500]}")
                 return None
             
-            upload_result = upload_response.json()
+            try:
+                upload_result = upload_response.json()
+            except Exception as e:
+                logger.error(f"❌ [UPLOAD] Не удалось распарсить JSON ответа: {e}")
+                logger.error(f"  Response: {upload_response.text[:500]}")
+                return None
             
             # 4. Извлекаем токен
             token = None
             if 'photos' in upload_result and isinstance(upload_result['photos'], dict):
-                for photo_data in upload_result['photos'].values():
+                for photo_key, photo_data in upload_result['photos'].items():
                     if isinstance(photo_data, dict) and 'token' in photo_data:
                         token = photo_data['token']
+                        logger.info(f"  Найден токен в photos[{photo_key}]")
                         break
             
             if not token and 'token' in upload_result:
                 token = upload_result['token']
+                logger.info(f"  Найден токен в корне")
             
             if token:
-                logger.info(f"✅ Файл загружен, токен: {token[:20]}...")
+                logger.info(f"✅ [UPLOAD] Файл загружен успешно, токен: {token[:20]}...")
                 return token
             else:
-                logger.error(f"❌ Не получен токен: {upload_result}")
+                logger.error(f"❌ [UPLOAD] Не получен токен: {upload_result}")
                 return None
                 
         except Exception as e:
-            logger.error(f"❌ Ошибка загрузки: {e}")
+            logger.error(f"❌ [UPLOAD] Ошибка: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -304,218 +313,12 @@ class DebugAPIClient:
             logger.error(f"❌ Ошибка отправки: {e}")
             return False
 
-# Создаем отладочный клиент
-debug_api = DebugAPIClient()
-
-# Переопределяем Publisher с отладочным клиентом
-class DebugPublisher:
-    def __init__(self, api, file_manager, db):
-        self.api = api
-        self.fm = file_manager
-        self.db = db
-        self.user_publishers: Dict[int, Publisher] = {}
-        self.user_locks: Dict[int, threading.Lock] = {}
-        self._lock = threading.Lock()
-        logger.info("✅ DebugPublisher инициализирован")
-    
-    def _get_lock(self, user_id: int) -> threading.Lock:
-        with self._lock:
-            if user_id not in self.user_locks:
-                self.user_locks[user_id] = threading.Lock()
-            return self.user_locks[user_id]
-    
-    def _get_publisher(self, user_id: int):
-        with self._get_lock(user_id):
-            if user_id not in self.user_publishers:
-                self.user_publishers[user_id] = Publisher(self.api, self.fm, self.db)
-                logger.info(f"📦 Создан публикатор для пользователя {user_id}")
-            return self.user_publishers[user_id]
-    
-    def publish_single_folder(self, user_id: int, folder_name: str, 
-                              ad_text: str, metadata_text: str, 
-                              images_data: List) -> Tuple[bool, str]:
-        publisher = self._get_publisher(user_id)
-        return publisher.publish_single_folder(
-            user_id, folder_name, ad_text, metadata_text, images_data
-        )
-    
-    def stop(self, user_id: int) -> bool:
-        with self._get_lock(user_id):
-            if user_id in self.user_publishers:
-                self.user_publishers[user_id].stop(user_id)
-                del self.user_publishers[user_id]
-                logger.info(f"⏹️ Публикатор для пользователя {user_id} остановлен")
-                return True
-            return False
-
-# Используем обновленный класс Publisher с отладкой
-# Модифицируем Publisher чтобы он использовал debug_api
-class Publisher:
-    def __init__(self, api, file_manager, db):
-        self.api = api  # Используем debug_api
-        self.fm = file_manager
-        self.db = db
-        self.user_publishers: Dict[int, 'PublisherInstance'] = {}
-        self.user_locks: Dict[int, threading.Lock] = {}
-        self._lock = threading.Lock()
-        logger.info("✅ Publisher инициализирован")
-    
-    def _get_lock(self, user_id: int) -> threading.Lock:
-        with self._lock:
-            if user_id not in self.user_locks:
-                self.user_locks[user_id] = threading.Lock()
-            return self.user_locks[user_id]
-    
-    def _get_publisher(self, user_id: int) -> 'PublisherInstance':
-        with self._get_lock(user_id):
-            if user_id not in self.user_publishers:
-                self.user_publishers[user_id] = PublisherInstance(
-                    self.api, self.fm, self.db, user_id
-                )
-                logger.info(f"📦 Создан публикатор для пользователя {user_id}")
-            return self.user_publishers[user_id]
-    
-    def publish_single_folder(self, user_id: int, folder_name: str, 
-                              ad_text: str, metadata_text: str, 
-                              images_data: List) -> Tuple[bool, str]:
-        publisher = self._get_publisher(user_id)
-        return publisher.publish_single_folder(folder_name, ad_text, metadata_text, images_data)
-    
-    def stop(self, user_id: int) -> bool:
-        with self._get_lock(user_id):
-            if user_id in self.user_publishers:
-                self.user_publishers[user_id].stop()
-                del self.user_publishers[user_id]
-                logger.info(f"⏹️ Публикатор для пользователя {user_id} остановлен")
-                return True
-            return False
-
-class PublisherInstance:
-    """Экземпляр публикатора для одного пользователя"""
-    
-    def __init__(self, api, file_manager, db, user_id: int):
-        self.api = api  # debug_api
-        self.fm = file_manager
-        self.db = db
-        self.user_id = user_id
-        self.stop_flag = False
-        self.lock = threading.Lock()
-        self.FOLDER_TIMEOUT = 60
-        self.running = False
-        self.current_folder = None
-        self.total_folders = 0
-        self.processed_folders = 0
-        self.failed_folders = 0
-        self.max_photos_per_ad = 10
-        
-    def is_stopped(self) -> bool:
-        return self.stop_flag
-    
-    def stop(self):
-        with self.lock:
-            self.stop_flag = True
-            self.running = False
-            logger.info(f"⏹️ Остановка публикации для пользователя {self.user_id}")
-    
-    def extract_chat_id(self, folder_name: str) -> Optional[str]:
-        import re
-        match = re.search(r'-\s*(\d+)', folder_name)
-        if match:
-            chat_id = match.group(1)
-            if len(chat_id) >= 10:
-                return chat_id
-        match = re.search(r'(\d{10,})$', folder_name)
-        if match:
-            return match.group(1)
-        return None
-    
-    def publish_single_folder(self, folder_name: str, ad_text: str, 
-                              metadata_text: str, images_data: List) -> Tuple[bool, str]:
-        try:
-            with self.lock:
-                self.current_folder = folder_name
-                self.total_folders += 1
-            
-            if self.is_stopped():
-                return False, "Остановка пользователем"
-            
-            chat_id = self.extract_chat_id(folder_name)
-            if not chat_id:
-                return False, f"Не удалось извлечь chat_id из {folder_name}"
-            
-            logger.info(f"📤 Извлечен chat_id: {chat_id}")
-            
-            # Загружаем фото через debug_api
-            max_images = min(len(images_data), 10) if isinstance(images_data, list) else 0
-            image_tokens = []
-            
-            for i in range(max_images):
-                if self.is_stopped():
-                    return False, "Остановка пользователем"
-                
-                img_data = images_data[i]
-                if not img_data:
-                    continue
-                
-                logger.info(f"📤 Загрузка изображения {i+1}/{max_images}")
-                token = self.api.upload_file(img_data)
-                if token:
-                    image_tokens.append(token)
-                    logger.info(f"✅ Изображение {i+1} загружено")
-                else:
-                    logger.warning(f"⚠️ Не удалось загрузить изображение {i+1}")
-            
-            # Отправляем в чат через debug_api
-            success = self.api.send_to_chat(chat_id, ad_text, image_tokens)
-            
-            if not success:
-                return False, "Не удалось отправить сообщение"
-            
-            # Сохраняем метаданные
-            import time
-            metadata = self._parse_metadata(metadata_text)
-            self.db.save_ad_metadata(self.user_id, folder_name, f"-{chat_id}", metadata, time.time())
-            self.db.add_publication(self.user_id, folder_name, f"-{chat_id}")
-            
-            with self.lock:
-                self.processed_folders += 1
-            
-            return True, f"✅ Папка {folder_name} опубликована с {len(image_tokens)} фото"
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка публикации {folder_name}: {e}")
-            import traceback
-            traceback.print_exc()
-            with self.lock:
-                self.failed_folders += 1
-            return False, str(e)
-    
-    def _parse_metadata(self, metadata_text: str) -> Dict:
-        import re
-        metadata = {}
-        if not metadata_text:
-            return metadata
-        
-        fields = {
-            'Название': r'Название:\s*(.+)',
-            'Ссылка': r'Ссылка:\s*(.+)',
-            'Код предложения': r'Код предложения:\s*(.+)',
-            'Цена в лизинге': r'Цена\s*[вВ]\s*лизинге:\s*(.+)',
-        }
-        
-        for key, pattern in fields.items():
-            match = re.search(pattern, metadata_text, re.IGNORECASE)
-            if match:
-                metadata[key] = match.group(1).strip()
-        
-        return metadata
-
-# Создаем экземпляры с отладкой
-api = debug_api  # Используем отладочный клиент
+# Создаем экземпляры
+api = DebugAPIClient()
 publisher = Publisher(api, fm, db)
 report_gen = ReportGenerator(fm, db)
 
-# ========== HTML СТРАНИЦА (с добавлением кнопки скачать логи) ==========
+# ========== HTML СТРАНИЦА ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -763,10 +566,22 @@ UPLOAD_PAGE = """
         }
 
         function updateQueueStatus() {
+            if (!folderQueue || folderQueue.length === 0) {
+                queueStatus.textContent = '📋 Нет папок';
+                return;
+            }
+            
             const total = folderQueue.length;
-            const done = folderQueue.filter(f => f.status === 'done').length;
-            const errors = folderQueue.filter(f => f.status === 'error').length;
-            const processing = folderQueue.filter(f => f.status === 'processing').length;
+            let done = 0, errors = 0, processing = 0;
+            
+            for (let i = 0; i < folderQueue.length; i++) {
+                const f = folderQueue[i];
+                if (f) {
+                    if (f.status === 'done') done++;
+                    if (f.status === 'error') errors++;
+                    if (f.status === 'processing') processing++;
+                }
+            }
             
             if (isStopped) {
                 queueStatus.textContent = `⏹️ Остановлено (${done}/${total})`;
@@ -795,9 +610,11 @@ UPLOAD_PAGE = """
                 };
                 badge.textContent = labels[status] || status;
             }
-            folderQueue[index].status = status;
-            if (result) {
-                folderQueue[index].result = result;
+            if (index < folderQueue.length && folderQueue[index]) {
+                folderQueue[index].status = status;
+                if (result) {
+                    folderQueue[index].result = result;
+                }
             }
             updateQueueStatus();
         }
@@ -897,6 +714,98 @@ UPLOAD_PAGE = """
             };
         }
 
+        async function processFolder(index) {
+            if (isStopped) return;
+            
+            if (index >= folderQueue.length || !folderQueue[index]) {
+                addLog(`⚠️ Папка с индексом ${index} не найдена (всего ${folderQueue.length})`);
+                return;
+            }
+            
+            const folder = folderQueue[index];
+            if (!folder || folder.status === 'done' || folder.status === 'error') {
+                addLog(`⚠️ Папка ${index} уже обработана или не существует`);
+                return;
+            }
+            
+            const folderName = folder.name;
+            const files = folder.files;
+            const totalFolders = folderQueue.length;
+            
+            try {
+                updateFolderStatus(index, 'processing');
+                addLog(`📤 Обработка ${index+1}/${totalFolders}: ${folderName}...`);
+                
+                const folderData = await prepareFolderData(folderName, files, maxPhotos);
+                
+                if (index >= folderQueue.length || !folderQueue[index]) {
+                    addLog(`⚠️ Папка ${folderName} была удалена из очереди`);
+                    return;
+                }
+                
+                if (!folderData) {
+                    addLog(`⚠️ Пропускаем ${folderName}: нет текстового файла`);
+                    failedFolders++;
+                    if (index < folderQueue.length) {
+                        updateFolderStatus(index, 'error', 'Нет текстового файла');
+                    }
+                    return;
+                }
+                
+                addLog(`📤 Отправка ${index+1}/${totalFolders}: ${folderName} (${folderData.images.length} фото)`);
+                
+                const response = await fetch('/publish_folder', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        user_id: parseInt(userId),
+                        folder: folderData,
+                        max_photos: maxPhotos
+                    })
+                });
+                
+                let result;
+                const responseText = await response.text();
+                
+                try {
+                    result = JSON.parse(responseText);
+                } catch (parseError) {
+                    addLog(`⚠️ Сервер вернул не JSON: ${responseText.substring(0, 200)}...`);
+                    failedFolders++;
+                    if (index < folderQueue.length) {
+                        updateFolderStatus(index, 'error', 'Ошибка сервера: не JSON ответ');
+                    }
+                    return;
+                }
+                
+                if (index >= folderQueue.length || !folderQueue[index]) {
+                    addLog(`⚠️ Папка ${folderName} была удалена из очереди`);
+                    return;
+                }
+                
+                if (result.success) {
+                    uploadedFolders++;
+                    addLog(`✅ ${folderName}: опубликовано`);
+                    updateFolderStatus(index, 'done', 'Успешно');
+                } else {
+                    failedFolders++;
+                    addLog(`❌ ${folderName}: ${result.message || 'Неизвестная ошибка'}`);
+                    updateFolderStatus(index, 'error', result.message || 'Неизвестная ошибка');
+                }
+                
+            } catch (error) {
+                failedFolders++;
+                addLog(`❌ ${folderName}: ошибка - ${error.message}`);
+                if (index < folderQueue.length) {
+                    updateFolderStatus(index, 'error', error.message);
+                }
+            }
+            
+            const progressPercent = Math.round(((index + 1) / totalFolders) * 100);
+            progress.style.width = progressPercent + '%';
+            progress.textContent = `${index+1}/${totalFolders}`;
+        }
+
         async function uploadFolder() {
             if (selectedFiles.length === 0) {
                 showStatus('error', '❌ Выберите папку для загрузки');
@@ -926,10 +835,6 @@ UPLOAD_PAGE = """
             addLog(`⏱️ Задержка: ${delayBetween} сек`);
             addLog(`📋 Режим очереди: ${queueMode}`);
             
-            folderQueue.forEach((f, i) => {
-                updateFolderStatus(i, 'pending');
-            });
-            
             const totalFolders = folderQueue.length;
             addLog(`📁 Найдено ${totalFolders} папок`);
             showStatus('info', `⏳ Подготовка 0/${totalFolders} папок...`);
@@ -937,80 +842,18 @@ UPLOAD_PAGE = """
             let uploadedFolders = 0;
             let failedFolders = 0;
             
-            async function processFolder(index) {
-                if (isStopped) return;
-                
-                const folder = folderQueue[index];
-                if (!folder || folder.status === 'done') return;
-                
-                const folderName = folder.name;
-                const files = folder.files;
-                
-                try {
-                    updateFolderStatus(index, 'processing');
-                    addLog(`📤 Обработка ${index+1}/${totalFolders}: ${folderName}...`);
-                    
-                    const folderData = await prepareFolderData(folderName, files, maxPhotos);
-                    
-                    if (!folderData) {
-                        addLog(`⚠️ Пропускаем ${folderName}: нет текстового файла`);
-                        failedFolders++;
-                        updateFolderStatus(index, 'error', 'Нет текстового файла');
-                        return;
-                    }
-                    
-                    addLog(`📤 Отправка ${index+1}/${totalFolders}: ${folderName} (${folderData.images.length} фото)`);
-                    
-                    const response = await fetch('/publish_folder', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            user_id: parseInt(userId),
-                            folder: folderData,
-                            max_photos: maxPhotos
-                        })
-                    });
-                    
-                    let result;
-                    const responseText = await response.text();
-                    
-                    try {
-                        result = JSON.parse(responseText);
-                    } catch (parseError) {
-                        addLog(`⚠️ Сервер вернул не JSON: ${responseText.substring(0, 200)}...`);
-                        addLog(`📝 Полный ответ сохранен в логах сервера`);
-                        failedFolders++;
-                        updateFolderStatus(index, 'error', 'Ошибка сервера: не JSON ответ');
-                        return;
-                    }
-                    
-                    if (result.success) {
-                        uploadedFolders++;
-                        addLog(`✅ ${folderName}: опубликовано`);
-                        updateFolderStatus(index, 'done', 'Успешно');
-                    } else {
-                        failedFolders++;
-                        addLog(`❌ ${folderName}: ${result.message || 'Неизвестная ошибка'}`);
-                        updateFolderStatus(index, 'error', result.message || 'Неизвестная ошибка');
-                    }
-                    
-                } catch (error) {
-                    failedFolders++;
-                    addLog(`❌ ${folderName}: ошибка - ${error.message}`);
-                    updateFolderStatus(index, 'error', error.message);
-                }
-                
-                const progressPercent = Math.round(((index + 1) / totalFolders) * 100);
-                progress.style.width = progressPercent + '%';
-                progress.textContent = `${index+1}/${totalFolders}`;
-            }
-            
             if (queueMode === 'parallel') {
                 const maxParallel = 3;
                 let activePromises = [];
+                let completedCount = 0;
                 
                 for (let i = 0; i < totalFolders; i++) {
                     if (isStopped) break;
+                    
+                    if (i >= folderQueue.length || !folderQueue[i]) {
+                        addLog(`⚠️ Папка ${i} не найдена, пропускаем`);
+                        continue;
+                    }
                     
                     while (activePromises.length >= maxParallel) {
                         await Promise.race(activePromises);
@@ -1019,7 +862,11 @@ UPLOAD_PAGE = """
                     
                     const promise = processFolder(i);
                     promise._resolved = false;
-                    promise.then(() => { promise._resolved = true; });
+                    promise.then(() => { 
+                        promise._resolved = true; 
+                        completedCount++;
+                        addLog(`📊 Прогресс: ${completedCount}/${totalFolders}`);
+                    });
                     activePromises.push(promise);
                     
                     await new Promise(r => setTimeout(r, Math.max(0, delayBetween * 0.5)));
@@ -1030,6 +877,12 @@ UPLOAD_PAGE = """
             } else {
                 for (let i = 0; i < totalFolders; i++) {
                     if (isStopped) break;
+                    
+                    if (i >= folderQueue.length || !folderQueue[i]) {
+                        addLog(`⚠️ Папка ${i} не найдена, пропускаем`);
+                        continue;
+                    }
+                    
                     await processFolder(i);
                     
                     if (i < totalFolders - 1 && !isStopped) {
@@ -1041,15 +894,23 @@ UPLOAD_PAGE = """
             progress.style.width = '100%';
             progress.textContent = `${totalFolders}/${totalFolders}`;
             
-            const done = folderQueue.filter(f => f.status === 'done').length;
-            const errors = folderQueue.filter(f => f.status === 'error').length;
+            let done = 0, errors = 0;
+            for (let i = 0; i < folderQueue.length; i++) {
+                if (folderQueue[i]) {
+                    if (folderQueue[i].status === 'done') done++;
+                    if (folderQueue[i].status === 'error') errors++;
+                }
+            }
             
             if (isStopped) {
                 showStatus('warning', `⏹️ Остановлено. Загружено ${done} папок, ${errors} с ошибками`);
                 addLog(`⏹️ Остановлено. Загружено ${done} папок, ${errors} с ошибками`);
-            } else if (errors === 0) {
+            } else if (errors === 0 && done === totalFolders) {
                 showStatus('success', `✅ Загружено ${done} папок!`);
                 addLog(`✅ ВСЕ ${done} папок загружены!`);
+            } else if (errors === 0) {
+                showStatus('success', `✅ Загружено ${done} папок!`);
+                addLog(`✅ Загружено ${done} папок!`);
             } else {
                 showStatus('warning', `⚠️ Загружено ${done} папок, ${errors} с ошибками`);
                 addLog(`⚠️ Загружено ${done} папок, ${errors} с ошибками`);
@@ -1078,7 +939,6 @@ def upload_page():
 
 @app.route('/download_logs', methods=['GET'])
 def download_logs():
-    """Скачивает все логи API в zip архив"""
     try:
         import zipfile
         from io import BytesIO
@@ -1087,7 +947,6 @@ def download_logs():
         if not os.path.exists(debug_dir):
             return "❌ Нет логов для скачивания", 404
         
-        # Создаем zip архив в памяти
         memory_file = BytesIO()
         with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
             for filename in os.listdir(debug_dir):
