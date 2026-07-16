@@ -36,8 +36,8 @@ class SessionManager:
         
         return self.sessions[user_id]
     
-    def send_message(self, user_id: int, chat_id: str, text: str, 
-                    attachments: list = None) -> tuple[bool, Optional[str]]:
+    def send_message(self, user_id: int, chat_id: str = None, text: str = "", 
+                    attachments: list = None, is_user: bool = False) -> tuple[bool, Optional[str]]:
         """
         Отправляет сообщение от имени пользователя.
         Возвращает (успех, message_id)
@@ -58,10 +58,19 @@ class SessionManager:
                 payload["attachments"] = attachments
             
             try:
-                # Отправляем через СВОЮ сессию
+                # Формируем URL и параметры
+                if is_user:
+                    # Личное сообщение
+                    url = f"{self.base_url}/messages"
+                    params = {"user_id": user_id}
+                else:
+                    # Чат
+                    url = f"{self.base_url}/messages"
+                    params = {"chat_id": chat_id}
+                
                 response = session.post(
-                    f"{self.base_url}/messages",
-                    params={"chat_id": chat_id},
+                    url,
+                    params=params,
                     json=payload,
                     timeout=60
                 )
@@ -74,7 +83,7 @@ class SessionManager:
                     logger.info(f"✅ Сообщение от пользователя {user_id} отправлено")
                     return True, message_id
                 else:
-                    logger.error(f"❌ Ошибка: {response.status_code} - {response.text}")
+                    logger.error(f"❌ Ошибка: {response.status_code} - {response.text[:200]}")
                     return False, None
                     
             except Exception as e:
