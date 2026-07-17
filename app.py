@@ -631,8 +631,7 @@ def download_report(user_id, filename):
         if not os.path.exists(file_path):
             return "❌ Файл не найден", 404
         
-        response = send_file(file_path, as_attachment=True, download_name=filename)
-        return response
+        return send_file(file_path, as_attachment=True, download_name=filename)
         
     except Exception as e:
         logger.error(f"❌ Ошибка скачивания: {e}")
