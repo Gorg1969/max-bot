@@ -4,7 +4,7 @@ services:
   web:
     build: .
     container_name: maxbot-web
-    restart: unless-stopped
+    restart: unless-stopped   # Перезапуск только если упал
     ports:
       - "3000:3000"
     environment:
@@ -19,11 +19,8 @@ services:
       - PORT=3000
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=/app/data/maxbot.db
-      - GUNICORN_WORKERS=1
-      - GUNICORN_THREADS=4
       - SSL_VERIFY=${SSL_VERIFY:-true}
       - SSL_CERT_CONTENT=${SSL_CERT_CONTENT}
     volumes:
       - ./data:/app/data
-    # ⚠️ УБИРАЕМ healthcheck если он есть!
-    command: gunicorn -c gunicorn.conf.py app:app
+    # Команда теперь в supervisor, не нужна
