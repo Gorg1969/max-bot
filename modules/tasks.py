@@ -3,20 +3,19 @@
 import logging
 import time
 import os
+import traceback
 from .publisher import Publisher
 from .file_manager import FileManager
 from .database import Database
 
 logger = logging.getLogger(__name__)
 
-# Глобальные объекты
 _db = None
 _fm = None
 _publisher = None
 _api = None
 
 def init_globals(api):
-    """Инициализация глобальных объектов в воркере"""
     global _db, _fm, _publisher, _api
     _api = api
     _db = Database()
@@ -24,7 +23,6 @@ def init_globals(api):
     _publisher = Publisher(_api, _fm, _db)
 
 def process_folder_task(user_id, folder_data, job_id):
-    """RQ задача для обработки одной папки"""
     try:
         logger.info(f"🔵 Задача {job_id}: Начало обработки папки для пользователя {user_id}")
         
@@ -33,7 +31,12 @@ def process_folder_task(user_id, folder_data, job_id):
         metadata_text = folder_data.get('metadataText')
         images = folder_data.get('images', [])
         
+        logger.info(f"📁 Папка: {folder_name}")
+        logger.info(f"📝 Текст: {len(ad_text)} символов")
+        logger.info(f"🖼️ Изображений: {len(images)}")
+        
         if not folder_name or not ad_text:
+            logger.error(f"❌ Задача {job_id}: Нет folder_name или ad_text")
             return {
                 'success': False,
                 'message': 'Нет folder_name или ad_text',
@@ -41,6 +44,7 @@ def process_folder_task(user_id, folder_data, job_id):
                 'job_id': job_id
             }
         
+        # Публикуем папку
         success, message = _publisher.publish_single_folder(
             user_id, folder_name, ad_text, metadata_text, images
         )
@@ -61,8 +65,7 @@ def process_folder_task(user_id, folder_data, job_id):
         
     except Exception as e:
         logger.error(f"❌ Задача {job_id}: Критическая ошибка - {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(traceback.format_exc())
         return {
             'success': False,
             'message': str(e),
@@ -71,7 +74,6 @@ def process_folder_task(user_id, folder_data, job_id):
         }
 
 def cleanup_user_task(user_id):
-    """Задача для очистки данных пользователя"""
     try:
         logger.info(f"🧹 Задача очистки для пользователя {user_id}")
         if _fm:
