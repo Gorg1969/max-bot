@@ -1,12 +1,33 @@
 version: '3.8'
 
 services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: maxbot-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=maxbot
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   web:
     build: .
     container_name: maxbot-web
     restart: unless-stopped
     ports:
       - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       - MAX_TOKEN=${MAX_TOKEN}
       - MAX_BOT_TOKEN=${MAX_BOT_TOKEN}
@@ -17,6 +38,10 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - PORT=3000
       - PYTHONUNBUFFERED=1
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/maxbot
     volumes:
       - ./data:/app/data
     command: gunicorn -c gunicorn.conf.py app:app
+
+volumes:
+  postgres_data:
