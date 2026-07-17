@@ -1,4 +1,4 @@
-# app.py - ПОЛНАЯ ВЕРСИЯ
+# app.py - УПРОЩЕННАЯ ВЕРСИЯ БЕЗ SSL
 
 from flask import Flask, request, jsonify, render_template_string, send_file
 import os
@@ -9,7 +9,6 @@ import traceback
 import time
 import base64
 import gc
-import tempfile
 import urllib3
 from datetime import datetime
 from modules import Database, FileManager
@@ -36,26 +35,11 @@ if not TOKEN:
 if not BASE_URL:
     logger.error("❌ BASE_URL НЕ НАЙДЕН!")
 
-# ========== SSL НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ==========
-SSL_VERIFY = os.environ.get("SSL_VERIFY", "true").lower() == "true"
-SSL_CERT_CONTENT = os.environ.get("SSL_CERT_CONTENT")
-SSL_VERIFY_PATH = None
-
-if SSL_CERT_CONTENT:
-    try:
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as f:
-            f.write(SSL_CERT_CONTENT)
-            SSL_VERIFY_PATH = f.name
-        logger.info("✅ Сертификат загружен из SSL_CERT_CONTENT")
-    except Exception as e:
-        logger.error(f"❌ Ошибка загрузки сертификата: {e}")
-
-if SSL_VERIFY and SSL_VERIFY_PATH:
-    logger.info("🔒 SSL проверка ВКЛЮЧЕНА")
-else:
-    logger.warning("⚠️ SSL проверка ОТКЛЮЧЕНА")
-    SSL_VERIFY = False
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# ========== SSL - ВСЕГДА ОТКЛЮЧЕН ==========
+# Отключаем проверку SSL для MAX API
+SSL_VERIFY = False
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+logger.warning("⚠️ SSL проверка ОТКЛЮЧЕНА (для MAX API)")
 
 # ========== ИНИЦИАЛИЗАЦИЯ БД ==========
 db = None
@@ -74,17 +58,7 @@ def init_app():
         def __init__(self):
             self.token = TOKEN
             self.base_url = MAX_API_URL
-            self.verify = SSL_VERIFY_PATH if SSL_VERIFY else False
-        
-        def post(self, url, **kwargs):
-            kwargs['verify'] = self.verify
-            kwargs['timeout'] = kwargs.get('timeout', 30)
-            return requests.post(url, **kwargs)
-        
-        def get(self, url, **kwargs):
-            kwargs['verify'] = self.verify
-            kwargs['timeout'] = kwargs.get('timeout', 30)
-            return requests.get(url, **kwargs)
+            self.verify = False  # Всегда False
     
     publisher = Publisher(APIClient(), fm, db)
     logger.info("✅ Приложение инициализировано")
@@ -196,9 +170,7 @@ input[type=file]{display:none}
 const userId = new URLSearchParams(window.location.search).get('user_id') || 151296248;
 let selectedFiles = [], isProcessing = false, folderQueue = [], totalFolders = 0;
 
-window.onload = function() {
-    loadStats();
-};
+window.onload = function() { loadStats(); };
 
 function loadStats() {
     fetch('/stats/' + userId)
@@ -553,7 +525,6 @@ def upload_folders():
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Обработка вебхука от MAX платформы"""
     try:
         data = request.get_json()
         logger.info(f"📨 Получен вебхук: {data}")
@@ -612,8 +583,8 @@ def webhook():
                 "Content-Type": "application/json"
             }
             
-            verify_path = SSL_VERIFY_PATH if SSL_VERIFY else False
-            response = requests.post(url, headers=headers, json=payload, timeout=30, verify=verify_path)
+            # ✅ SSL ОТКЛЮЧЕН
+            response = requests.post(url, headers=headers, json=payload, timeout=30, verify=False)
             logger.info(f"✅ Ответ отправлен пользователю {user_id}, статус: {response.status_code}")
         
         return jsonify({"ok": True}), 200
@@ -623,9 +594,8 @@ def webhook():
         logger.error(traceback.format_exc())
         return jsonify({"ok": False}), 500
 
-@app.route('/set_webhook', methods=['GET', 'POST'])
+@app.route('/set_webhook', methods=['GET'])
 def set_webhook():
-    """Установка вебхука в MAX платформе"""
     try:
         webhook_url = f"{BASE_URL}/webhook"
         logger.info(f"🔄 Установка вебхука: {webhook_url}")
@@ -635,22 +605,18 @@ def set_webhook():
             "url": webhook_url,
             "secret": app.secret_key
         }
-        
         headers = {
             "Authorization": TOKEN,
             "Content-Type": "application/json"
         }
         
-        verify_path = SSL_VERIFY_PATH if SSL_VERIFY else False
-        response = requests.post(url, headers=headers, json=payload, timeout=30, verify=verify_path)
-        
-        logger.info(f"✅ Ответ MAX API: {response.status_code}")
+        # ✅ SSL ОТКЛЮЧЕН
+        response = requests.post(url, headers=headers, json=payload, timeout=30, verify=False)
         
         if response.status_code == 200:
             return jsonify({
                 "success": True,
-                "message": f"Вебхук установлен: {webhook_url}",
-                "response": response.json()
+                "message": f"Вебхук установлен: {webhook_url}"
             })
         else:
             return jsonify({
@@ -660,21 +626,21 @@ def set_webhook():
             }), 500
             
     except Exception as e:
-        logger.error(f"❌ Ошибка установки вебхука: {e}")
+        logger.error(f"❌ Ошибка: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/report/<int:user_id>')
 def report_page(user_id):
     report_path = report_gen.generate_report(user_id)
     if not report_path:
-        return "❌ Нет данных для отчета", 404
+        return "❌ Нет данных", 404
     filename = os.path.basename(report_path)
     return f"""
     <html>
     <body style="text-align:center;padding:50px;font-family:Arial;">
         <h1>📊 Отчет готов!</h1>
-        <p><a href="/download_report/{user_id}/{filename}" style="padding:12px 30px;background:#28a745;color:white;text-decoration:none;border-radius:5px;">📥 Скачать</a></p>
-        <p><a href="/upload">⬅️ Вернуться</a></p>
+        <p><a href="/download_report/{user_id}/{filename}">📥 Скачать</a></p>
+        <p><a href="/upload">⬅️ Назад</a></p>
     </body>
     </html>
     """
@@ -696,29 +662,8 @@ def get_stats(user_id):
         stats = db.get_user_stats(user_id)
         return jsonify(stats)
     except Exception as e:
-        logger.error(f"❌ Ошибка получения статистики: {e}")
+        logger.error(f"❌ Ошибка: {e}")
         return jsonify({'total': 0, 'success': 0, 'errors': 0}), 500
-
-@app.route('/test_ssl')
-def test_ssl():
-    try:
-        url = f"{MAX_API_URL}/ping"
-        headers = {"Authorization": TOKEN}
-        verify_path = SSL_VERIFY_PATH if SSL_VERIFY else False
-        response = requests.get(url, headers=headers, timeout=10, verify=verify_path)
-        return jsonify({
-            "status": "ok",
-            "ssl_verified": SSL_VERIFY,
-            "ssl_path": SSL_VERIFY_PATH,
-            "response_code": response.status_code
-        })
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "ssl_verified": SSL_VERIFY,
-            "ssl_path": SSL_VERIFY_PATH,
-            "error": str(e)
-        }), 500
 
 @app.route('/health')
 def health():
@@ -729,7 +674,9 @@ def status():
     return {
         "status": "running",
         "token_set": bool(TOKEN),
-        "ssl_verify": SSL_VERIFY,
-        "ssl_path": SSL_VERIFY_PATH,
+        "ssl_verify": False,
         "base_url": BASE_URL
     }
+
+# ========== ЗАПУСК ==========
+# ТОЛЬКО ДЛЯ GUNICORN!
