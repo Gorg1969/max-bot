@@ -23,28 +23,24 @@ def init_globals(api):
     _publisher = Publisher(_api, _fm, _db)
 
 def process_folder_task(user_id, folder_data, job_id):
+    """Обработка папки для КОНКРЕТНОГО пользователя"""
     try:
-        logger.info(f"🔵 Задача {job_id}: Начало обработки папки для пользователя {user_id}")
+        logger.info(f"🔵 Задача {job_id}: Пользователь {user_id}")
         
         folder_name = folder_data.get('folderName')
         ad_text = folder_data.get('adText')
         metadata_text = folder_data.get('metadataText')
         images = folder_data.get('images', [])
         
-        logger.info(f"📁 Папка: {folder_name}")
-        logger.info(f"📝 Текст: {len(ad_text)} символов")
-        logger.info(f"🖼️ Изображений: {len(images)}")
-        
         if not folder_name or not ad_text:
-            logger.error(f"❌ Задача {job_id}: Нет folder_name или ad_text")
             return {
                 'success': False,
                 'message': 'Нет folder_name или ad_text',
                 'folder_name': folder_name,
-                'job_id': job_id
+                'job_id': job_id,
+                'user_id': user_id
             }
         
-        # Публикуем папку
         success, message = _publisher.publish_single_folder(
             user_id, folder_name, ad_text, metadata_text, images
         )
@@ -53,36 +49,37 @@ def process_folder_task(user_id, folder_data, job_id):
             'success': success,
             'message': message,
             'folder_name': folder_name,
-            'job_id': job_id
+            'job_id': job_id,
+            'user_id': user_id
         }
         
         if success:
-            logger.info(f"✅ Задача {job_id}: Успешно обработана папка {folder_name}")
+            logger.info(f"✅ Задача {job_id}: Успешно")
         else:
-            logger.error(f"❌ Задача {job_id}: Ошибка: {message}")
+            logger.error(f"❌ Задача {job_id}: {message}")
         
         return result
         
     except Exception as e:
-        logger.error(f"❌ Задача {job_id}: Критическая ошибка - {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"❌ Задача {job_id}: {e}")
         return {
             'success': False,
             'message': str(e),
             'folder_name': folder_data.get('folderName', 'unknown'),
-            'job_id': job_id
+            'job_id': job_id,
+            'user_id': user_id
         }
 
 def cleanup_user_task(user_id):
+    """Очистка данных КОНКРЕТНОГО пользователя"""
     try:
-        logger.info(f"🧹 Задача очистки для пользователя {user_id}")
+        logger.info(f"🧹 Очистка для пользователя {user_id}")
         if _fm:
             user_folder = _fm.get_user_folder(user_id)
             if os.path.exists(user_folder):
                 import shutil
                 shutil.rmtree(user_folder)
                 os.makedirs(user_folder, exist_ok=True)
-                logger.info(f"🗑️ Удалены файлы пользователя {user_id}")
         return {'success': True, 'message': f'Данные пользователя {user_id} очищены'}
     except Exception as e:
         logger.error(f"❌ Ошибка очистки: {e}")
