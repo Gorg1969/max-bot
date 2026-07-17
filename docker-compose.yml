@@ -1,6 +1,27 @@
 version: '3.8'
 
 services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: maxbot-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=maxbot
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - maxbot-network
+
   redis:
     image: redis:7-alpine
     container_name: maxbot-redis
@@ -15,6 +36,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    networks:
+      - maxbot-network
 
   web:
     build: .
@@ -23,11 +46,11 @@ services:
     ports:
       - "3000:3000"
     environment:
-      # ✅ ТОЛЬКО ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ (без .env)
       - MAX_TOKEN=${MAX_TOKEN}
       - MAX_BOT_TOKEN=${MAX_BOT_TOKEN}
       - TOKEN=${TOKEN}
       - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/maxbot
       - DATA_DIR=/app/data
       - MAX_API_URL=https://platform-api2.max.ru
       - SECRET_KEY=${SECRET_KEY:-dev_secret_key}
@@ -37,8 +60,12 @@ services:
     volumes:
       - ./data:/app/data
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
+    networks:
+      - maxbot-network
     command: gunicorn -c gunicorn.conf.py app:app
 
   worker:
@@ -46,11 +73,11 @@ services:
     container_name: maxbot-worker
     restart: unless-stopped
     environment:
-      # ✅ ТОЛЬКО ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ (без .env)
       - MAX_TOKEN=${MAX_TOKEN}
       - MAX_BOT_TOKEN=${MAX_BOT_TOKEN}
       - TOKEN=${TOKEN}
       - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/maxbot
       - DATA_DIR=/app/data
       - MAX_API_URL=https://platform-api2.max.ru
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -58,9 +85,18 @@ services:
     volumes:
       - ./data:/app/data
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
+    networks:
+      - maxbot-network
     command: python worker.py
 
 volumes:
+  postgres_data:
   redis_data:
+
+networks:
+  maxbot-network:
+    driver: bridge
