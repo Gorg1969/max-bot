@@ -1,4 +1,4 @@
-# app.py - БЕЗ REDIS
+# app.py - КОМПАКТНАЯ ВЕРСИЯ С РАБОЧИМ HTML
 
 from flask import Flask, request, jsonify, render_template_string, send_file
 import os
@@ -8,6 +8,7 @@ import requests
 import traceback
 import time
 import base64
+import gc
 from datetime import datetime
 from modules import Database, FileManager
 from modules.report_generator import ReportGenerator
@@ -16,7 +17,7 @@ from modules.publisher import Publisher
 # ========== ИНИЦИАЛИЗАЦИЯ ==========
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24).hex())
-app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 
 # ========== ЛОГИРОВАНИЕ ==========
 logging.basicConfig(level=logging.INFO)
@@ -30,11 +31,12 @@ MAX_API_URL = os.environ.get("MAX_API_URL", "https://platform-api2.max.ru")
 if not TOKEN:
     logger.error("❌ ТОКЕН НЕ НАЙДЕН!")
 
-# ========== ИНИЦИАЛИЗАЦИЯ ==========
+# ========== ИНИЦИАЛИЗАЦИЯ БД ==========
 db = Database()
 fm = FileManager(DATA_DIR)
 report_gen = ReportGenerator(fm, db)
 
+# ========== API КЛИЕНТ ==========
 class APIClient:
     def __init__(self):
         self.token = TOKEN
@@ -44,233 +46,505 @@ api = APIClient()
 publisher = Publisher(api, fm, db)
 
 # ========== UPLOAD_PAGE ==========
-UPLOAD_PAGE = """
+UPLOAD_PAGE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <meta charset="UTF-8">
-    <title>Загрузка объявлений</title>
-    <style>
-        body { font-family: Arial; max-width: 800px; margin: 50px auto; padding: 20px; background: #f5f5f5; }
-        .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h1 { color: #333; }
-        .drop-zone { border: 2px dashed #007bff; padding: 40px; margin: 20px 0; border-radius: 10px; background: #f8f9fa; text-align: center; cursor: pointer; }
-        .drop-zone:hover { background: #e3f2fd; }
-        .drop-zone.dragover { background: #d4edda; border-color: #28a745; }
-        input[type="file"] { display: none; }
-        .btn { padding: 12px 30px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; font-weight: bold; }
-        .btn-success { background: #28a745; color: white; }
-        .btn-success:hover { background: #218838; }
-        .btn-danger { background: #dc3545; color: white; }
-        .btn-danger:hover { background: #c82333; }
-        .btn-warning { background: #ffc107; color: #333; }
-        .btn-warning:hover { background: #e0a800; }
-        .status { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
-        .status.success { background: #d4edda; color: #155724; display: block; }
-        .status.error { background: #f8d7da; color: #721c24; display: block; }
-        .status.info { background: #d1ecf1; color: #0c5460; display: block; }
-        .progress-bar { width: 100%; height: 25px; background: #e9ecef; border-radius: 10px; overflow: hidden; margin: 10px 0; display: none; }
-        .progress-bar .progress { height: 100%; background: linear-gradient(90deg, #28a745, #20c997); transition: width 0.3s; width: 0%; display: flex; align-items: center; justify-content: center; color: white; font-size: 12px; }
-        #log { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; font-family: monospace; font-size: 12px; max-height: 300px; overflow-y: auto; margin: 20px 0; display: none; white-space: pre-wrap; }
-        .file-list li { background: #f8f9fa; padding: 10px; margin: 5px 0; border-radius: 5px; border-left: 3px solid #007bff; display: flex; justify-content: space-between; }
-        .settings-section { background: #e7f5ff; padding: 15px; border-radius: 10px; margin: 15px 0; }
-        .settings-section label { display: inline-block; margin-right: 15px; font-weight: bold; }
-        .settings-section input[type="number"] { width: 60px; padding: 5px; border: 1px solid #ccc; border-radius: 5px; }
-    </style>
+<meta charset="UTF-8">
+<title>Загрузка объявлений</title>
+<style>
+body{font-family:Arial;max-width:800px;margin:50px auto;padding:20px;background:#f5f5f5}
+.container{background:white;padding:30px;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}
+h1{color:#333}
+.drop-zone{border:2px dashed #007bff;padding:40px;margin:20px 0;border-radius:10px;background:#f8f9fa;text-align:center;cursor:pointer}
+.drop-zone:hover{background:#e3f2fd}
+.drop-zone.dragover{background:#d4edda;border-color:#28a745}
+input[type=file]{display:none}
+.btn{padding:12px 30px;border:none;border-radius:5px;cursor:pointer;font-size:16px;font-weight:bold}
+.btn-success{background:#28a745;color:white}
+.btn-success:hover{background:#218838}
+.btn-danger{background:#dc3545;color:white}
+.btn-danger:hover{background:#c82333}
+.btn-warning{background:#ffc107;color:#333}
+.btn-warning:hover{background:#e0a800}
+.status{margin-top:20px;padding:15px;border-radius:5px;display:none}
+.status.success{background:#d4edda;color:#155724;display:block;border-left:4px solid #28a745}
+.status.error{background:#f8d7da;color:#721c24;display:block;border-left:4px solid #dc3545}
+.status.info{background:#d1ecf1;color:#0c5460;display:block;border-left:4px solid #17a2b8}
+.status.warning{background:#fff3cd;color:#856404;display:block;border-left:4px solid #ffc107}
+.file-list{list-style:none;padding:0}
+.file-list li{background:#f8f9fa;padding:10px 15px;margin:5px 0;border-radius:5px;border-left:3px solid #007bff;display:flex;justify-content:space-between;align-items:center}
+.file-list li .count{background:#007bff;color:white;padding:2px 10px;border-radius:20px;font-size:12px}
+.file-list li .status-badge{font-size:12px;padding:2px 10px;border-radius:20px;margin-left:10px}
+.file-list li .status-badge.pending{background:#ffc107;color:#333}
+.file-list li .status-badge.done{background:#28a745;color:white}
+.file-list li .status-badge.error{background:#dc3545;color:white}
+.progress-bar{width:100%;height:25px;background:#e9ecef;border-radius:10px;overflow:hidden;margin:10px 0;display:none}
+.progress-bar .progress{height:100%;background:linear-gradient(90deg,#28a745,#20c997);transition:width .3s;width:0%;display:flex;align-items:center;justify-content:center;color:white;font-size:12px;font-weight:bold}
+.instructions{background:#fff3cd;padding:15px;border-radius:5px;margin:20px 0;border-left:4px solid #ffc107}
+.settings-section{background:#e7f5ff;padding:15px;border-radius:10px;margin:15px 0}
+.settings-section label{display:inline-block;margin-right:15px;font-weight:bold}
+.settings-section input[type=number]{width:60px;padding:5px;border:1px solid #ccc;border-radius:5px}
+#log{background:#1e1e1e;color:#d4d4d4;padding:15px;border-radius:5px;font-family:monospace;font-size:12px;max-height:300px;overflow-y:auto;margin:20px 0;display:none;white-space:pre-wrap}
+.button-group{display:flex;gap:10px;flex-wrap:wrap;margin-top:15px}
+.selected-info{background:#e7f5ff;padding:10px 15px;border-radius:5px;margin:10px 0;border-left:3px solid #007bff}
+.queue-info{background:#f8f9fa;padding:10px 15px;border-radius:5px;margin:10px 0;border-left:3px solid #17a2b8}
+.footer{text-align:center;margin-top:30px;color:#999;font-size:14px}
+.report-section{margin-top:20px;padding:20px;background:#f8f9fa;border-radius:10px;border:1px solid #dee2e6;text-align:center}
+</style>
 </head>
 <body>
-    <div class="container">
-        <h1>📤 Загрузка объявлений</h1>
-        
-        <div class="settings-section">
-            <label>📸 Максимум фото: <input type="number" id="maxPhotos" value="6" min="1" max="10"></label>
-        </div>
-        
-        <div class="drop-zone" id="dropZone">
-            <span style="font-size:48px;">📂</span>
-            <p><strong>Перетащите головную папку сюда</strong></p>
-            <button class="btn btn-success" onclick="document.getElementById('folderInput').click()">Выбрать папку</button>
-            <input type="file" id="folderInput" webkitdirectory multiple>
-        </div>
-        
-        <div id="fileList" style="display:none;">
-            <div id="selectedInfo"></div>
-            <ul class="file-list" id="fileListContent"></ul>
-            <button class="btn btn-success" onclick="uploadFolder()">🚀 Загрузить</button>
-            <button class="btn btn-danger" onclick="clearFiles()">🗑️ Очистить</button>
-        </div>
-        
-        <div class="progress-bar" id="progressBar"><div class="progress" id="progress">0%</div></div>
-        <div id="status" class="status"></div>
-        <div id="log"></div>
-        
-        <div style="margin-top:20px;text-align:center;">
-            <button class="btn btn-success" onclick="getReport()">📊 Скачать отчет</button>
-        </div>
-    </div>
+<div class="container">
+<h1>📤 Загрузка объявлений</h1>
+<div class="instructions">
+<strong>📌 Как подготовить:</strong><br>
+1️⃣ Создайте головную папку с подпапками<br>
+2️⃣ В каждой подпапке: info.txt и фото (макс 10)<br>
+3️⃣ Используйте разделитель #изъятая<br>
+4️⃣ Перетащите головную папку в поле ниже<br>
+5️⃣ Папки отправляются по одной с задержкой
+</div>
+<div class="settings-section">
+<h4>⚙️ Настройки</h4>
+<label>📸 Максимум фото: <input type="number" id="maxPhotos" value="6" min="1" max="10"></label>
+<label>⏱️ Задержка между папками (сек): <input type="number" id="delayBetween" value="3" min="1" max="30"></label>
+</div>
+<div class="drop-zone" id="dropZone">
+<span style="font-size:48px;">📂</span>
+<p><strong>Перетащите головную папку сюда</strong></p>
+<button class="btn btn-success" onclick="document.getElementById('folderInput').click()">Выбрать папку</button>
+<input type="file" id="folderInput" webkitdirectory multiple>
+</div>
+<div id="fileList" style="display:none;">
+<div class="selected-info" id="selectedInfo"></div>
+<div class="queue-info"><strong>📋 Очередь:</strong> <span id="queueStatus">Ожидание</span></div>
+<ul class="file-list" id="fileListContent"></ul>
+<div class="button-group">
+<button class="btn btn-success" onclick="uploadFolder()">🚀 Загрузить</button>
+<button class="btn btn-danger" onclick="clearFiles()">🗑️ Очистить</button>
+</div>
+</div>
+<div class="progress-bar" id="progressBar"><div class="progress" id="progress">0%</div></div>
+<div id="status" class="status"></div>
+<div id="log"></div>
+<div class="report-section">
+<button class="btn btn-success" onclick="getReport()">📊 Скачать отчет</button>
+<p style="margin-top:10px;color:#666;font-size:14px;">После публикации всех папок</p>
+</div>
+<div class="footer">⚡ MAX Bot | SQLite</div>
+</div>
 
-    <script>
-        const userId = new URLSearchParams(window.location.search).get('user_id') || 151296248;
-        let selectedFiles = [];
-        let isProcessing = false;
-        let totalFolders = 0;
-        
-        const dropZone = document.getElementById('dropZone');
-        const folderInput = document.getElementById('folderInput');
-        const fileList = document.getElementById('fileList');
-        const fileListContent = document.getElementById('fileListContent');
-        const selectedInfo = document.getElementById('selectedInfo');
-        const statusDiv = document.getElementById('status');
-        const logDiv = document.getElementById('log');
-        const progressBar = document.getElementById('progressBar');
-        const progress = document.getElementById('progress');
+<script>
+const userId = new URLSearchParams(window.location.search).get('user_id') || 151296248;
+let selectedFiles = [], isProcessing = false, folderQueue = [], totalFolders = 0;
 
-        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
-        dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('dragover'); });
-        dropZone.addEventListener('drop', (e) => {
-            e.preventDefault();
-            dropZone.classList.remove('dragover');
-            const items = e.dataTransfer.items;
-            const files = [];
-            let pending = 0;
-            
-            function processEntry(entry, path) {
-                if (entry.isDirectory) {
-                    const reader = entry.createReader();
-                    reader.readEntries((entries) => {
-                        for (let e of entries) {
-                            processEntry(e, path + entry.name + '/');
+function readDirectoryRecursive(entry, path, files, callback) {
+    if (entry.isDirectory) {
+        const reader = entry.createReader();
+        let allEntries = [];
+        function readEntries() {
+            reader.readEntries((entries) => {
+                if (entries.length === 0) {
+                    let pending = allEntries.length;
+                    if (pending === 0) { callback(); return; }
+                    allEntries.forEach(e => {
+                        if (e.isDirectory) {
+                            readDirectoryRecursive(e, path + e.name + '/', files, () => { pending--; if (pending === 0) callback(); });
+                        } else {
+                            e.file((file) => { file.webkitRelativePath = path + file.name; files.push(file); pending--; if (pending === 0) callback(); });
                         }
                     });
-                } else {
-                    entry.file((file) => {
-                        file.webkitRelativePath = path + file.name;
-                        files.push(file);
-                        pending--;
-                        if (pending === 0) {
-                            selectedFiles = files;
-                            displayFiles(selectedFiles);
-                        }
-                    });
-                }
-            }
-            
-            for (let item of items) {
-                if (item.kind === 'file') {
-                    const entry = item.webkitGetAsEntry();
-                    if (entry) {
-                        pending++;
-                        processEntry(entry, '');
-                    }
-                }
-            }
-            
-            if (pending === 0 && files.length > 0) {
-                selectedFiles = files;
-                displayFiles(selectedFiles);
-            }
-        });
-
-        folderInput.addEventListener('change', (e) => {
-            const files = Array.from(e.target.files);
-            if (files.length > 0) {
-                selectedFiles = files;
-                displayFiles(selectedFiles);
-            }
-        });
-
-        function compressImage(file, maxWidth = 1920, maxHeight = 1920, quality = 0.85) {
-            return new Promise((resolve, reject) => {
-                if (file.size > 20 * 1024 * 1024) {
-                    reject(new Error('Файл слишком большой'));
-                    return;
-                }
-                const reader = new FileReader();
-                reader.onload = function(e) {
-                    const img = new Image();
-                    img.onload = function() {
-                        let width = img.width, height = img.height;
-                        if (width > maxWidth) { height = (height * maxWidth) / width; width = maxWidth; }
-                        if (height > maxHeight) { width = (width * maxHeight) / height; height = maxHeight; }
-                        const canvas = document.createElement('canvas');
-                        canvas.width = width; canvas.height = height;
-                        const ctx = canvas.getContext('2d');
-                        ctx.drawImage(img, 0, 0, width, height);
-                        canvas.toBlob((blob) => {
-                            if (blob) {
-                                resolve(new File([blob], file.name, { type: 'image/jpeg' }));
-                            } else {
-                                reject(new Error('Не удалось сжать'));
-                            }
-                        }, 'image/jpeg', quality);
-                    };
-                    img.onerror = reject;
-                    img.src = e.target.result;
-                };
-                reader.onerror = reject;
-                reader.readAsDataURL(file);
+                } else { allEntries = allEntries.concat(entries); readEntries(); }
             });
         }
+        readEntries();
+    } else {
+        entry.file((file) => { file.webkitRelativePath = path + file.name; files.push(file); callback(); });
+    }
+}
 
-        function displayFiles(files) {
-            fileListContent.innerHTML = '';
-            const folders = new Set();
-            files.forEach(f => {
-                const parts = f.webkitRelativePath.split('/');
-                if (parts.length >= 2) folders.add(parts[0]);
-            });
-            const sortedFolders = Array.from(folders).sort();
-            sortedFolders.forEach(folder => {
-                const li = document.createElement('li');
-                const count = files.filter(f => f.webkitRelativePath.startsWith(folder + '/')).length;
-                li.innerHTML = `<span>📁 ${folder}</span><span>${count} файлов</span>`;
-                fileListContent.appendChild(li);
-            });
-            selectedInfo.textContent = `✅ Найдено ${sortedFolders.length} папок, ${files.length} файлов`;
-            fileList.style.display = 'block';
-            totalFolders = sortedFolders.length;
+const dropZone = document.getElementById('dropZone');
+const folderInput = document.getElementById('folderInput');
+
+dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('dragover'); });
+dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    const items = e.dataTransfer.items;
+    const files = [];
+    let pending = 0;
+    for (let item of items) {
+        if (item.kind === 'file') {
+            const entry = item.webkitGetAsEntry();
+            if (entry) { pending++; readDirectoryRecursive(entry, '', files, () => { pending--; if (pending === 0) { selectedFiles = files; displayFiles(selectedFiles); } }); }
         }
+    }
+    if (pending === 0 && files.length > 0) { selectedFiles = files; displayFiles(selectedFiles); }
+});
 
-        function addLog(msg) {
-            logDiv.style.display = 'block';
-            logDiv.textContent += msg + '\\n';
-            logDiv.scrollTop = logDiv.scrollHeight;
+folderInput.addEventListener('change', (e) => {
+    const files = Array.from(e.target.files);
+    if (files.length > 0) { selectedFiles = files; displayFiles(selectedFiles); }
+});
+
+function compressImage(file, maxWidth = 1920, maxHeight = 1920, quality = 0.85) {
+    return new Promise((resolve, reject) => {
+        if (file.size > 20 * 1024 * 1024) { reject(new Error('Файл слишком большой')); return; }
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            const img = new Image();
+            img.onload = function() {
+                let w = img.width, h = img.height;
+                if (w > maxWidth) { h = (h * maxWidth) / w; w = maxWidth; }
+                if (h > maxHeight) { w = (w * maxHeight) / h; h = maxHeight; }
+                const canvas = document.createElement('canvas');
+                canvas.width = w; canvas.height = h;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, w, h);
+                canvas.toBlob((blob) => {
+                    if (blob) { resolve(new File([blob], file.name, { type: 'image/jpeg', lastModified: Date.now() })); }
+                    else { reject(new Error('Не удалось сжать')); }
+                }, 'image/jpeg', quality);
+            };
+            img.onerror = reject;
+            img.src = e.target.result;
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+    });
+}
+
+function displayFiles(files) {
+    const container = document.getElementById('fileListContent');
+    container.innerHTML = '';
+    const folders = new Map();
+    files.forEach(f => {
+        const parts = f.webkitRelativePath.split('/');
+        if (parts.length >= 2) {
+            const root = parts[0];
+            const sub = parts.length > 2 ? parts.slice(1, -1).join('/') : 'root';
+            const key = root + '/' + sub;
+            if (!folders.has(key)) { folders.set(key, { root: root, sub: sub, display: sub === 'root' ? root : root + '/' + sub, count: 0, files: [] }); }
+            folders.get(key).count++;
+            folders.get(key).files.push(f);
         }
+    });
+    const sorted = Array.from(folders.values()).sort((a, b) => a.display.localeCompare(b.display));
+    folderQueue = sorted.map(f => ({ name: f.display, status: 'pending', count: f.count, files: f.files }));
+    sorted.forEach(folder => {
+        const li = document.createElement('li');
+        const isSub = folder.sub !== 'root';
+        li.innerHTML = `<span>${isSub ? '📂' : '📁'} <strong>${folder.display}</strong></span><span><span class="count">${folder.count} файлов</span><span class="status-badge pending" id="st-${folder.display.replace(/\\//g,'-')}">⏳</span></span>`;
+        li.style.borderLeftColor = isSub ? '#28a745' : '#007bff';
+        container.appendChild(li);
+    });
+    document.getElementById('selectedInfo').textContent = `✅ Найдено ${sorted.length} папок, ${files.length} файлов`;
+    document.getElementById('fileList').style.display = 'block';
+    updateQueueStatus();
+    totalFolders = sorted.length;
+}
 
-        function showStatus(type, msg) {
-            statusDiv.className = 'status ' + type;
-            statusDiv.textContent = msg;
-            statusDiv.style.display = 'block';
+function updateQueueStatus() {
+    const done = folderQueue.filter(f => f.status === 'done').length;
+    const errors = folderQueue.filter(f => f.status === 'error').length;
+    const total = folderQueue.length;
+    document.getElementById('queueStatus').textContent = isProcessing ? `🔄 ${done+errors}/${total}` : `📋 ${done}/${total}`;
+    if (errors > 0) document.getElementById('queueStatus').textContent += ` ⚠️${errors}`;
+}
+
+function updateFolderStatus(name, status) {
+    const idx = folderQueue.findIndex(f => f.name === name);
+    if (idx !== -1) {
+        folderQueue[idx].status = status;
+        updateQueueStatus();
+        const badge = document.getElementById('st-' + name.replace(/\\//g,'-'));
+        if (badge) {
+            badge.className = 'status-badge ' + status;
+            badge.textContent = status === 'pending' ? '⏳' : status === 'processing' ? '🔄' : status === 'done' ? '✅' : '❌';
         }
+    }
+}
 
-        function getReport() { window.open(`/report/${userId}`, '_blank'); }
+function addLog(msg) {
+    const log = document.getElementById('log');
+    log.style.display = 'block';
+    log.textContent += msg + '\\n';
+    log.scrollTop = log.scrollHeight;
+}
 
-        function clearFiles() {
-            selectedFiles = [];
-            fileList.style.display = 'none';
-            statusDiv.style.display = 'none';
-            progressBar.style.display = 'none';
-            logDiv.style.display = 'none';
-            progress.style.width = '0%';
-            folderInput.value = '';
-        }
+function showStatus(type, msg) {
+    const s = document.getElementById('status');
+    s.className = 'status ' + type;
+    s.textContent = msg;
+    s.style.display = 'block';
+}
 
-        async function uploadFolder() {
-            if (selectedFiles.length === 0) {
-                showStatus('error', '❌ Выберите папку');
-                return;
+function getReport() { window.open('/report/' + userId, '_blank'); }
+
+function clearFiles() {
+    if (isProcessing && !confirm('Остановить?')) return;
+    selectedFiles = []; folderQueue = [];
+    document.getElementById('fileList').style.display = 'none';
+    document.getElementById('status').style.display = 'none';
+    document.getElementById('progressBar').style.display = 'none';
+    document.getElementById('log').style.display = 'none';
+    document.getElementById('progress').style.width = '0%';
+    document.getElementById('progress').textContent = '0%';
+    folderInput.value = '';
+    isProcessing = false;
+}
+
+async function uploadFolder() {
+    if (selectedFiles.length === 0) { showStatus('error', '❌ Выберите папку'); return; }
+    if (isProcessing) { addLog('⚠️ Уже выполняется'); return; }
+    
+    isProcessing = true;
+    const maxPhotos = parseInt(document.getElementById('maxPhotos').value) || 6;
+    const delay = parseInt(document.getElementById('delayBetween').value) || 3;
+    
+    document.getElementById('progressBar').style.display = 'block';
+    document.getElementById('progress').style.width = '0%';
+    document.getElementById('progress').textContent = '0%';
+    document.getElementById('log').textContent = '';
+    addLog('🚀 Загрузка ' + totalFolders + ' папок по одной...');
+    
+    let processed = 0, totalImages = 0, errors = 0;
+    
+    for (let idx = 0; idx < folderQueue.length; idx++) {
+        const folder = folderQueue[idx];
+        const name = folder.name;
+        const files = folder.files;
+        
+        updateFolderStatus(name, 'processing');
+        addLog('📂 [' + (idx+1) + '/' + totalFolders + '] ' + name);
+        
+        let infoFile = null, imageFiles = [];
+        for (const f of files) {
+            const fn = f.name.toLowerCase();
+            if (fn.endsWith('.txt') && fn.includes('info')) infoFile = f;
+            else if (fn.match(/\\.(jpg|jpeg|png|gif|bmp|webp)$/)) {
+                if (f.size > 5 * 1024 * 1024) { addLog('⚠️ ' + f.name + ' слишком большой, пропускаем'); continue; }
+                imageFiles.push(f);
             }
-            if (isProcessing) {
-                addLog('⚠️ Уже выполняется');
-                return;
+        }
+        
+        if (!infoFile) { addLog('⚠️ Нет info.txt в ' + name); updateFolderStatus(name, 'error'); errors++; processed++; updateProgress(processed); continue; }
+        
+        const selected = imageFiles.slice(0, Math.min(maxPhotos, 10));
+        addLog('📸 ' + selected.length + ' фото');
+        
+        const compressed = [];
+        for (let i = 0; i < selected.length; i++) {
+            try {
+                addLog('🔄 Сжатие ' + (i+1) + '/' + selected.length + ': ' + selected[i].name);
+                const img = await compressImage(selected[i], 1920, 1920, 0.85);
+                compressed.push(img);
+                totalImages++;
+            } catch(e) { addLog('⚠️ Ошибка сжатия: ' + e.message); }
+        }
+        
+        const infoText = await infoFile.text();
+        const formData = new FormData();
+        formData.append('user_id', userId);
+        formData.append('max_photos', maxPhotos);
+        formData.append('folders[]', JSON.stringify({ name: name, adText: infoText.substring(0,5000), imageCount: compressed.length }));
+        for (let i = 0; i < compressed.length; i++) {
+            formData.append('images_' + name + '_' + i, compressed[i], compressed[i].name);
+        }
+        
+        try {
+            addLog('📤 Отправка ' + (idx+1) + '/' + totalFolders + '...');
+            const resp = await fetch('/upload_folders', { method: 'POST', body: formData });
+            if (!resp.ok) { const t = await resp.text(); throw new Error('HTTP ' + resp.status + ': ' + t.substring(0,100)); }
+            const result = await resp.json();
+            if (!result.success) throw new Error(result.message || 'Ошибка');
+            updateFolderStatus(name, 'done');
+            addLog('✅ Папка ' + name + ' опубликована');
+        } catch(e) {
+            updateFolderStatus(name, 'error');
+            errors++;
+            addLog('❌ ' + e.message);
+        }
+        
+        processed++;
+        updateProgress(processed);
+        
+        if (idx < folderQueue.length - 1) {
+            addLog('⏳ Задержка ' + delay + ' сек...');
+            await new Promise(r => setTimeout(r, delay * 1000));
+        }
+    }
+    
+    isProcessing = false;
+    addLog('✅ Готово! ' + (totalFolders - errors) + ' папок загружено, ' + errors + ' с ошибками');
+    addLog('📊 Всего фото: ' + totalImages);
+    if (errors === 0) { showStatus('success', '✅ Загружено ' + totalFolders + ' папок!'); }
+    else { showStatus('warning', '⚠️ Загружено ' + (totalFolders - errors) + ' папок, ' + errors + ' с ошибками'); }
+    if (totalFolders - errors > 0) { addLog('📊 Скачать отчет: /report/' + userId); }
+}
+
+function updateProgress(processed) {
+    const pct = Math.round((processed / totalFolders) * 100);
+    document.getElementById('progress').style.width = pct + '%';
+    document.getElementById('progress').textContent = pct + '%';
+}
+</script>
+</body>
+</html>
+'''
+
+# ========== МАРШРУТЫ ==========
+
+@app.route('/')
+def index():
+    return "🤖 MAX Bot is running!"
+
+@app.route('/upload', methods=['GET'])
+def upload_page():
+    return render_template_string(UPLOAD_PAGE)
+
+@app.route('/upload_folders', methods=['POST', 'OPTIONS'])
+def upload_folders():
+    try:
+        if request.method == 'OPTIONS':
+            return '', 200
+        
+        user_id = request.form.get('user_id', type=int)
+        if not user_id:
+            return jsonify({'success': False, 'message': 'Нет user_id'}), 400
+        
+        max_photos = request.form.get('max_photos', 6, type=int)
+        max_photos = max(1, min(10, max_photos))
+        
+        folders_info = request.form.getlist('folders[]')
+        if not folders_info:
+            return jsonify({'success': False, 'message': 'Нет данных'}), 400
+        
+        folder_json = folders_info[0]
+        folder_data = json.loads(folder_json)
+        folder_name = folder_data.get('name', 'folder')
+        ad_text = folder_data.get('adText', '')
+        image_count = folder_data.get('imageCount', 0)
+        
+        MAX_IMAGE_SIZE = 5 * 1024 * 1024
+        images = []
+        
+        for i in range(min(image_count, max_photos)):
+            field_name = f'images_{folder_name}_{i}'
+            if field_name in request.files:
+                img_file = request.files[field_name]
+                img_data = img_file.read()
+                if len(img_data) > MAX_IMAGE_SIZE:
+                    continue
+                if img_data:
+                    img_base64 = base64.b64encode(img_data).decode('ascii')
+                    images.append({
+                        'name': img_file.filename,
+                        'data': img_base64,
+                        'type': img_file.content_type or 'image/jpeg'
+                    })
+                    del img_data
+                    gc.collect()
+        
+        metadata_text = ''
+        if '#изъятая' in ad_text:
+            parts = ad_text.split('#изъятая')
+            ad_text = parts[0].strip()
+            metadata_text = parts[1] if len(parts) > 1 else ''
+        
+        success, message = publisher.publish_single_folder(
+            user_id, folder_name, ad_text, metadata_text, images
+        )
+        
+        del images
+        gc.collect()
+        
+        if success:
+            return jsonify({
+                'success': True,
+                'message': message,
+                'job_ids': ['sync'],
+                'total_folders': 1,
+                'total_images': len(images)
+            })
+        else:
+            return jsonify({'success': False, 'message': message}), 500
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"ok": True}), 200
+        
+        user_id = None
+        text = None
+        
+        if 'message' in data:
+            msg = data['message']
+            if 'sender' in msg:
+                user_id = msg['sender'].get('user_id')
+            if 'body' in msg:
+                text = msg['body'].get('text')
+        
+        if not user_id:
+            return jsonify({"ok": True}), 200
+        
+        if text and text.strip() == '/start':
+            url = f"{MAX_API_URL}/messages?user_id={user_id}"
+            payload = {
+                "text": "🏠 **Главное меню**\n\n🌐 **Загрузить папку:**\n🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n📊 **Получить отчет:**\n🔗 https://maxbot.bothost.tech/report/{user_id}",
+                "format": "markdown"
             }
-            
-            isProcessing = true;
-            const maxPhotos = parseInt(document.getElementById('maxPhotos').value) || 6;
-            
-            const folders = {};
-            selectedFiles.forEach(f => {
-                const parts = f.webkitRelativePath.split('/');
-                if (parts.length >= 2) {
-                    const folderName = parts[0];
-                    if (!fold
+            headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
+            requests.post(url, headers=headers, json=payload, timeout=30, verify=False)
+            return jsonify({"ok": True}), 200
+        
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        logger.error(f"❌ Ошибка: {e}")
+        return jsonify({"ok": False}), 500
+
+@app.route('/report/<int:user_id>')
+def report_page(user_id):
+    report_path = report_gen.generate_report(user_id)
+    if not report_path:
+        return "❌ Нет данных для отчета", 404
+    filename = os.path.basename(report_path)
+    return f"""
+    <html>
+    <body style="text-align:center;padding:50px;font-family:Arial;">
+        <h1>📊 Отчет готов!</h1>
+        <p><a href="/download_report/{user_id}/{filename}" style="padding:12px 30px;background:#28a745;color:white;text-decoration:none;border-radius:5px;">📥 Скачать</a></p>
+        <p><a href="/upload">⬅️ Вернуться</a></p>
+    </body>
+    </html>
+    """
+
+@app.route('/download_report/<int:user_id>/<path:filename>')
+def download_report(user_id, filename):
+    try:
+        user_folder = fm.get_user_folder(user_id)
+        file_path = os.path.join(user_folder, filename)
+        if not os.path.exists(file_path):
+            return "❌ Файл не найден", 404
+        return send_file(file_path, as_attachment=True, download_name=filename)
+    except Exception as e:
+        return str(e), 500
+
+@app.route('/health')
+def health():
+    return {"status": "ok", "database": "SQLite"}
+
+@app.route('/status')
+def status():
+    return {"status": "running", "token_set": bool(TOKEN)}
+
+# ========== ЗАПУСК ==========
+# НЕТ if __name__ == "__main__" - ТОЛЬКО ДЛЯ GUNICORN!
