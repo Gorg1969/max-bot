@@ -17,7 +17,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")
-app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200MB
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB - уменьшили для безопасности
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -125,7 +125,7 @@ api = APIClient()
 publisher = Publisher(api, fm, db)
 report_gen = ReportGenerator(fm, db)
 
-# ========== HTML СТРАНИЦА ЗАГРУЗКИ ==========
+# ========== HTML СТРАНИЦА С CHUNKED UPLOAD ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -190,6 +190,7 @@ UPLOAD_PAGE = """
         .stats .stat.success-stat .num { color: #28a745; }
         .stats .stat.error-stat .num { color: #dc3545; }
         .stats .stat.total-stat .num { color: #4a6fa5; }
+        .chunk-info { font-size: 12px; color: #666; margin-top: 5px; }
         @media (max-width: 600px) {
             body { padding: 10px; margin: 10px; }
             .container { padding: 15px; }
@@ -221,6 +222,7 @@ UPLOAD_PAGE = """
             <p style="font-size: 14px; color: #888;">или</p>
             <button class="btn btn-primary" onclick="document.getElementById('folderInput').click()">Выбрать папку</button>
             <input type="file" id="folderInput" webkitdirectory multiple>
+            <div class="chunk-info">📦 Загрузка по частям (макс. 50MB за раз)</div>
         </div>
         
         <div id="fileList" style="display:none;">
@@ -277,6 +279,7 @@ UPLOAD_PAGE = """
     <script>
         const urlParams = new URLSearchParams(window.location.search);
         const userId = urlParams.get('user_id') || 151296248;
+        const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB чанки для безопасности
         
         let selectedFiles = [];
         let isProcessing = false;
@@ -430,8 +433,8 @@ UPLOAD_PAGE = """
             }
         }
 
-        // Функция сжатия изображения на клиенте
-        function compressImage(file, maxWidth = 800, maxHeight = 800, quality = 0.75) {
+        // ===== СИЛЬНОЕ СЖАТИЕ ИЗОБРАЖЕНИЙ =====
+        function compressImage(file, maxWidth = 500, maxHeight = 500, quality = 0.5) {
             return new Promise((resolve, reject) => {
                 const reader = new FileReader();
                 reader.readAsDataURL(file);
@@ -443,6 +446,7 @@ UPLOAD_PAGE = """
                         let width = img.width;
                         let height = img.height;
                         
+                        // Сильное уменьшение
                         if (width > height) {
                             if (width > maxWidth) {
                                 height = height * (maxWidth / width);
@@ -460,14 +464,12 @@ UPLOAD_PAGE = """
                         const ctx = canvas.getContext('2d');
                         ctx.drawImage(img, 0, 0, width, height);
                         
-                        let mimeType = file.type || 'image/jpeg';
-                        if (mimeType === 'image/png') {
-                            mimeType = 'image/jpeg';
-                        }
+                        // Всегда конвертируем в JPEG для лучшего сжатия
+                        const mimeType = 'image/jpeg';
                         
                         canvas.toBlob((blob) => {
                             if (blob) {
-                                const compressedFile = new File([blob], file.name, {
+                                const compressedFile = new File([blob], file.name.replace(/\\.[^.]+$/, '.jpg'), {
                                     type: mimeType,
                                     lastModified: Date.now()
                                 });
@@ -483,6 +485,45 @@ UPLOAD_PAGE = """
             });
         }
 
+        // ===== ЗАГРУЗКА ФАЙЛА ПО ЧАСТЯМ =====
+        async function uploadFileInChunks(file, folderName, fileName) {
+            const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+            
+            for (let i = 0; i < totalChunks; i++) {
+                if (isStopped) {
+                    throw new Error('Остановка пользователем');
+                }
+                
+                const start = i * CHUNK_SIZE;
+                const end = Math.min(start + CHUNK_SIZE, file.size);
+                const chunk = file.slice(start, end);
+                
+                const formData = new FormData();
+                formData.append('chunk', chunk);
+                formData.append('chunk_index', i);
+                formData.append('total_chunks', totalChunks);
+                formData.append('user_id', userId);
+                formData.append('folder_name', folderName);
+                formData.append('file_name', fileName);
+                
+                const response = await fetch('/upload_chunk', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                if (!result.success) {
+                    throw new Error(result.message || 'Ошибка загрузки чанка');
+                }
+                
+                // Показываем прогресс загрузки
+                const chunkPercent = Math.round(((i + 1) / totalChunks) * 100);
+                addLog(`📦 Чанк ${i+1}/${totalChunks} (${chunkPercent}%) файла ${fileName}`);
+            }
+            
+            return true;
+        }
+
         async function stopProcessing() {
             if (!isProcessing) {
                 showStatus('warning', '⚠️ Нет активных процессов для остановки');
@@ -490,7 +531,7 @@ UPLOAD_PAGE = """
             }
             
             isStopped = true;
-            showStatus('stop', '⏹ Остановка... Ожидайте завершения текущей операции');
+            showStatus('stop', '⏹ Остановка...');
             addLog('⏹ ПОЛУЧЕНА КОМАНДА ОСТАНОВКИ');
             
             try {
@@ -539,9 +580,17 @@ UPLOAD_PAGE = """
             const images = [];
             for (const img of imageFiles) {
                 try {
-                    // Сжимаем изображение перед отправкой
-                    const compressed = await compressImage(img, 800, 800, 0.75);
+                    // СИЛЬНОЕ СЖАТИЕ
+                    const compressed = await compressImage(img, 500, 500, 0.5);
                     
+                    // Загружаем сжатое изображение по частям
+                    const uploadSuccess = await uploadFileInChunks(compressed, folderName, compressed.name);
+                    
+                    if (!uploadSuccess) {
+                        throw new Error('Не удалось загрузить файл по частям');
+                    }
+                    
+                    // Читаем сжатое изображение для отправки на сервер
                     const reader = new FileReader();
                     const dataUrl = await new Promise((resolve) => {
                         reader.onload = (e) => resolve(e.target.result);
@@ -556,22 +605,25 @@ UPLOAD_PAGE = """
                         compressedSize: compressed.size
                     });
                     
-                    addLog(`✅ Фото ${img.name} сжато: ${(img.size/1024).toFixed(0)}KB -> ${(compressed.size/1024).toFixed(0)}KB`);
+                    addLog(`✅ Фото ${img.name} сжато: ${(img.size/1024).toFixed(0)}KB -> ${(compressed.size/1024).toFixed(0)}KB (${Math.round((compressed.size/img.size)*100)}%)`);
                 } catch (e) {
-                    addLog(`⚠️ Ошибка сжатия ${img.name}: ${e.message}, используем оригинал`);
+                    addLog(`⚠️ Ошибка обработки ${img.name}: ${e.message}`);
+                    // Пробуем загрузить оригинал с сильным сжатием
                     try {
+                        const compressed = await compressImage(img, 400, 400, 0.4);
                         const reader = new FileReader();
                         const dataUrl = await new Promise((resolve) => {
                             reader.onload = (e) => resolve(e.target.result);
-                            reader.readAsDataURL(img);
+                            reader.readAsDataURL(compressed);
                         });
                         images.push({
-                            name: img.name,
+                            name: compressed.name,
                             data: dataUrl,
-                            type: img.type || 'image/jpeg'
+                            type: compressed.type || 'image/jpeg'
                         });
+                        addLog(`✅ Фото ${img.name} сжато (повторно): ${(compressed.size/1024).toFixed(0)}KB`);
                     } catch (e2) {
-                        addLog(`⚠️ Ошибка чтения ${img.name}: ${e2.message}`);
+                        addLog(`⚠️ Не удалось обработать ${img.name}: ${e2.message}`);
                     }
                 }
             }
@@ -638,7 +690,7 @@ UPLOAD_PAGE = """
             
             for (let i = 0; i < folderNames.length; i++) {
                 if (isStopped) {
-                    addLog(`⏹ ОСТАНОВЛЕНО ПОЛЬЗОВАТЕЛЕМ! Обработано ${i}/${totalFolders} папок`);
+                    addLog(`⏹ ОСТАНОВЛЕНО! Обработано ${i}/${totalFolders} папок`);
                     break;
                 }
                 
@@ -710,7 +762,7 @@ UPLOAD_PAGE = """
                 progress.textContent = `${processedCount}/${totalFolders} (Остановлено)`;
                 progress.className = 'progress stopped';
                 showStatus('stop', `⏹ Остановлено! Обработано ${processedCount}/${totalFolders} папок`);
-                addLog(`⏹ ПРОЦЕСС ОСТАНОВЛЕН ПОЛЬЗОВАТЕЛЕМ`);
+                addLog(`⏹ ПРОЦЕСС ОСТАНОВЛЕН`);
                 addLog(`📊 Обработано: ${successCount} успешно, ${errorCount} с ошибками`);
                 isProcessing = false;
                 return;
@@ -757,6 +809,62 @@ def index():
 @app.route('/upload', methods=['GET'])
 def upload_page():
     return render_template_string(UPLOAD_PAGE)
+
+# ===== ЗАГРУЗКА ПО ЧАСТЯМ =====
+@app.route('/upload_chunk', methods=['POST'])
+def upload_chunk():
+    """Загрузка файла по частям"""
+    try:
+        chunk = request.files.get('chunk')
+        chunk_index = request.form.get('chunk_index', 0)
+        total_chunks = request.form.get('total_chunks', 1)
+        user_id = request.form.get('user_id')
+        folder_name = request.form.get('folder_name')
+        file_name = request.form.get('file_name', 'image.jpg')
+        
+        if not chunk:
+            return jsonify({'success': False, 'message': 'Нет данных'}), 400
+        
+        if not user_id:
+            return jsonify({'success': False, 'message': 'Нет user_id'}), 400
+        
+        # Создаем временную папку для пользователя
+        temp_dir = os.path.join(DATA_DIR, 'temp', str(user_id), folder_name)
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # Сохраняем чанк
+        chunk_filename = f"{file_name}.part_{chunk_index}"
+        chunk_path = os.path.join(temp_dir, chunk_filename)
+        chunk.save(chunk_path)
+        
+        # Если это последний чанк - собираем файл
+        if int(chunk_index) == int(total_chunks) - 1:
+            # Собираем все чанки в один файл
+            final_path = os.path.join(temp_dir, file_name)
+            with open(final_path, 'wb') as outfile:
+                for i in range(int(total_chunks)):
+                    part_file = os.path.join(temp_dir, f"{file_name}.part_{i}")
+                    if os.path.exists(part_file):
+                        with open(part_file, 'rb') as infile:
+                            outfile.write(infile.read())
+                        os.remove(part_file)
+            
+            # Проверяем размер собранного файла
+            file_size = os.path.getsize(final_path)
+            logger.info(f"📦 Собран файл {file_name} размером {file_size} байт")
+            
+            return jsonify({
+                'success': True,
+                'message': 'Файл собран',
+                'path': final_path,
+                'size': file_size
+            })
+        
+        return jsonify({'success': True, 'message': f'Чанк {chunk_index} загружен'})
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки чанка: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/publish_folder', methods=['POST'])
 def publish_folder():
@@ -807,6 +915,15 @@ def publish_folder():
             user_id, folder_name, ad_text, metadata_text, processed_images
         )
         
+        # Очищаем временные файлы после публикации
+        try:
+            temp_dir = os.path.join(DATA_DIR, 'temp', str(user_id), folder_name)
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+                logger.info(f"🗑️ Удалена временная папка: {temp_dir}")
+        except Exception as e:
+            logger.error(f"⚠️ Ошибка удаления временных файлов: {e}")
+        
         if success:
             return jsonify({'success': True, 'message': message})
         else:
@@ -837,7 +954,16 @@ def stop_processing():
         except Exception as e:
             logger.error(f"⚠️ Ошибка очистки временных файлов: {e}")
         
-        # 3. Очищаем очередь в глобальной переменной
+        # 3. Очищаем временные папки загрузки
+        try:
+            temp_dir = os.path.join(DATA_DIR, 'temp', str(user_id))
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+                logger.info(f"🗑️ Удалена временная папка загрузки: {temp_dir}")
+        except Exception as e:
+            logger.error(f"⚠️ Ошибка удаления временных файлов: {e}")
+        
+        # 4. Очищаем очередь
         with queue_lock:
             if user_id in active_queues:
                 queue_size = len(active_queues[user_id].get('queue', []))
@@ -854,7 +980,7 @@ def stop_processing():
                     'stop_flag': True
                 }
         
-        # 4. Отправляем подтверждение пользователю
+        # 5. Отправляем подтверждение
         api.send_message(
             user_id, 
             "⏹️ **Публикация остановлена!**\n\n"
@@ -917,6 +1043,14 @@ def webhook():
         if text and text.strip() == '/stop':
             publisher.stop(user_id)
             fm.clear_temp_files(user_id)
+            
+            # Очищаем временные папки загрузки
+            try:
+                temp_dir = os.path.join(DATA_DIR, 'temp', str(user_id))
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
+            except:
+                pass
             
             with queue_lock:
                 if user_id in active_queues:
@@ -1096,6 +1230,19 @@ def setup_webhook():
             return f"❌ Ошибка: {r.status_code} - {r.text}"
     except Exception as e:
         return f"❌ Ошибка: {e}"
+
+@app.route('/cleanup_temp', methods=['POST'])
+def cleanup_temp():
+    """Очистка всех временных файлов"""
+    try:
+        temp_dir = os.path.join(DATA_DIR, 'temp')
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+            os.makedirs(temp_dir, exist_ok=True)
+            return jsonify({'success': True, 'message': 'Временные файлы очищены'})
+        return jsonify({'success': True, 'message': 'Нет временных файлов'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.errorhandler(Exception)
 def handle_all_exceptions(error):
