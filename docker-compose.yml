@@ -8,23 +8,20 @@ services:
     ports:
       - "3000:3000"
     environment:
-      # Основные переменные
       - MAX_TOKEN=${MAX_TOKEN}
       - MAX_BOT_TOKEN=${MAX_BOT_TOKEN}
       - TOKEN=${TOKEN}
       - DATA_DIR=/app/data
       - MAX_API_URL=https://platform-api2.max.ru
-      - BASE_URL=https://maxbot.bothost.tech
-      - SECRET_KEY=${SECRET_KEY:-dev_secret_key}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - BASE_URL=${BASE_URL}
+      - SECRET_KEY=${SECRET_KEY}
+      - LOG_LEVEL=INFO
       - PORT=3000
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=/app/data/maxbot.db
-      - GUNICORN_WORKERS=3
+      - GUNICORN_WORKERS=1
       - GUNICORN_THREADS=4
-      
-      # ⭐ SSL НАСТРОЙКИ ⭐
-      - SSL_VERIFY=true
+      - SSL_VERIFY=${SSL_VERIFY:-true}
       - SSL_CERT_CONTENT=${SSL_CERT_CONTENT}
     volumes:
       - ./data:/app/data
