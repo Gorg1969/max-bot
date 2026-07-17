@@ -1,3 +1,5 @@
+# docker-compose.yml
+
 version: '3.8'
 
 services:
@@ -10,6 +12,11 @@ services:
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   web:
     build: .
@@ -18,15 +25,21 @@ services:
     ports:
       - "3000:3000"
     environment:
+      # ✅ ТОЛЬКО ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ (без .env файла)
       - MAX_TOKEN=${MAX_TOKEN}
+      - MAX_BOT_TOKEN=${MAX_BOT_TOKEN}
+      - TOKEN=${TOKEN}
       - REDIS_URL=redis://redis:6379/0
       - DATA_DIR=/app/data
+      - MAX_API_URL=https://platform-api2.max.ru
       - SECRET_KEY=${SECRET_KEY:-dev_secret_key}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PORT=3000
     volumes:
       - ./data:/app/data
-      - ./modules:/app/modules
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     command: gunicorn -c gunicorn.conf.py app:app
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
@@ -39,14 +52,19 @@ services:
     container_name: maxbot-worker
     restart: unless-stopped
     environment:
+      # ✅ ТОЛЬКО ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ (без .env файла)
       - MAX_TOKEN=${MAX_TOKEN}
+      - MAX_BOT_TOKEN=${MAX_BOT_TOKEN}
+      - TOKEN=${TOKEN}
       - REDIS_URL=redis://redis:6379/0
       - DATA_DIR=/app/data
+      - MAX_API_URL=https://platform-api2.max.ru
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       - ./data:/app/data
-      - ./modules:/app/modules
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     command: python worker.py
     healthcheck:
       test: ["CMD", "python", "-c", "import redis; redis.Redis.from_url('redis://redis:6379/0').ping()"]
