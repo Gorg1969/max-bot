@@ -1,4 +1,4 @@
-# app.py - РАБОЧАЯ ВЕРСИЯ (НИЧЕГО НЕ МЕНЯЕМ!)
+# app.py - РАБОЧАЯ ВЕРСИЯ
 
 from flask import Flask, request, jsonify, render_template_string, send_file
 import os
@@ -30,11 +30,11 @@ def after_request(response):
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ========== ПЕРЕМЕННЫЕ (БЕЗ ИЗМЕНЕНИЙ!) ==========
+# ========== ПЕРЕМЕННЫЕ ==========
 TOKEN = os.environ.get("MAX_TOKEN") or os.environ.get("MAX_BOT_TOKEN") or os.environ.get("TOKEN")
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 MAX_API_URL = os.environ.get("MAX_API_URL", "https://platform-api2.max.ru")
-BASE_URL = os.environ.get("BASE_URL", "https://platform-api2.max.ru")  # ОСТАВЛЯЕМ КАК ЕСТЬ!
+BASE_URL = os.environ.get("BASE_URL", "https://platform-api2.max.ru")
 
 if not TOKEN:
     logger.error("❌ ТОКЕН НЕ НАЙДЕН!")
@@ -61,17 +61,21 @@ def init_app():
         fm = FileManager(DATA_DIR)
         report_gen = ReportGenerator(fm, db)
         
+        # ========== СОЗДАЕМ APIClient ==========
         class APIClient:
             def __init__(self):
                 self.token = TOKEN
                 self.base_url = MAX_API_URL
                 self.verify = False
         
+        # ========== ПЕРЕДАЕМ В PUBLISHER ==========
         publisher = Publisher(APIClient(), fm, db)
-        logger.info("✅ Готово!")
+        
+        logger.info(f"✅ Готово! BASE_URL: {MAX_API_URL}")
         return True
     except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
+        logger.error(f"❌ Ошибка инициализации: {e}")
+        logger.error(traceback.format_exc())
         return False
 
 # ========== СТРАНИЦА ==========
@@ -504,7 +508,7 @@ function updateProgress(processed) {
 </html>
 '''
 
-# ========== МАРШРУТЫ (БЕЗ ИЗМЕНЕНИЙ!) ==========
+# ========== МАРШРУТЫ ==========
 
 @app.route('/')
 def index():
@@ -636,9 +640,6 @@ def webhook():
             
             stats = db.get_user_stats(user_id) if db else {'total': 0, 'success': 0, 'errors': 0}
             
-            # ========== ЗДЕСЬ ВАЖНО! ==========
-            # Используем BASE_URL как есть (https://platform-api2.max.ru)
-            # Но добавляем /upload
             upload_url = f"{BASE_URL}/upload?user_id={user_id}"
             
             message_text = (
@@ -761,6 +762,19 @@ def status():
         "base_url": BASE_URL,
         "modules_initialized": db is not None
     }
+
+@app.route('/test_publisher')
+def test_publisher():
+    """Тестовый маршрут для проверки Publisher"""
+    if publisher is None:
+        init_app()
+    
+    return jsonify({
+        "publisher_initialized": publisher is not None,
+        "api_token_set": bool(publisher.api.token) if publisher else False,
+        "api_base_url": publisher.api.base_url if publisher else None,
+        "status": "ok"
+    })
 
 # ========== ЗАПУСК ==========
 init_app()
