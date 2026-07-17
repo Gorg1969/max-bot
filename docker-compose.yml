@@ -8,6 +8,7 @@ services:
     ports:
       - "3000:3000"
     environment:
+      # Основные переменные
       - MAX_TOKEN=${MAX_TOKEN}
       - MAX_BOT_TOKEN=${MAX_BOT_TOKEN}
       - TOKEN=${TOKEN}
@@ -19,8 +20,12 @@ services:
       - PORT=3000
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=/app/data/maxbot.db
-      - GUNICORN_WORKERS=3  # 3 воркера для нескольких пользователей
-      - GUNICORN_THREADS=4  # 4 потока на воркер
+      - GUNICORN_WORKERS=3
+      - GUNICORN_THREADS=4
+      
+      # ⭐ SSL НАСТРОЙКИ ⭐
+      - SSL_VERIFY=true
+      - SSL_CERT_CONTENT=${SSL_CERT_CONTENT}
     volumes:
       - ./data:/app/data
     command: gunicorn -c gunicorn.conf.py app:app
