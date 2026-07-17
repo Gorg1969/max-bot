@@ -1,4 +1,4 @@
-# app.py - ПОЛНАЯ ВЕРСИЯ (БЕЗ .env)
+# app.py - ПОЛНАЯ ВЕРСИЯ С POSTGRESQL
 
 from flask import Flask, request, jsonify, render_template_string, send_file
 import os
@@ -31,11 +31,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========== КОНФИГУРАЦИЯ ИЗ ОКРУЖЕНИЯ (БЕЗ .env) ==========
+# ========== КОНФИГУРАЦИЯ ИЗ ОКРУЖЕНИЯ ==========
 TOKEN = os.environ.get("MAX_TOKEN") or os.environ.get("MAX_BOT_TOKEN") or os.environ.get("TOKEN")
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
 MAX_API_URL = os.environ.get("MAX_API_URL", "https://platform-api2.max.ru")
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@postgres:5432/maxbot")
 
 if not TOKEN:
     logger.error("❌ ТОКЕН НЕ НАЙДЕН в переменных окружения!")
@@ -43,10 +44,27 @@ if not TOKEN:
 logger.info(f"✅ Токен загружен из окружения (первые 10 символов): {TOKEN[:10] if TOKEN else 'НЕТ'}...")
 logger.info(f"📁 DATA_DIR: {DATA_DIR}")
 logger.info(f"🔴 REDIS_URL: {REDIS_URL}")
+logger.info(f"🐘 DATABASE_URL: {DATABASE_URL}")
+
+# ========== ОЖИДАНИЕ ЗАПУСКА POSTGRESQL ==========
+def wait_for_postgres(max_retries=30, delay=2):
+    """Ожидание готовности PostgreSQL"""
+    import psycopg2
+    for attempt in range(max_retries):
+        try:
+            conn = psycopg2.connect(DATABASE_URL)
+            conn.close()
+            logger.info(f"✅ PostgreSQL готов! (попытка {attempt + 1})")
+            return True
+        except Exception as e:
+            logger.info(f"⏳ Ожидание PostgreSQL... (попытка {attempt + 1}/{max_retries})")
+            time.sleep(delay)
+    logger.error("❌ PostgreSQL не запустился!")
+    return False
 
 # ========== ОЖИДАНИЕ ЗАПУСКА REDIS ==========
 def wait_for_redis(max_retries=30, delay=2):
-    """Ожидание готовности Redis перед запуском приложения"""
+    """Ожидание готовности Redis"""
     for attempt in range(max_retries):
         try:
             test_conn = Redis.from_url(REDIS_URL, socket_connect_timeout=5)
@@ -60,7 +78,8 @@ def wait_for_redis(max_retries=30, delay=2):
     logger.error("❌ Redis не запустился!")
     return False
 
-# Ждем Redis перед инициализацией
+# Ждем PostgreSQL и Redis
+wait_for_postgres()
 wait_for_redis()
 
 # ========== ИНИЦИАЛИЗАЦИЯ RQ ==========
@@ -93,10 +112,9 @@ def ensure_redis():
             queue = None
     return init_redis()
 
-# Инициализируем
 init_redis()
 
-# ========== ИНИЦИАЛИЗАЦИЯ БД ==========
+# ========== ИНИЦИАЛИЗАЦИЯ БД (POSTGRESQL) ==========
 db = None
 fm = None
 report_gen = None
@@ -104,10 +122,10 @@ report_gen = None
 def init_database():
     global db, fm, report_gen
     try:
-        db = Database()
+        db = Database(DATABASE_URL)
         fm = FileManager(DATA_DIR)
         report_gen = ReportGenerator(fm, db)
-        logger.info("✅ База данных инициализирована")
+        logger.info("✅ База данных (PostgreSQL) инициализирована")
         return True
     except Exception as e:
         logger.error(f"❌ Ошибка инициализации БД: {e}")
@@ -174,7 +192,6 @@ def upload_page():
 
 @app.route('/upload_folders', methods=['POST', 'OPTIONS'])
 def upload_folders():
-    """Принимает FormData с ОДНОЙ папкой и создает задачу в RQ"""
     log_request()
     
     try:
@@ -195,7 +212,9 @@ def upload_folders():
         max_photos = max(1, min(10, max_photos))
         
         if not ensure_redis():
-            return jsonify({'success': False, 'message': 'Очередь недоступна'}), 503
+            wait_for_redis(max_retries=10, delay=2)
+            if not ensure_redis():
+                return jsonify({'success': False, 'message': 'Очередь недоступна'}), 503
         
         if not ensure_database():
             return jsonify({'success': False, 'message': 'База данных недоступна'}), 503
@@ -206,7 +225,6 @@ def upload_folders():
         if not folders_info:
             return jsonify({'success': False, 'message': 'Нет данных о папках'}), 400
         
-        # Обрабатываем ОДНУ папку (первую из списка)
         folder_json = folders_info[0]
         
         try:
@@ -395,26 +413,114 @@ def webhook():
         if not user_id:
             return jsonify({"ok": True}), 200
         
-        logger.info(f"💬 user_id={user_id}")
+        logger.info(f"💬 user_id={user_id}, text={text[:100] if text else 'empty'}")
         
         if text and text.strip() == '/start':
+            # Проверяем Redis
+            redis_ok = False
+            try:
+                if redis_conn:
+                    redis_conn.ping()
+                    redis_ok = True
+            except:
+                pass
+            
+            if not redis_ok:
+                logger.info("🔄 Redis не работает, пробуем инициализировать...")
+                wait_for_redis(max_retries=10, delay=2)
+                redis_ok = init_redis()
+            
+            # Проверяем БД
+            db_ok = ensure_database()
+            
+            queue_size = 0
+            if queue:
+                try:
+                    queue_size = len(queue.jobs)
+                except:
+                    pass
+            
+            url = f"{MAX_API_URL}/messages?user_id={user_id}"
+            headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
+            
+            if redis_ok and db_ok:
+                payload = {
+                    "text": f"🏠 **Главное меню**\n\n"
+                           f"✅ **Бот запущен и готов к работе!**\n"
+                           f"📊 Задач в очереди: {queue_size}\n"
+                           f"🐘 PostgreSQL: ✅ подключена\n\n"
+                           "🌐 **Загрузить папку:**\n"
+                           f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
+                           "📊 **Получить отчет:**\n"
+                           f"🔗 https://maxbot.bothost.tech/report/{user_id}\n\n"
+                           "⏹ **Остановить публикацию:** `/stop`\n"
+                           "📋 **Статус:** `/status`\n\n"
+                           "📋 **Инструкция:**\n"
+                           "1. Подготовьте папку с объявлениями\n"
+                           "2. В каждой подпапке: info.txt и фото\n"
+                           "3. Используйте разделитель #изъятая\n"
+                           "4. Папки отправляются по одной",
+                    "format": "markdown"
+                }
+            else:
+                payload = {
+                    "text": "⚠️ **Ошибка запуска!**\n\n"
+                           f"🔴 Redis: {'✅' if redis_ok else '❌'}\n"
+                           f"🐘 PostgreSQL: {'✅' if db_ok else '❌'}\n\n"
+                           "Попробуйте позже или обратитесь к администратору.",
+                    "format": "markdown"
+                }
+            
+            requests.post(url, headers=headers, json=payload, timeout=30, verify=False)
+            return jsonify({"ok": True}), 200
+        
+        if text and text.strip() == '/stop':
+            # Останавливаем ТОЛЬКО задачи этого пользователя
+            stopped_count = 0
+            if queue:
+                for job in queue.jobs:
+                    if job and job.args and len(job.args) > 0:
+                        if job.args[0] == user_id:
+                            job.cancel()
+                            stopped_count += 1
+            
+            if hasattr(publisher, 'stop'):
+                publisher.stop(user_id)
+            
             url = f"{MAX_API_URL}/messages?user_id={user_id}"
             payload = {
-                "text": "🏠 **Главное меню**\n\n"
-                       "🌐 **Загрузить папку:**\n"
-                       f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
-                       "📊 **Получить отчет:**\n"
-                       f"🔗 https://maxbot.bothost.tech/report/{user_id}",
+                "text": f"⏹️ **Публикация остановлена!**\n\n"
+                       f"✅ Остановлено задач: {stopped_count}\n"
+                       f"👤 Пользователь: {user_id}\n\n"
+                       "🔄 Для перезапуска нажмите /start",
                 "format": "markdown"
             }
             headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
             requests.post(url, headers=headers, json=payload, timeout=30, verify=False)
             return jsonify({"ok": True}), 200
         
-        if text and text.strip() == '/stop':
+        if text and text.strip() == '/status':
+            redis_status = "✅ работает" if redis_conn else "❌ не работает"
+            db_status = "✅ подключена" if db else "❌ недоступна"
+            queue_status = f"✅ доступна ({len(queue.jobs)} задач)" if queue else "❌ недоступна"
+            
+            user_jobs = 0
+            if queue:
+                for job in queue.jobs:
+                    if job and job.args and len(job.args) > 0 and job.args[0] == user_id:
+                        user_jobs += 1
+            
             url = f"{MAX_API_URL}/messages?user_id={user_id}"
             payload = {
-                "text": "⏹️ **Публикация остановлена!**",
+                "text": f"📊 **Статус бота**\n\n"
+                       f"👤 Ваш ID: {user_id}\n"
+                       f"📋 Ваших задач: {user_jobs}\n"
+                       f"📊 Всего задач: {len(queue.jobs) if queue else 0}\n"
+                       f"🔴 Redis: {redis_status}\n"
+                       f"🐘 PostgreSQL: {db_status}\n"
+                       f"📋 Очередь: {queue_status}\n"
+                       f"🔑 Токен: {'✅ установлен' if TOKEN else '❌ отсутствует'}\n\n"
+                       f"📁 DATA_DIR: {DATA_DIR}",
                 "format": "markdown"
             }
             headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
@@ -425,6 +531,7 @@ def webhook():
         
     except Exception as e:
         logger.error(f"❌ Ошибка вебхука: {e}")
+        logger.error(traceback.format_exc())
         return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.route('/report/<int:user_id>')
@@ -518,7 +625,7 @@ def list_routes():
         })
     return jsonify({'routes': routes, 'total': len(routes)})
 
-# ========== HTML СТРАНИЦА (сокращена для экономии места) ==========
+# ========== HTML СТРАНИЦА ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -1004,8 +1111,7 @@ UPLOAD_PAGE = """
 </html>
 """
 
-# ========== ЗАПУСК ==========
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 3000))
-    logger.warning("⚠️ ЗАПУСК В РЕЖИМЕ РАЗРАБОТКИ! Используйте Gunicorn для production!")
-    app.run(host='0.0.0.0', port=port, debug=False)
+# ============================================================
+# ⚠️ НЕТ БЛОКА if __name__ == "__main__" 
+# Это приложение ТОЛЬКО для Gunicorn!
+# ============================================================
