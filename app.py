@@ -1,4 +1,4 @@
-# app.py - ПОЛНАЯ ПЕРЕРАБОТАННАЯ ВЕРСИЯ
+# app.py - ПОЛНАЯ ВЕРСИЯ С ИСПРАВЛЕНИЯМИ
 
 from flask import Flask, request, jsonify, render_template_string, send_file
 import os
@@ -42,29 +42,47 @@ if not TOKEN:
 
 logger.info(f"✅ Токен загружен из окружения (первые 10 символов): {TOKEN[:10] if TOKEN else 'НЕТ'}...")
 
-# ========== ИНИЦИАЛИЗАЦИЯ RQ С ПРОВЕРКОЙ ==========
+# ========== ИНИЦИАЛИЗАЦИЯ RQ С РЕТРИЯМИ ==========
 redis_conn = None
 queue = None
-last_redis_attempt = 0
-REDIS_RETRY_INTERVAL = 10
 
-def init_redis():
+def init_redis_with_retry(max_retries=10, delay=3):
+    """Инициализация Redis с повторными попытками"""
     global redis_conn, queue
-    try:
-        logger.info(f"🔄 Попытка подключения к Redis: {REDIS_URL}")
-        redis_conn = Redis.from_url(REDIS_URL, socket_connect_timeout=5, socket_timeout=5)
-        redis_conn.ping()
-        queue = Queue('default', connection=redis_conn)
-        logger.info(f"✅ Подключение к Redis: {REDIS_URL}")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Ошибка подключения к Redis: {e}")
-        redis_conn = None
-        queue = None
-        return False
+    
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"🔄 Попытка {attempt + 1}/{max_retries} подключения к Redis: {REDIS_URL}")
+            redis_conn = Redis.from_url(
+                REDIS_URL,
+                socket_connect_timeout=5,
+                socket_timeout=5,
+                retry_on_timeout=True
+            )
+            redis_conn.ping()
+            queue = Queue('default', connection=redis_conn)
+            logger.info(f"✅ Подключение к Redis: {REDIS_URL}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка подключения к Redis (попытка {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                logger.info(f"⏳ Повторная попытка через {delay} секунд...")
+                time.sleep(delay)
+            else:
+                logger.error("❌ Все попытки подключения к Redis исчерпаны!")
+                redis_conn = None
+                queue = None
+                return False
+    
+    return False
+
+# Инициализируем с ретриями
+init_redis_with_retry(max_retries=5, delay=3)
 
 def ensure_redis():
-    global redis_conn, queue, last_redis_attempt
+    """Гарантирует наличие подключения к Redis"""
+    global redis_conn, queue
+    
     if redis_conn is not None:
         try:
             redis_conn.ping()
@@ -73,13 +91,10 @@ def ensure_redis():
             logger.warning(f"⚠️ Redis потерял соединение: {e}")
             redis_conn = None
             queue = None
-    current_time = time.time()
-    if current_time - last_redis_attempt > REDIS_RETRY_INTERVAL:
-        last_redis_attempt = current_time
-        return init_redis()
-    return False
-
-init_redis()
+    
+    # Пытаемся переподключиться
+    logger.info("🔄 Попытка переподключения к Redis...")
+    return init_redis_with_retry(max_retries=3, delay=2)
 
 # ========== ИНИЦИАЛИЗАЦИЯ БД С ПРОВЕРКОЙ ==========
 db = None
@@ -102,7 +117,6 @@ def ensure_database():
     global db, fm, report_gen
     if db is not None:
         try:
-            # Проверяем БД простым запросом
             db.get_publications(0, limit=1)
             return True
         except Exception as e:
@@ -230,7 +244,7 @@ def upload_folders():
                     image_count = 0
                 image_count = min(image_count, max_photos)
                 
-                # Ограничение размера: не более 5 МБ на изображение в сумме
+                # Ограничение размера: не более 5 МБ на изображение
                 MAX_IMAGE_SIZE = 5 * 1024 * 1024
                 
                 images = []
@@ -249,13 +263,12 @@ def upload_folders():
                                         continue
                                     
                                     if img_data and len(img_data) > 0:
-                                        # ✅ ИСПОЛЬЗУЕМ base64 ВМЕСТО list()
-                                        # Это экономит память и быстрее сериализуется
+                                        # Используем base64 вместо list()
                                         img_base64 = base64.b64encode(img_data).decode('ascii')
                                         
                                         images.append({
                                             'name': img_file.filename,
-                                            'data': img_base64,  # base64 строка вместо списка int
+                                            'data': img_base64,
                                             'type': img_file.content_type or 'image/jpeg',
                                             'size': len(img_data)
                                         })
@@ -277,25 +290,23 @@ def upload_folders():
                     ad_text = parts[0].strip()
                     metadata_text = parts[1] if len(parts) > 1 else ''
                 
-                # ✅ ОГРАНИЧИВАЕМ РАЗМЕР ДАННЫХ В ЗАДАЧЕ
-                # Если данных слишком много - создаем несколько задач
+                # Ограничиваем размер данных в задаче
                 MAX_TASK_SIZE = 50 * 1024 * 1024  # 50 МБ на задачу
                 
                 folder_payload = {
-                    'folderName': folder_name[:100],  # Ограничиваем длину имени
-                    'adText': ad_text[:5000],  # Ограничиваем текст
+                    'folderName': folder_name[:100],
+                    'adText': ad_text[:5000],
                     'metadataText': metadata_text[:1000],
-                    'images': images[:max_photos]  # Ограничиваем количество
+                    'images': images[:max_photos]
                 }
                 
-                # Проверяем размер задачи (приблизительно)
+                # Проверяем размер задачи
                 task_size = len(json.dumps(folder_payload))
                 if task_size > MAX_TASK_SIZE:
                     logger.warning(f"⚠️ Задача {folder_name} слишком большая: {task_size} байт, уменьшаем")
-                    # Уменьшаем количество изображений
                     folder_payload['images'] = images[:3]
                 
-                # ✅ СОЗДАЕМ ЗАДАЧУ С ТАЙМАУТОМ
+                # Создаем задачу с таймаутом
                 job = queue.enqueue(
                     process_folder_task,
                     user_id,
@@ -350,8 +361,6 @@ def job_status():
         if not job_ids:
             return jsonify({})
         
-        # ✅ НЕ ОБРЕЗАЕМ СПИСОК - возвращаем все статусы
-        # Но ограничиваем время выполнения
         result = {}
         start_time = time.time()
         MAX_STATUS_TIME = 5  # 5 секунд
@@ -653,7 +662,7 @@ UPLOAD_PAGE = """
     </div>
 
     <script>
-        // ========== КЛИЕНТСКИЙ КОД С ОГРАНИЧЕНИЯМИ ==========
+        // ========== КЛИЕНТСКИЙ КОД ==========
         const userId = new URLSearchParams(window.location.search).get('user_id') || 151296248;
         let selectedFiles = [];
         let isProcessing = false;
@@ -765,7 +774,6 @@ UPLOAD_PAGE = """
         // ========== СЖАТИЕ ИЗОБРАЖЕНИЙ ==========
         function compressImage(file, maxWidth = 1920, maxHeight = 1920, quality = 0.85) {
             return new Promise((resolve, reject) => {
-                // Проверка размера
                 if (file.size > 20 * 1024 * 1024) {
                     reject(new Error(`Файл слишком большой: ${(file.size/1024/1024).toFixed(1)} МБ`));
                     return;
@@ -922,7 +930,7 @@ UPLOAD_PAGE = """
             if (jobStatusInterval) clearInterval(jobStatusInterval);
             
             let checkCount = 0;
-            const MAX_CHECKS = 60; // 60 * 2 сек = 2 минуты
+            const MAX_CHECKS = 60;
             
             jobStatusInterval = setInterval(async () => {
                 try {
@@ -955,13 +963,6 @@ UPLOAD_PAGE = """
                     progress.style.width = pct + '%';
                     progress.textContent = pct + '%';
                     
-                    // Обновляем статусы в очереди
-                    folderQueue.forEach(f => {
-                        if (f.status === 'pending' && done + failed > 0) {
-                            // Проверяем не завершилась ли задача
-                        }
-                    });
-                    
                     if (finished >= total) {
                         clearInterval(jobStatusInterval);
                         jobStatusInterval = null;
@@ -984,7 +985,6 @@ UPLOAD_PAGE = """
                     }
                 } catch(e) { 
                     console.error(e);
-                    // При ошибке мониторинга продолжаем
                 }
             }, 2000);
         }
@@ -1008,7 +1008,6 @@ UPLOAD_PAGE = """
             formData.append('user_id', userId);
             formData.append('max_photos', maxPhotos);
             
-            // Группируем по подпапкам
             const folders = {};
             selectedFiles.forEach(f => {
                 const parts = f.webkitRelativePath.split('/');
@@ -1053,7 +1052,6 @@ UPLOAD_PAGE = """
                     if (name.endsWith('.txt') && name.includes('info')) {
                         infoFile = f;
                     } else if (name.match(/\\.(jpg|jpeg|png|gif|bmp|webp)$/)) {
-                        // Проверка размера файла
                         if (f.size > MAX_IMAGE_SIZE_MB * 1024 * 1024) {
                             addLog(`⚠️ ${f.name} слишком большой (${(f.size/1024/1024).toFixed(1)} МБ), пропускаем`);
                             continue;
@@ -1070,7 +1068,6 @@ UPLOAD_PAGE = """
                 const selectedImages = imageFiles.slice(0, Math.min(maxPhotos, MAX_IMAGES_PER_FOLDER));
                 addLog(`📂 ${folderName}: ${selectedImages.length} фото`);
                 
-                // Сжимаем изображения
                 const compressed = [];
                 for (let i = 0; i < selectedImages.length; i++) {
                     try {
@@ -1080,16 +1077,14 @@ UPLOAD_PAGE = """
                         totalImages++;
                     } catch(e) {
                         addLog(`⚠️ Ошибка сжатия: ${e.message}`);
-                        // Пропускаем проблемное изображение
                     }
                 }
                 
-                // Читаем info.txt
                 const infoContent = await infoFile.text();
                 
                 formData.append('folders[]', JSON.stringify({
                     name: folderName,
-                    adText: infoContent.substring(0, 5000), // Ограничиваем текст
+                    adText: infoContent.substring(0, 5000),
                     imageCount: compressed.length
                 }));
                 
@@ -1131,7 +1126,6 @@ UPLOAD_PAGE = """
 
 # ========== ЗАПУСК ==========
 if __name__ == "__main__":
-    # Только для разработки!
     port = int(os.environ.get("PORT", 3000))
     logger.warning("⚠️ ЗАПУСК В РЕЖИМЕ РАЗРАБОТКИ! Используйте Gunicorn для production!")
     app.run(host='0.0.0.0', port=port, debug=False)
