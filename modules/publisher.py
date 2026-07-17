@@ -7,6 +7,7 @@ import re
 import requests
 import threading
 import json
+import base64
 from datetime import datetime
 import hashlib
 
