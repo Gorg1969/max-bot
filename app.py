@@ -69,9 +69,6 @@ def log_request():
         logger.info(f"📋 Form: {dict(request.form)}")
     if request.files:
         logger.info(f"📋 Files: {list(request.files.keys())}")
-        for key, files in request.files.items():
-            for file in files:
-                logger.info(f"   📎 {key}: {file.filename} ({file.content_type})")
 
 # ========== ОБРАБОТЧИКИ ОШИБОК ==========
 @app.errorhandler(Exception)
@@ -89,8 +86,7 @@ def not_found(e):
     logger.warning(f"⚠️ 404: {request.path}")
     return jsonify({
         'success': False,
-        'message': f'Маршрут не найден: {request.path}',
-        'available_routes': [str(rule) for rule in app.url_map.iter_rules()]
+        'message': f'Маршрут не найден: {request.path}'
     }), 404
 
 @app.errorhandler(400)
@@ -121,7 +117,6 @@ def upload_page():
 
 @app.route('/upload_folders', methods=['POST', 'OPTIONS'])
 def upload_folders():
-    """Принимает FormData с файлами и создает задачи в RQ"""
     log_request()
     
     try:
@@ -129,11 +124,9 @@ def upload_folders():
         logger.info("📥 НАЧАЛО ОБРАБОТКИ /upload_folders")
         
         if request.method == 'OPTIONS':
-            logger.info("📋 OPTIONS запрос")
             return '', 200
         
         if not request.content_type or 'multipart/form-data' not in request.content_type:
-            logger.error(f"❌ Неверный Content-Type: {request.content_type}")
             return jsonify({
                 'success': False, 
                 'message': f'Ожидается multipart/form-data, получено: {request.content_type}'
@@ -141,25 +134,17 @@ def upload_folders():
         
         user_id = request.form.get('user_id', type=int)
         max_photos = request.form.get('max_photos', 6, type=int)
-        delay_between = request.form.get('delay_between', 3, type=int)
-        
-        logger.info(f"👤 user_id: {user_id}")
-        logger.info(f"📸 max_photos: {max_photos}")
-        logger.info(f"⏱️ delay_between: {delay_between}")
         
         if not user_id:
-            logger.error("❌ Нет user_id")
             return jsonify({'success': False, 'message': 'Нет user_id'}), 400
         
         files = request.files.getlist('files[]')
         logger.info(f"📁 Получено файлов: {len(files)}")
         
         if not files:
-            logger.error("❌ Нет файлов")
             return jsonify({'success': False, 'message': 'Нет файлов'}), 400
         
         if queue is None:
-            logger.error("❌ Очередь недоступна")
             return jsonify({'success': False, 'message': 'Очередь недоступна'}), 500
         
         # Группируем файлы по папкам
@@ -171,23 +156,18 @@ def upload_folders():
                 if folder_name not in folders:
                     folders[folder_name] = []
                 folders[folder_name].append(file)
-            else:
-                logger.warning(f"⚠️ Файл без пути: {file_path}")
         
         logger.info(f"📁 Найдено {len(folders)} папок")
         
         if not folders:
-            logger.error("❌ Нет папок")
             return jsonify({'success': False, 'message': 'Не найдено папок с файлами'}), 400
         
-        # Обрабатываем каждую папку
         job_ids = []
         folder_data_list = []
         
         for folder_name, folder_files in folders.items():
             logger.info(f"📂 Обработка папки: {folder_name} ({len(folder_files)} файлов)")
             
-            # Находим info.txt
             info_file = None
             image_files = []
             
@@ -195,37 +175,28 @@ def upload_folders():
                 filename = f.filename.lower()
                 if filename.endswith('.txt') and 'info' in filename:
                     info_file = f
-                    logger.info(f"  📄 Найден info.txt: {f.filename}")
                 elif filename.endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')):
                     image_files.append(f)
-                    logger.info(f"  🖼️ Найдено изображение: {f.filename}")
             
             if not info_file:
                 logger.warning(f"⚠️ Нет info.txt в папке {folder_name}")
                 continue
             
-            # Читаем текст
             try:
                 info_content = info_file.read().decode('utf-8')
-                logger.info(f"📝 info.txt прочитан: {len(info_content)} символов")
             except Exception as e:
                 logger.error(f"❌ Ошибка чтения info.txt: {e}")
                 continue
             
-            # Разделяем текст
             ad_text = info_content
             metadata_text = ''
             if '#изъятая' in info_content:
                 parts = info_content.split('#изъятая')
                 ad_text = parts[0].strip()
                 metadata_text = parts[1] if len(parts) > 1 else ''
-                logger.info(f"✂️ Разделен текст: {len(ad_text)} символов до #изъятая")
             
-            # Ограничиваем количество фото
             image_files = image_files[:max_photos]
-            logger.info(f"🖼️ Изображений для загрузки: {len(image_files)} (максимум {max_photos})")
             
-            # Читаем изображения
             images = []
             for img_file in image_files:
                 try:
@@ -236,7 +207,6 @@ def upload_folders():
                             'data': list(img_data),
                             'type': img_file.content_type or 'image/jpeg'
                         })
-                        logger.info(f"  ✅ Изображение загружено: {img_file.filename} ({len(img_data)} байт)")
                 except Exception as e:
                     logger.error(f"❌ Ошибка чтения {img_file.filename}: {e}")
             
@@ -248,17 +218,11 @@ def upload_folders():
             }
             
             folder_data_list.append(folder_data)
-            logger.info(f"✅ Папка {folder_name} подготовлена: {len(images)} изображений")
         
         if not folder_data_list:
-            logger.error("❌ Нет данных для задач")
             return jsonify({'success': False, 'message': 'Нет данных для обработки'}), 400
         
-        # Создаем задачи в RQ
-        logger.info(f"📝 Создание {len(folder_data_list)} задач в RQ...")
-        for i, folder_data in enumerate(folder_data_list):
-            logger.info(f"  📝 Задача {i+1}: {folder_data['folderName']}")
-            
+        for folder_data in folder_data_list:
             try:
                 job = queue.enqueue(
                     process_folder_task,
@@ -270,12 +234,9 @@ def upload_folders():
                     timeout=300
                 )
                 job_ids.append(job.id)
-                logger.info(f"  ✅ Создана задача {job.id}")
+                logger.info(f"📝 Создана задача {job.id}")
             except Exception as e:
-                logger.error(f"  ❌ Ошибка создания задачи: {e}")
-        
-        logger.info(f"✅ Успешно создано {len(job_ids)} задач")
-        logger.info("=" * 60)
+                logger.error(f"❌ Ошибка создания задачи: {e}")
         
         return jsonify({
             'success': True,
@@ -295,14 +256,12 @@ def upload_folders():
 
 @app.route('/job_status', methods=['POST'])
 def job_status():
-    log_request()
     try:
         data = request.get_json()
         if not data:
             return jsonify({})
         
         job_ids = data.get('job_ids', [])
-        
         if not job_ids:
             return jsonify({})
         
@@ -322,7 +281,6 @@ def job_status():
                 
                 result[job_id] = status
             except Exception as e:
-                logger.warning(f"⚠️ Задача {job_id} не найдена: {e}")
                 result[job_id] = {'status': 'unknown', 'error': str(e)}
         
         return jsonify(result)
@@ -333,7 +291,6 @@ def job_status():
 
 @app.route('/stop_publish', methods=['POST'])
 def stop_publish():
-    log_request()
     try:
         data = request.get_json()
         if not data:
@@ -352,13 +309,11 @@ def stop_publish():
                 if job.get_status() in ['queued', 'started']:
                     job.cancel()
                     cancelled += 1
-                    logger.info(f"  ✅ Отменена задача {job_id}")
             except Exception as e:
                 logger.warning(f"⚠️ Не удалось отменить задачу {job_id}: {e}")
         
         if queue:
             queue.enqueue(cleanup_user_task, user_id, timeout=60)
-            logger.info(f"🧹 Добавлена задача очистки для пользователя {user_id}")
         
         return jsonify({
             'success': True,
@@ -372,7 +327,6 @@ def stop_publish():
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    log_request()
     try:
         data = request.get_json()
         if not data:
@@ -391,9 +345,8 @@ def webhook():
         if not user_id:
             return jsonify({"ok": True}), 200
         
-        logger.info(f"💬 user_id={user_id}, text={text[:100] if text else 'empty'}")
+        logger.info(f"💬 user_id={user_id}")
         
-        # Обработка команд
         if text and text.strip() == '/start':
             url = f"{MAX_API_URL}/messages?user_id={user_id}"
             payload = {
@@ -401,57 +354,10 @@ def webhook():
                        "🌐 **Загрузить папку:**\n"
                        f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
                        "📊 **Получить отчет:**\n"
-                       f"🔗 https://maxbot.bothost.tech/report/{user_id}\n\n"
-                       "⏹ **Остановить публикацию:** `/stop`\n\n"
-                       "📋 **Инструкция:**\n"
-                       "1. Подготовьте папки с объявлениями\n"
-                       "2. Используйте разделитель #изъятая\n"
-                       "3. Фото до 10 шт на объявление",
+                       f"🔗 https://maxbot.bothost.tech/report/{user_id}",
                 "format": "markdown"
             }
             headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
-            requests.post(url, headers=headers, json=payload, timeout=30, verify=False)
-            return jsonify({"ok": True}), 200
-        
-        if text and text.strip() == '/stop':
-            # Останавливаем публикацию
-            url = f"{MAX_API_URL}/messages?user_id={user_id}"
-            payload = {
-                "text": "⏹️ **Публикация остановлена!**",
-                "format": "markdown"
-            }
-            headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
-            requests.post(url, headers=headers, json=payload, timeout=30, verify=False)
-            
-            # Также останавливаем через API
-            if queue:
-                # Отменяем все задачи пользователя
-                from rq import Worker
-                workers = Worker.all(connection=redis_conn)
-                for worker in workers:
-                    for job in worker.get_current_job():
-                        if job and job.args and len(job.args) > 0 and job.args[0] == user_id:
-                            job.cancel()
-            
-            return jsonify({"ok": True}), 200
-        
-        if text and text.strip() == '/report':
-            report_path = report_gen.generate_report(user_id)
-            url = f"{MAX_API_URL}/messages?user_id={user_id}"
-            headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
-            
-            if report_path:
-                filename = os.path.basename(report_path)
-                download_url = f"https://maxbot.bothost.tech/download_report/{user_id}/{filename}"
-                payload = {
-                    "text": f"📊 **Отчет создан!**\n\n🔗 [Скачать отчет]({download_url})",
-                    "format": "markdown"
-                }
-            else:
-                payload = {
-                    "text": "❌ Нет данных для отчета.",
-                    "format": "markdown"
-                }
             requests.post(url, headers=headers, json=payload, timeout=30, verify=False)
             return jsonify({"ok": True}), 200
         
@@ -459,12 +365,10 @@ def webhook():
         
     except Exception as e:
         logger.error(f"❌ Ошибка вебхука: {e}")
-        logger.error(traceback.format_exc())
         return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.route('/report/<int:user_id>')
 def report_page(user_id):
-    log_request()
     report_path = report_gen.generate_report(user_id)
     if not report_path:
         return "❌ Нет данных для отчета", 404
@@ -479,7 +383,6 @@ def report_page(user_id):
         <h1>📊 Отчет готов!</h1>
         <p><a href="{download_url}" style="display: inline-block; padding: 12px 30px; background: #28a745; color: white; text-decoration: none; border-radius: 5px;">📥 Скачать отчет</a></p>
         <p><a href="/upload">⬅️ Вернуться к загрузке</a></p>
-        <p><small>Отчет сгенерирован: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</small></p>
     </body>
     </html>
     """
@@ -491,10 +394,8 @@ def download_report(user_id, filename):
         file_path = os.path.join(user_folder, filename)
         
         if not os.path.exists(file_path):
-            logger.error(f"❌ Файл не найден: {file_path}")
             return "❌ Файл не найден", 404
         
-        logger.info(f"📥 Скачивание файла: {file_path}")
         return send_file(file_path, as_attachment=True, download_name=filename)
     except Exception as e:
         logger.error(f"❌ Ошибка скачивания: {e}")
@@ -517,9 +418,7 @@ def status():
         "token_set": bool(TOKEN),
         "redis_connected": redis_conn is not None,
         "queue_available": queue is not None,
-        "data_dir": DATA_DIR,
-        "python_version": sys.version,
-        "app_version": "2.0.1"
+        "data_dir": DATA_DIR
     }
 
 @app.route('/routes')
@@ -536,7 +435,7 @@ def list_routes():
         'total': len(routes)
     })
 
-# ========== HTML СТРАНИЦА ==========
+# ========== HTML СТРАНИЦА (сокращенная версия) ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -550,7 +449,6 @@ UPLOAD_PAGE = """
         .drop-zone { border: 2px dashed #007bff; padding: 40px; margin: 20px 0; border-radius: 10px; background: #f8f9fa; text-align: center; cursor: pointer; transition: all 0.3s; }
         .drop-zone:hover { background: #e3f2fd; }
         .drop-zone.dragover { background: #d4edda; border-color: #28a745; }
-        .drop-zone p { margin: 0; color: #666; }
         .drop-zone .icon { font-size: 48px; display: block; margin-bottom: 10px; }
         input[type="file"] { display: none; }
         .btn { padding: 12px 30px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; font-weight: bold; transition: all 0.3s; }
@@ -570,11 +468,6 @@ UPLOAD_PAGE = """
         .file-list { text-align: left; margin: 20px 0; padding: 0; list-style: none; }
         .file-list li { background: #f8f9fa; padding: 10px 15px; margin: 5px 0; border-radius: 5px; border-left: 3px solid #007bff; display: flex; justify-content: space-between; align-items: center; }
         .file-list li .count { background: #007bff; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
-        .file-list li .status-badge { font-size: 12px; padding: 2px 10px; border-radius: 20px; margin-left: 10px; }
-        .file-list li .status-badge.pending { background: #ffc107; color: #333; }
-        .file-list li .status-badge.processing { background: #17a2b8; color: white; }
-        .file-list li .status-badge.done { background: #28a745; color: white; }
-        .file-list li .status-badge.error { background: #dc3545; color: white; }
         .progress-bar { width: 100%; height: 25px; background: #e9ecef; border-radius: 10px; overflow: hidden; margin: 10px 0; display: none; }
         .progress-bar .progress { height: 100%; background: linear-gradient(90deg, #28a745, #20c997); transition: width 0.3s; width: 0%; display: flex; align-items: center; justify-content: center; color: white; font-size: 12px; font-weight: bold; }
         .instructions { background: #fff3cd; padding: 15px 20px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107; }
@@ -587,7 +480,6 @@ UPLOAD_PAGE = """
         .settings-section { background: #e7f5ff; padding: 15px; border-radius: 10px; margin: 15px 0; border: 1px solid #007bff; }
         .settings-section label { display: inline-block; margin-right: 15px; font-weight: bold; }
         .settings-section input[type="number"] { width: 60px; padding: 5px; border: 1px solid #ccc; border-radius: 5px; }
-        .settings-section select { padding: 5px; border: 1px solid #ccc; border-radius: 5px; }
         .queue-info { background: #f8f9fa; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #17a2b8; }
         .queue-info strong { color: #17a2b8; }
     </style>
@@ -598,41 +490,28 @@ UPLOAD_PAGE = """
         
         <div class="instructions">
             <strong>📌 Как подготовить папку:</strong><br>
-            1️⃣ Создайте головную папку (любое название)<br>
-            2️⃣ Внутри создайте подпапки объявлений: <code>1 -123456789</code>, <code>2 -987654321</code><br>
-            3️⃣ В каждой подпапке: <code>info.txt</code> (текст) и фото (1-10 шт)<br>
-            4️⃣ В тексте используйте разделитель <code>#изъятая</code>:<br>
-            &nbsp;&nbsp;• Текст ДО разделителя — публикуется в чат<br>
-            &nbsp;&nbsp;• Текст ПОСЛЕ разделителя — идет в отчет<br>
-            5️⃣ Перетащите головную папку в поле ниже<br>
-            6️⃣ Каждая папка отправляется отдельным запросом
+            1️⃣ Создайте головную папку с подпапками<br>
+            2️⃣ В каждой подпапке: info.txt и фото<br>
+            3️⃣ Используйте разделитель #изъятая в тексте<br>
+            4️⃣ Перетащите головную папку в поле ниже
         </div>
         
         <div class="settings-section">
-            <h4>⚙️ Настройки публикации</h4>
-            <label>
-                📸 Максимум фото:
-                <input type="number" id="maxPhotos" value="6" min="1" max="10">
-            </label>
-            <label>
-                ⏱️ Задержка между папками (сек):
-                <input type="number" id="delayBetween" value="3" min="1" max="30">
-            </label>
+            <h4>⚙️ Настройки</h4>
+            <label>📸 Максимум фото: <input type="number" id="maxPhotos" value="6" min="1" max="10"></label>
+            <label>⏱️ Задержка: <input type="number" id="delayBetween" value="3" min="1" max="30"></label>
         </div>
         
         <div class="drop-zone" id="dropZone">
             <span class="icon">📂</span>
-            <p><strong>Перетащите головную папку сюда</strong></p>
+            <p><strong>Перетащите папку сюда</strong></p>
             <button class="btn btn-primary" onclick="document.getElementById('folderInput').click()">Выбрать папку</button>
             <input type="file" id="folderInput" webkitdirectory multiple>
         </div>
         
         <div id="fileList" style="display:none;">
             <div class="selected-info" id="selectedInfo"></div>
-            <div class="queue-info" id="queueInfo">
-                <strong>📋 Очередь публикации:</strong> 
-                <span id="queueStatus">Ожидание</span>
-            </div>
+            <div class="queue-info"><strong>📋 Очередь:</strong> <span id="queueStatus">Ожидание</span></div>
             <ul class="file-list" id="fileListContent"></ul>
             <div class="button-group">
                 <button class="btn btn-success" onclick="uploadFolder()">🚀 Загрузить</button>
@@ -650,24 +529,15 @@ UPLOAD_PAGE = """
         
         <div class="report-section">
             <button class="btn btn-primary" onclick="getReport()">📊 Скачать отчет</button>
-            <p style="margin-top: 10px; color: #666; font-size: 14px;">После публикации всех папок</p>
         </div>
         
-        <div class="footer">⚡ MAX Bot | Загрузка объявлений</div>
+        <div class="footer">⚡ MAX Bot</div>
     </div>
 
     <script>
-        const urlParams = new URLSearchParams(window.location.search);
-        const userId = urlParams.get('user_id') || 151296248;
-        
-        let selectedFiles = [];
-        let isProcessing = false;
-        let isStopped = false;
-        let folderQueue = [];
-        let jobIds = [];
-        let processedCount = 0;
-        let totalFolders = 0;
-        let jobStatusInterval = null;
+        const userId = new URLSearchParams(window.location.search).get('user_id') || 151296248;
+        let selectedFiles = [], isProcessing = false, folderQueue = [], jobIds = [];
+        let totalFolders = 0, processedCount = 0, jobStatusInterval = null;
         
         const dropZone = document.getElementById('dropZone');
         const folderInput = document.getElementById('folderInput');
@@ -687,25 +557,20 @@ UPLOAD_PAGE = """
             dropZone.classList.remove('dragover');
             const items = e.dataTransfer.items;
             const files = [];
-            let pendingReads = 0;
+            let pending = 0;
             
             function processEntry(entry, path) {
                 if (entry.isDirectory) {
                     const reader = entry.createReader();
                     reader.readEntries((entries) => {
-                        for (let e of entries) {
-                            processEntry(e, path + entry.name + '/');
-                        }
+                        for (let e of entries) processEntry(e, path + entry.name + '/');
                     });
                 } else {
                     entry.file((file) => {
                         file.webkitRelativePath = path + file.name;
                         files.push(file);
-                        pendingReads--;
-                        if (pendingReads === 0) {
-                            selectedFiles = files;
-                            displayFiles(selectedFiles);
-                        }
+                        pending--;
+                        if (pending === 0) { selectedFiles = files; displayFiles(selectedFiles); }
                     });
                 }
             }
@@ -713,46 +578,164 @@ UPLOAD_PAGE = """
             for (let item of items) {
                 if (item.kind === 'file') {
                     const entry = item.webkitGetAsEntry();
-                    if (entry) {
-                        pendingReads++;
-                        processEntry(entry, '');
-                    }
+                    if (entry) { pending++; processEntry(entry, ''); }
                 }
             }
-            
-            if (pendingReads === 0 && files.length > 0) {
-                selectedFiles = files;
-                displayFiles(selectedFiles);
-            }
+            if (pending === 0 && files.length > 0) { selectedFiles = files; displayFiles(selectedFiles); }
         });
 
         folderInput.addEventListener('change', (e) => {
             const files = Array.from(e.target.files);
-            if (files.length > 0) {
-                selectedFiles = files;
-                displayFiles(selectedFiles);
-            }
+            if (files.length > 0) { selectedFiles = files; displayFiles(selectedFiles); }
         });
 
         function displayFiles(files) {
             fileListContent.innerHTML = '';
             const folders = new Map();
-            
             files.forEach(f => {
                 const parts = f.webkitRelativePath.split('/');
                 if (parts.length >= 2) {
-                    const folderName = parts[0];
-                    const subFolder = parts.slice(1, -1).join('/') || 'root';
-                    const key = folderName + '/' + subFolder;
-                    
-                    if (!folders.has(key)) {
-                        folders.set(key, {
-                            name: folderName,
-                            sub: subFolder,
-                            count: 0,
-                            display: subFolder === 'root' ? folderName : folderName + '/' + subFolder
-                        });
-                    }
-                    folders.get(key).count++;
+                    const name = parts[0];
+                    if (!folders.has(name)) folders.set(name, 0);
+                    folders.set(name, folders.get(name) + 1);
                 }
             });
+            const sorted = Array.from(folders.keys()).sort();
+            folderQueue = sorted.map(n => ({ name: n, status: 'pending' }));
+            sorted.forEach(folder => {
+                const li = document.createElement('li');
+                li.innerHTML = `<span>📁 <strong>${folder}</strong></span><span class="count">${folders.get(folder)} файлов</span>`;
+                fileListContent.appendChild(li);
+            });
+            selectedInfo.textContent = `✅ Выбрано ${sorted.length} папок, ${files.length} файлов`;
+            fileList.style.display = 'block';
+            updateQueueStatus();
+        }
+
+        function updateQueueStatus() {
+            const total = folderQueue.length;
+            const done = folderQueue.filter(f => f.status === 'done').length;
+            const errors = folderQueue.filter(f => f.status === 'error').length;
+            queueStatus.textContent = isProcessing ? `🔄 ${done+errors}/${total}` : `📋 ${done}/${total}`;
+            if (errors > 0) queueStatus.textContent += ` ⚠️${errors}`;
+        }
+
+        function addLog(msg) { logDiv.style.display = 'block'; logDiv.textContent += msg + '\\n'; logDiv.scrollTop = logDiv.scrollHeight; }
+        function showStatus(type, msg) { statusDiv.className = 'status ' + type; statusDiv.textContent = msg; statusDiv.style.display = 'block'; }
+        function getReport() { window.open(`/report/${userId}`, '_blank'); }
+        function clearFiles() {
+            if (isProcessing && !confirm('Остановить?')) return;
+            selectedFiles = []; folderQueue = []; jobIds = [];
+            fileList.style.display = 'none'; statusDiv.style.display = 'none';
+            progressBar.style.display = 'none'; logDiv.style.display = 'none';
+            progress.style.width = '0%'; folderInput.value = '';
+            if (jobStatusInterval) { clearInterval(jobStatusInterval); jobStatusInterval = null; }
+        }
+
+        function stopPublish() {
+            isProcessing = false; addLog('⏹️ Остановка...');
+            if (jobStatusInterval) { clearInterval(jobStatusInterval); jobStatusInterval = null; }
+            fetch('/stop_publish', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: parseInt(userId), job_ids: jobIds })
+            }).catch(e => console.error(e));
+        }
+
+        function startJobMonitoring() {
+            if (jobStatusInterval) clearInterval(jobStatusInterval);
+            jobStatusInterval = setInterval(async () => {
+                try {
+                    const resp = await fetch('/job_status', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ job_ids: jobIds })
+                    });
+                    if (!resp.ok) return;
+                    const data = await resp.json();
+                    let done = 0, failed = 0, finished = 0;
+                    jobIds.forEach(id => {
+                        const s = data[id];
+                        if (s) {
+                            if (s.status === 'finished') { finished++; if (s.result && s.result.success) done++; else failed++; }
+                            else if (s.status === 'failed') failed++;
+                        }
+                    });
+                    processedCount = done + failed;
+                    const pct = Math.round((processedCount / totalFolders) * 100);
+                    progress.style.width = pct + '%';
+                    progress.textContent = pct + '%';
+                    if (finished >= jobIds.length) {
+                        clearInterval(jobStatusInterval);
+                        jobStatusInterval = null;
+                        isProcessing = false;
+                        if (failed === 0 && done === totalFolders) {
+                            showStatus('success', `✅ Загружено ${done} папок!`);
+                            addLog(`✅ ВСЕ ${done} папок загружены!`);
+                        } else {
+                            showStatus('warning', `⚠️ Загружено ${done} папок, ${failed} с ошибками`);
+                        }
+                        if (done > 0) addLog(`📊 Отчет: /report/${userId}`);
+                    }
+                } catch(e) { console.error(e); }
+            }, 2000);
+        }
+
+        async function uploadFolder() {
+            if (selectedFiles.length === 0) { showStatus('error', '❌ Выберите папку'); return; }
+            if (isProcessing) { addLog('⚠️ Уже выполняется'); return; }
+            
+            isProcessing = true;
+            jobIds = [];
+            processedCount = 0;
+            const maxPhotos = parseInt(document.getElementById('maxPhotos').value) || 6;
+            
+            const formData = new FormData();
+            formData.append('user_id', userId);
+            formData.append('max_photos', maxPhotos);
+            
+            const folders = new Set();
+            selectedFiles.forEach(f => {
+                const parts = f.webkitRelativePath.split('/');
+                if (parts.length >= 2) {
+                    const name = parts[0];
+                    folders.add(name);
+                    formData.append('files[]', f, `${name}/${parts.slice(1).join('/')}`);
+                }
+            });
+            
+            totalFolders = folders.size;
+            progressBar.style.display = 'block';
+            progress.style.width = '0%';
+            progress.textContent = '0%';
+            logDiv.textContent = '';
+            addLog(`🚀 Загрузка ${totalFolders} папок...`);
+            
+            try {
+                const resp = await fetch('/upload_folders', { method: 'POST', body: formData });
+                if (!resp.ok) { const t = await resp.text(); throw new Error(`HTTP ${resp.status}: ${t.substring(0, 100)}`); }
+                const result = await resp.json();
+                if (!result.success) throw new Error(result.message || 'Ошибка');
+                jobIds = result.job_ids || [];
+                addLog(`✅ Создано ${jobIds.length} задач`);
+                if (jobIds.length > 0) startJobMonitoring();
+                else { isProcessing = false; showStatus('error', '❌ Нет задач'); }
+            } catch(e) {
+                addLog(`❌ ${e.message}`);
+                showStatus('error', `❌ ${e.message}`);
+                isProcessing = false;
+            }
+        }
+    </script>
+</body>
+</html>
+"""
+
+# ========== ЗАПУСК ==========
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 3000))
+    logger.warning("⚠️ ЗАПУСК В РЕЖИМЕ РАЗРАБОТКИ! Используйте Gunicorn для production!")
+    logger.info("📋 Доступные маршруты:")
+    for rule in app.url_map.iter_rules():
+        logger.info(f"  {rule.methods} {rule}")
+    app.run(host='0.0.0.0', port=port, debug=False)
