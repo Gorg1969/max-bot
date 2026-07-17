@@ -1,4 +1,4 @@
-# app.py - КОМПАКТНАЯ ВЕРСИЯ С РАБОЧИМ HTML И СТАТИСТИКОЙ
+# app.py - ПОЛНАЯ ВЕРСИЯ ДЛЯ НЕСКОЛЬКИХ ПОЛЬЗОВАТЕЛЕЙ
 
 from flask import Flask, request, jsonify, render_template_string, send_file
 import os
@@ -27,23 +27,39 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("MAX_TOKEN") or os.environ.get("MAX_BOT_TOKEN") or os.environ.get("TOKEN")
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 MAX_API_URL = os.environ.get("MAX_API_URL", "https://platform-api2.max.ru")
+BASE_URL = os.environ.get("BASE_URL", "https://maxbot.bothost.tech")
 
 if not TOKEN:
     logger.error("❌ ТОКЕН НЕ НАЙДЕН!")
 
-# ========== ИНИЦИАЛИЗАЦИЯ БД ==========
-db = Database()
-fm = FileManager(DATA_DIR)
-report_gen = ReportGenerator(fm, db)
+# ========== ГЛОБАЛЬНАЯ ИНИЦИАЛИЗАЦИЯ ==========
+db = None
+fm = None
+report_gen = None
+publisher = None
+api = None
 
-# ========== API КЛИЕНТ ==========
-class APIClient:
-    def __init__(self):
-        self.token = TOKEN
-        self.base_url = "https://platform-api2.max.ru"
+def init_app():
+    """Инициализация приложения - выполняется один раз при preload_app=True"""
+    global db, fm, report_gen, publisher, api
+    
+    logger.info("🔄 Инициализация приложения...")
+    
+    db = Database()
+    fm = FileManager(DATA_DIR)
+    report_gen = ReportGenerator(fm, db)
+    
+    class APIClient:
+        def __init__(self):
+            self.token = TOKEN
+            self.base_url = "https://platform-api2.max.ru"
+    
+    api = APIClient()
+    publisher = Publisher(api, fm, db)
+    
+    logger.info("✅ Приложение инициализировано")
 
-api = APIClient()
-publisher = Publisher(api, fm, db)
+init_app()
 
 # ========== UPLOAD_PAGE ==========
 UPLOAD_PAGE = '''
@@ -150,7 +166,6 @@ input[type=file]{display:none}
 const userId = new URLSearchParams(window.location.search).get('user_id') || 151296248;
 let selectedFiles = [], isProcessing = false, folderQueue = [], totalFolders = 0;
 
-// Загрузка статистики при открытии страницы
 window.onload = function() {
     loadStats();
 };
@@ -411,7 +426,6 @@ async function uploadFolder() {
     else { showStatus('warning', '⚠️ Загружено ' + (totalFolders - errors) + ' папок, ' + errors + ' с ошибками'); }
     if (totalFolders - errors > 0) { addLog('📊 Скачать отчет: /report/' + userId); }
     
-    // Обновляем статистику
     loadStats();
 }
 
@@ -509,47 +523,105 @@ def upload_folders():
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    """Обработка вебхука от MAX платформы"""
     try:
         data = request.get_json()
+        logger.info(f"📨 Получен вебхук: {data}")
+        
         if not data:
             return jsonify({"ok": True}), 200
         
         user_id = None
         text = None
         
+        # Извлекаем user_id
         if 'message' in data:
             msg = data['message']
             if 'sender' in msg:
                 user_id = msg['sender'].get('user_id')
+            elif 'user_id' in msg:
+                user_id = msg['user_id']
+            
             if 'body' in msg:
-                text = msg['body'].get('text')
+                if isinstance(msg['body'], dict):
+                    text = msg['body'].get('text')
+                else:
+                    text = msg['body']
         
         if not user_id:
             return jsonify({"ok": True}), 200
         
+        # Обработка /start
         if text and text.strip() == '/start':
             stats = db.get_user_stats(user_id)
+            
+            message_text = (
+                f"🏠 **Главное меню**\n\n"
+                f"📊 **Ваша статистика:**\n"
+                f"📝 Всего публикаций: {stats['total']}\n"
+                f"✅ Успешно: {stats['success']}\n"
+                f"❌ Ошибок: {stats['errors']}\n\n"
+                f"🌐 **Загрузить папку:**\n"
+                f"🔗 {BASE_URL}/upload?user_id={user_id}\n\n"
+                f"📊 **Получить отчет:**\n"
+                f"🔗 {BASE_URL}/report/{user_id}"
+            )
+            
             url = f"{MAX_API_URL}/messages?user_id={user_id}"
             payload = {
-                "text": f"🏠 **Главное меню**\n\n"
-                        f"📊 **Статистика:**\n"
-                        f"📝 Всего публикаций: {stats['total']}\n"
-                        f"✅ Успешно: {stats['success']}\n"
-                        f"❌ Ошибок: {stats['errors']}\n\n"
-                        f"🌐 **Загрузить папку:**\n"
-                        f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
-                        f"📊 **Получить отчет:**\n"
-                        f"🔗 https://maxbot.bothost.tech/report/{user_id}",
+                "text": message_text,
                 "format": "markdown"
             }
-            headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
-            requests.post(url, headers=headers, json=payload, timeout=30, verify=False)
-            return jsonify({"ok": True}), 200
+            headers = {
+                "Authorization": TOKEN,
+                "Content-Type": "application/json"
+            }
+            
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            logger.info(f"✅ Ответ отправлен пользователю {user_id}, статус: {response.status_code}")
         
         return jsonify({"ok": True}), 200
+        
     except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
+        logger.error(f"❌ Ошибка вебхука: {e}")
+        logger.error(traceback.format_exc())
         return jsonify({"ok": False}), 500
+
+@app.route('/set_webhook', methods=['GET', 'POST'])
+def set_webhook():
+    """Установка вебхука в MAX платформе"""
+    try:
+        webhook_url = f"{BASE_URL}/webhook"
+        
+        url = f"{MAX_API_URL}/webhook"
+        payload = {
+            "url": webhook_url,
+            "secret": app.secret_key
+        }
+        
+        headers = {
+            "Authorization": TOKEN,
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        
+        if response.status_code == 200:
+            return jsonify({
+                "success": True,
+                "message": f"Вебхук установлен: {webhook_url}",
+                "response": response.json()
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "message": f"Ошибка установки вебхука: {response.status_code}",
+                "response": response.text
+            }), 500
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка установки вебхука: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/report/<int:user_id>')
 def report_page(user_id):
@@ -597,4 +669,5 @@ def status():
     return {"status": "running", "token_set": bool(TOKEN)}
 
 # ========== ЗАПУСК ==========
-# НЕТ if __name__ == "__main__" - ТОЛЬКО ДЛЯ GUNICORN!
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=3000)
