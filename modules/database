@@ -142,19 +142,4 @@ class Database:
             if limit:
                 query += f" LIMIT {limit}"
             
-            c.execute(query, (user_id,))
-            rows = c.fetchall()
-            conn.close()
-            
-            publications = []
-            for row in rows:
-                publications.append({
-                    'folder_name': row[0],
-                    'group_id': row[1],
-                    'status': row[2],
-                    'created_at': row[3]
-                })
-            return publications
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения публикаций: {e}")
-            return []
+  
