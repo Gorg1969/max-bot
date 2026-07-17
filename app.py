@@ -667,7 +667,6 @@ def health():
 @app.route('/status')
 def status():
     return {"status": "running", "token_set": bool(TOKEN)}
-
 # ========== ЗАПУСК ==========
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=3000)
+# НЕТ if __name__ == "__main__" - ТОЛЬКО ДЛЯ GUNICORN!
+# Приложение запускается через Gunicorn: gunicorn -c gunicorn.conf.py app:app
