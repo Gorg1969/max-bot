@@ -33,7 +33,7 @@ BASE_URL = os.environ.get("BASE_URL")
 if not TOKEN:
     logger.error("❌ ТОКЕН НЕ НАЙДЕН!")
 if not BASE_URL:
-    logger.error("❌ BASE_URL НЕ НАЙДЕН!")
+    logger.warning("⚠️ BASE_URL не установлен! Вебхук может не работать.")
 
 # ========== SSL - ВСЕГДА ОТКЛЮЧЕН ==========
 # Отключаем проверку SSL для MAX API
@@ -477,19 +477,23 @@ def upload_folders():
         MAX_IMAGE_SIZE = 5 * 1024 * 1024
         images = []
         
+        # Собираем изображения из формы
         for i in range(min(image_count, max_photos)):
             field_name = f'images_{folder_name}_{i}'
             if field_name in request.files:
                 img_file = request.files[field_name]
                 img_data = img_file.read()
                 if len(img_data) > MAX_IMAGE_SIZE:
+                    logger.warning(f"⚠️ {img_file.filename} слишком большой, пропускаем")
                     continue
                 if img_data:
+                    # ✅ Правильный формат для publisher
                     img_base64 = base64.b64encode(img_data).decode('ascii')
                     images.append({
                         'name': img_file.filename,
-                        'data': img_base64,
-                        'type': img_file.content_type or 'image/jpeg'
+                        'data': img_base64,  # ✅ ключ 'data' для publisher
+                        'type': img_file.content_type or 'image/jpeg',
+                        'bytes': img_data     # ✅ добавляем байты для загрузки
                     })
                     del img_data
                     gc.collect()
@@ -500,6 +504,7 @@ def upload_folders():
             ad_text = parts[0].strip()
             metadata_text = parts[1] if len(parts) > 1 else ''
         
+        # ✅ Вызываем publisher с правильными данными
         success, message = publisher.publish_single_folder(
             user_id, folder_name, ad_text, metadata_text, images
         )
@@ -597,6 +602,12 @@ def webhook():
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook():
     try:
+        if not BASE_URL:
+            return jsonify({
+                "success": False,
+                "message": "BASE_URL не установлен в переменных окружения"
+            }), 500
+            
         webhook_url = f"{BASE_URL}/webhook"
         logger.info(f"🔄 Установка вебхука: {webhook_url}")
         
