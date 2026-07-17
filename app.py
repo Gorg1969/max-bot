@@ -1,6 +1,7 @@
-# app.py - УПРОЩЕННАЯ ВЕРСИЯ БЕЗ SSL
+# app.py - ИСПРАВЛЕННАЯ ВЕРСИЯ
 
 from flask import Flask, request, jsonify, render_template_string, send_file
+from flask_cors import CORS
 import os
 import logging
 import json
@@ -11,14 +12,14 @@ import base64
 import gc
 import urllib3
 from datetime import datetime
-from modules import Database, FileManager
-from modules.report_generator import ReportGenerator
-from modules.publisher import Publisher
 
 # ========== ИНИЦИАЛИЗАЦИЯ ==========
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24).hex())
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
+
+# ========== CORS ==========
+CORS(app)
 
 # ========== ЛОГИРОВАНИЕ ==========
 logging.basicConfig(level=logging.INFO)
@@ -36,34 +37,43 @@ if not BASE_URL:
     logger.warning("⚠️ BASE_URL не установлен! Вебхук может не работать.")
 
 # ========== SSL - ВСЕГДА ОТКЛЮЧЕН ==========
-# Отключаем проверку SSL для MAX API
 SSL_VERIFY = False
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logger.warning("⚠️ SSL проверка ОТКЛЮЧЕНА (для MAX API)")
 
-# ========== ИНИЦИАЛИЗАЦИЯ БД ==========
+# ========== ИНИЦИАЛИЗАЦИЯ МОДУЛЕЙ ==========
 db = None
 fm = None
 report_gen = None
 publisher = None
 
 def init_app():
+    """Инициализация модулей приложения"""
     global db, fm, report_gen, publisher
-    logger.info("🔄 Инициализация приложения...")
-    db = Database()
-    fm = FileManager(DATA_DIR)
-    report_gen = ReportGenerator(fm, db)
     
-    class APIClient:
-        def __init__(self):
-            self.token = TOKEN
-            self.base_url = MAX_API_URL
-            self.verify = False  # Всегда False
-    
-    publisher = Publisher(APIClient(), fm, db)
-    logger.info("✅ Приложение инициализировано")
-
-init_app()
+    try:
+        from modules import Database, FileManager
+        from modules.report_generator import ReportGenerator
+        from modules.publisher import Publisher
+        
+        logger.info("🔄 Инициализация приложения...")
+        db = Database()
+        fm = FileManager(DATA_DIR)
+        report_gen = ReportGenerator(fm, db)
+        
+        class APIClient:
+            def __init__(self):
+                self.token = TOKEN
+                self.base_url = MAX_API_URL
+                self.verify = False
+        
+        publisher = Publisher(APIClient(), fm, db)
+        logger.info("✅ Приложение инициализировано")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка инициализации: {e}")
+        logger.error(traceback.format_exc())
+        return False
 
 # ========== UPLOAD_PAGE HTML ==========
 UPLOAD_PAGE = '''
@@ -453,9 +463,15 @@ def upload_page():
 
 @app.route('/upload_folders', methods=['POST', 'OPTIONS'])
 def upload_folders():
+    """Обработка загрузки папок"""
     try:
         if request.method == 'OPTIONS':
             return '', 200
+        
+        # Проверяем инициализацию
+        if publisher is None:
+            if not init_app():
+                return jsonify({'success': False, 'message': 'Ошибка инициализации'}), 500
         
         user_id = request.form.get('user_id', type=int)
         if not user_id:
@@ -482,33 +498,43 @@ def upload_folders():
             field_name = f'images_{folder_name}_{i}'
             if field_name in request.files:
                 img_file = request.files[field_name]
-                img_data = img_file.read()
-                if len(img_data) > MAX_IMAGE_SIZE:
-                    logger.warning(f"⚠️ {img_file.filename} слишком большой, пропускаем")
+                try:
+                    # Читаем файл с контекстным менеджером
+                    img_data = img_file.read()
+                    
+                    if len(img_data) > MAX_IMAGE_SIZE:
+                        logger.warning(f"⚠️ {img_file.filename} слишком большой, пропускаем")
+                        continue
+                    
+                    if img_data:
+                        # Формируем данные для publisher
+                        img_base64 = base64.b64encode(img_data).decode('ascii')
+                        images.append({
+                            'name': img_file.filename,
+                            'data': img_base64,
+                            'type': img_file.content_type or 'image/jpeg',
+                            'bytes': img_data
+                        })
+                except Exception as e:
+                    logger.error(f"❌ Ошибка чтения файла {img_file.filename}: {e}")
                     continue
-                if img_data:
-                    # ✅ Правильный формат для publisher
-                    img_base64 = base64.b64encode(img_data).decode('ascii')
-                    images.append({
-                        'name': img_file.filename,
-                        'data': img_base64,  # ✅ ключ 'data' для publisher
-                        'type': img_file.content_type or 'image/jpeg',
-                        'bytes': img_data     # ✅ добавляем байты для загрузки
-                    })
-                    del img_data
+                finally:
+                    # Освобождаем память
                     gc.collect()
         
+        # Разбираем метаданные
         metadata_text = ''
         if '#изъятая' in ad_text:
             parts = ad_text.split('#изъятая')
             ad_text = parts[0].strip()
             metadata_text = parts[1] if len(parts) > 1 else ''
         
-        # ✅ Вызываем publisher с правильными данными
+        # Публикуем папку
         success, message = publisher.publish_single_folder(
             user_id, folder_name, ad_text, metadata_text, images
         )
         
+        # Очищаем память
         del images
         gc.collect()
         
@@ -518,7 +544,7 @@ def upload_folders():
                 'message': message,
                 'job_ids': ['sync'],
                 'total_folders': 1,
-                'total_images': len(images)
+                'total_images': len(images) if images else 0
             })
         else:
             return jsonify({'success': False, 'message': message}), 500
@@ -564,7 +590,11 @@ def webhook():
         logger.info(f"👤 USER_ID: {user_id}, ТЕКСТ: {text}")
         
         if text and text.strip() == '/start':
-            stats = db.get_user_stats(user_id)
+            # Проверяем инициализацию БД
+            if db is None:
+                init_app()
+            
+            stats = db.get_user_stats(user_id) if db else {'total': 0, 'success': 0, 'errors': 0}
             
             message_text = (
                 f"🏠 **Главное меню**\n\n"
@@ -588,7 +618,6 @@ def webhook():
                 "Content-Type": "application/json"
             }
             
-            # ✅ SSL ОТКЛЮЧЕН
             response = requests.post(url, headers=headers, json=payload, timeout=30, verify=False)
             logger.info(f"✅ Ответ отправлен пользователю {user_id}, статус: {response.status_code}")
         
@@ -621,7 +650,6 @@ def set_webhook():
             "Content-Type": "application/json"
         }
         
-        # ✅ SSL ОТКЛЮЧЕН
         response = requests.post(url, headers=headers, json=payload, timeout=30, verify=False)
         
         if response.status_code == 200:
@@ -642,6 +670,9 @@ def set_webhook():
 
 @app.route('/report/<int:user_id>')
 def report_page(user_id):
+    if report_gen is None:
+        init_app()
+    
     report_path = report_gen.generate_report(user_id)
     if not report_path:
         return "❌ Нет данных", 404
@@ -659,6 +690,9 @@ def report_page(user_id):
 @app.route('/download_report/<int:user_id>/<path:filename>')
 def download_report(user_id, filename):
     try:
+        if fm is None:
+            init_app()
+        
         user_folder = fm.get_user_folder(user_id)
         file_path = os.path.join(user_folder, filename)
         if not os.path.exists(file_path):
@@ -670,7 +704,10 @@ def download_report(user_id, filename):
 @app.route('/stats/<int:user_id>')
 def get_stats(user_id):
     try:
-        stats = db.get_user_stats(user_id)
+        if db is None:
+            init_app()
+        
+        stats = db.get_user_stats(user_id) if db else {'total': 0, 'success': 0, 'errors': 0}
         return jsonify(stats)
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
@@ -686,8 +723,16 @@ def status():
         "status": "running",
         "token_set": bool(TOKEN),
         "ssl_verify": False,
-        "base_url": BASE_URL
+        "base_url": BASE_URL,
+        "modules_initialized": db is not None
     }
 
+# ========== ИНИЦИАЛИЗАЦИЯ ПРИ ЗАПУСКЕ ==========
+# Инициализируем модули при старте
+init_app()
+
 # ========== ЗАПУСК ==========
-# ТОЛЬКО ДЛЯ GUNICORN!
+if __name__ == '__main__':
+    # Для локального запуска
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
