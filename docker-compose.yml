@@ -25,4 +25,5 @@ services:
       - SSL_CERT_CONTENT=${SSL_CERT_CONTENT}
     volumes:
       - ./data:/app/data
+    # ⚠️ УБИРАЕМ healthcheck если он есть!
     command: gunicorn -c gunicorn.conf.py app:app
