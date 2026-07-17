@@ -1,4 +1,4 @@
-# app.py - ПОЛНАЯ ВЕРСИЯ ДЛЯ НЕСКОЛЬКИХ ПОЛЬЗОВАТЕЛЕЙ
+# app.py - ПОЛНАЯ ВЕРСИЯ С ПОДДЕРЖКОЙ SSL_CERT_CONTENT
 
 from flask import Flask, request, jsonify, render_template_string, send_file
 import os
@@ -9,6 +9,8 @@ import traceback
 import time
 import base64
 import gc
+import tempfile
+import urllib3
 from datetime import datetime
 from modules import Database, FileManager
 from modules.report_generator import ReportGenerator
@@ -32,16 +34,70 @@ BASE_URL = os.environ.get("BASE_URL", "https://maxbot.bothost.tech")
 if not TOKEN:
     logger.error("❌ ТОКЕН НЕ НАЙДЕН!")
 
+# ========== SSL НАСТРОЙКИ ==========
+SSL_VERIFY = os.environ.get("SSL_VERIFY", "true").lower() == "true"
+SSL_VERIFY_PATH = None
+SSL_CERT_CONTENT = os.environ.get("SSL_CERT_CONTENT")
+
+# Загружаем сертификат из переменной
+if SSL_CERT_CONTENT:
+    try:
+        # Создаем временный файл с сертификатом
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as f:
+            f.write(SSL_CERT_CONTENT)
+            SSL_VERIFY_PATH = f.name
+        
+        logger.info("✅ Сертификат загружен из SSL_CERT_CONTENT")
+        logger.info(f"📁 Временный файл: {SSL_VERIFY_PATH}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки сертификата: {e}")
+        SSL_VERIFY_PATH = None
+
+# Проверяем другие источники сертификатов
+if not SSL_VERIFY_PATH:
+    for env_var in ["REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CA_FILE"]:
+        path = os.environ.get(env_var)
+        if path and os.path.exists(path):
+            SSL_VERIFY_PATH = path
+            logger.info(f"✅ Используем сертификаты из {env_var}: {path}")
+            break
+
+# Проверяем стандартные пути
+if not SSL_VERIFY_PATH:
+    default_paths = [
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/ssl/cert.pem",
+        "/usr/local/share/ca-certificates/ca-certificates.crt",
+        "/app/certs/ca-bundle.pem",
+        "/app/certs/ca.pem"
+    ]
+    for path in default_paths:
+        if os.path.exists(path):
+            SSL_VERIFY_PATH = path
+            logger.info(f"✅ Используем сертификаты: {path}")
+            break
+
+# Итоговое состояние SSL
+if SSL_VERIFY and SSL_VERIFY_PATH:
+    logger.info(f"🔒 SSL проверка ВКЛЮЧЕНА с сертификатами: {SSL_VERIFY_PATH}")
+else:
+    if SSL_VERIFY and not SSL_VERIFY_PATH:
+        logger.warning("⚠️ Сертификаты не найдены, SSL проверка ОТКЛЮЧЕНА")
+    else:
+        logger.warning("⚠️ SSL проверка ОТКЛЮЧЕНА (SSL_VERIFY=false)")
+    
+    SSL_VERIFY = False
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 # ========== ГЛОБАЛЬНАЯ ИНИЦИАЛИЗАЦИЯ ==========
 db = None
 fm = None
 report_gen = None
 publisher = None
-api = None
 
 def init_app():
     """Инициализация приложения - выполняется один раз при preload_app=True"""
-    global db, fm, report_gen, publisher, api
+    global db, fm, report_gen, publisher
     
     logger.info("🔄 Инициализация приложения...")
     
@@ -52,7 +108,20 @@ def init_app():
     class APIClient:
         def __init__(self):
             self.token = TOKEN
-            self.base_url = "https://platform-api2.max.ru"
+            self.base_url = MAX_API_URL
+            self.verify_ssl = SSL_VERIFY_PATH if SSL_VERIFY else False
+        
+        def post(self, url, **kwargs):
+            """Выполняет POST запрос с SSL настройками"""
+            kwargs['verify'] = self.verify_ssl
+            kwargs['timeout'] = kwargs.get('timeout', 30)
+            return requests.post(url, **kwargs)
+        
+        def get(self, url, **kwargs):
+            """Выполняет GET запрос с SSL настройками"""
+            kwargs['verify'] = self.verify_ssl
+            kwargs['timeout'] = kwargs.get('timeout', 30)
+            return requests.get(url, **kwargs)
     
     api = APIClient()
     publisher = Publisher(api, fm, db)
@@ -549,6 +618,14 @@ def webhook():
                     text = msg['body']
         
         if not user_id:
+            if 'user' in data and 'user_id' in data['user']:
+                user_id = data['user']['user_id']
+            elif 'chat_id' in data:
+                logger.info(f"ℹ️ Получен chat_id: {data['chat_id']}")
+                return jsonify({"ok": True}), 200
+        
+        if not user_id:
+            logger.warning("⚠️ Не найден user_id в вебхуке")
             return jsonify({"ok": True}), 200
         
         # Обработка /start
@@ -577,7 +654,9 @@ def webhook():
                 "Content-Type": "application/json"
             }
             
-            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            # Используем SSL настройки
+            verify_path = SSL_VERIFY_PATH if SSL_VERIFY else False
+            response = requests.post(url, headers=headers, json=payload, timeout=30, verify=verify_path)
             logger.info(f"✅ Ответ отправлен пользователю {user_id}, статус: {response.status_code}")
         
         return jsonify({"ok": True}), 200
@@ -604,7 +683,8 @@ def set_webhook():
             "Content-Type": "application/json"
         }
         
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        verify_path = SSL_VERIFY_PATH if SSL_VERIFY else False
+        response = requests.post(url, headers=headers, json=payload, timeout=30, verify=verify_path)
         
         if response.status_code == 200:
             return jsonify({
@@ -660,13 +740,43 @@ def get_stats(user_id):
         logger.error(f"❌ Ошибка получения статистики: {e}")
         return jsonify({'total': 0, 'success': 0, 'errors': 0}), 500
 
+@app.route('/test_ssl')
+def test_ssl():
+    """Тест SSL соединения"""
+    try:
+        url = f"{MAX_API_URL}/ping"
+        headers = {"Authorization": TOKEN}
+        verify_path = SSL_VERIFY_PATH if SSL_VERIFY else False
+        
+        response = requests.get(url, headers=headers, timeout=10, verify=verify_path)
+        
+        return jsonify({
+            "status": "ok",
+            "ssl_verified": SSL_VERIFY,
+            "ssl_path": SSL_VERIFY_PATH,
+            "response_code": response.status_code
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "ssl_verified": SSL_VERIFY,
+            "ssl_path": SSL_VERIFY_PATH,
+            "error": str(e)
+        }), 500
+
 @app.route('/health')
 def health():
     return {"status": "ok", "database": "SQLite"}
 
 @app.route('/status')
 def status():
-    return {"status": "running", "token_set": bool(TOKEN)}
+    return {
+        "status": "running",
+        "token_set": bool(TOKEN),
+        "ssl_verify": SSL_VERIFY,
+        "ssl_path": SSL_VERIFY_PATH
+    }
+
 # ========== ЗАПУСК ==========
 # НЕТ if __name__ == "__main__" - ТОЛЬКО ДЛЯ GUNICORN!
-# Приложение запускается через Gunicorn: gunicorn -c gunicorn.conf.py app:app
+# Gunicorn запускает приложение через app:app
