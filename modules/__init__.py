@@ -8,7 +8,7 @@ from .tasks import process_folder_task, cleanup_user_task, init_globals
 
 __all__ = [
     'Database',
-    'FileManager', 
+    'FileManager',
     'Publisher',
     'ReportGenerator',
     'process_folder_task',
