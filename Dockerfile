@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Копирование и установка зависимостей
+# Копирование зависимостей
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -21,5 +21,5 @@ RUN mkdir -p /app/data
 # Открываем порт
 EXPOSE 3000
 
-# Запуск через Gunicorn
+# ✅ Запуск через Gunicorn (НЕ через Flask!)
 CMD ["gunicorn", "-c", "gunicorn.conf.py", "app:app"]
