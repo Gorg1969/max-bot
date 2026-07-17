@@ -2,10 +2,12 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
-# Установка системных зависимостей
+# Установка системных зависимостей для PostgreSQL
 RUN apt-get update && apt-get install -y \
     curl \
     gcc \
+    postgresql-client \
+    libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Копирование зависимостей
@@ -21,5 +23,5 @@ RUN mkdir -p /app/data
 # Открываем порт
 EXPOSE 3000
 
-# ✅ Запуск через Gunicorn (НЕ через Flask!)
+# Запуск через Gunicorn
 CMD ["gunicorn", "-c", "gunicorn.conf.py", "app:app"]
