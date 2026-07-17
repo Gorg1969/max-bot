@@ -673,3 +673,5 @@ if __name__ == "__main__":
     if TOKEN:
         logger.info(f"✅ Токен найден (первые 10): {TOKEN[:10]}...")
     app.run(host='0.0.0.0', port=port, threaded=True)
+    
+    (if __name__ == "__main__":):
