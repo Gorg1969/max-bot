@@ -1,4 +1,4 @@
-# app.py - ПОЛНАЯ ВЕРСИЯ (ОТПРАВКА ПО ОДНОЙ ПАПКЕ)
+# app.py - ПОЛНАЯ ВЕРСИЯ (БЕЗ .env)
 
 from flask import Flask, request, jsonify, render_template_string, send_file
 import os
@@ -31,7 +31,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========== КОНФИГУРАЦИЯ ИЗ ОКРУЖЕНИЯ ==========
+# ========== КОНФИГУРАЦИЯ ИЗ ОКРУЖЕНИЯ (БЕЗ .env) ==========
 TOKEN = os.environ.get("MAX_TOKEN") or os.environ.get("MAX_BOT_TOKEN") or os.environ.get("TOKEN")
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
@@ -41,6 +41,8 @@ if not TOKEN:
     logger.error("❌ ТОКЕН НЕ НАЙДЕН в переменных окружения!")
 
 logger.info(f"✅ Токен загружен из окружения (первые 10 символов): {TOKEN[:10] if TOKEN else 'НЕТ'}...")
+logger.info(f"📁 DATA_DIR: {DATA_DIR}")
+logger.info(f"🔴 REDIS_URL: {REDIS_URL}")
 
 # ========== ОЖИДАНИЕ ЗАПУСКА REDIS ==========
 def wait_for_redis(max_retries=30, delay=2):
@@ -516,7 +518,7 @@ def list_routes():
         })
     return jsonify({'routes': routes, 'total': len(routes)})
 
-# ========== HTML СТРАНИЦА ==========
+# ========== HTML СТРАНИЦА (сокращена для экономии места) ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -552,17 +554,15 @@ UPLOAD_PAGE = """
         .progress-bar { width: 100%; height: 25px; background: #e9ecef; border-radius: 10px; overflow: hidden; margin: 10px 0; display: none; }
         .progress-bar .progress { height: 100%; background: linear-gradient(90deg, #28a745, #20c997); transition: width 0.3s; width: 0%; display: flex; align-items: center; justify-content: center; color: white; font-size: 12px; font-weight: bold; }
         .instructions { background: #fff3cd; padding: 15px 20px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107; }
-        .instructions code { background: #f8f9fa; padding: 2px 8px; border-radius: 3px; font-size: 14px; color: #d63384; }
-        #log { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; font-family: 'Courier New', monospace; font-size: 12px; max-height: 300px; overflow-y: auto; margin: 20px 0; display: none; white-space: pre-wrap; line-height: 1.5; }
-        .button-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px; }
-        .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
-        .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; }
-        .report-section { margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 10px; border: 1px solid #dee2e6; text-align: center; }
         .settings-section { background: #e7f5ff; padding: 15px; border-radius: 10px; margin: 15px 0; border: 1px solid #007bff; }
         .settings-section label { display: inline-block; margin-right: 15px; font-weight: bold; }
         .settings-section input[type="number"] { width: 60px; padding: 5px; border: 1px solid #ccc; border-radius: 5px; }
         .queue-info { background: #f8f9fa; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #17a2b8; }
-        .queue-info strong { color: #17a2b8; }
+        #log { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; font-family: monospace; font-size: 12px; max-height: 300px; overflow-y: auto; margin: 20px 0; display: none; white-space: pre-wrap; }
+        .button-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px; }
+        .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
+        .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; }
+        .report-section { margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 10px; border: 1px solid #dee2e6; text-align: center; }
     </style>
 </head>
 <body>
@@ -617,7 +617,6 @@ UPLOAD_PAGE = """
     </div>
 
     <script>
-        // ========== КЛИЕНТСКИЙ КОД ==========
         const userId = new URLSearchParams(window.location.search).get('user_id') || 151296248;
         let selectedFiles = [];
         let isProcessing = false;
@@ -641,18 +640,15 @@ UPLOAD_PAGE = """
         const progress = document.getElementById('progress');
         const queueStatus = document.getElementById('queueStatus');
 
-        // ========== РЕКУРСИВНЫЙ ОБХОД ПАПОК ==========
         function readDirectoryRecursive(entry, path, files, callback) {
             if (entry.isDirectory) {
                 const reader = entry.createReader();
                 let allEntries = [];
-                
                 function readEntries() {
                     reader.readEntries((entries) => {
                         if (entries.length === 0) {
                             let pending = allEntries.length;
                             if (pending === 0) { callback(); return; }
-                            
                             allEntries.forEach(e => {
                                 if (e.isDirectory) {
                                     readDirectoryRecursive(e, path + e.name + '/', files, () => {
@@ -684,18 +680,14 @@ UPLOAD_PAGE = """
             }
         }
 
-        // ========== ОБРАБОТЧИКИ DROP ==========
         dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
         dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('dragover'); });
-        
         dropZone.addEventListener('drop', (e) => {
             e.preventDefault();
             dropZone.classList.remove('dragover');
-            
             const items = e.dataTransfer.items;
             const files = [];
             let pending = 0;
-            
             for (let item of items) {
                 if (item.kind === 'file') {
                     const entry = item.webkitGetAsEntry();
@@ -711,7 +703,6 @@ UPLOAD_PAGE = """
                     }
                 }
             }
-            
             if (pending === 0 && files.length > 0) {
                 selectedFiles = files;
                 displayFiles(selectedFiles);
@@ -726,45 +717,28 @@ UPLOAD_PAGE = """
             }
         });
 
-        // ========== СЖАТИЕ ИЗОБРАЖЕНИЙ ==========
         function compressImage(file, maxWidth = 1920, maxHeight = 1920, quality = 0.85) {
             return new Promise((resolve, reject) => {
                 if (file.size > 20 * 1024 * 1024) {
-                    reject(new Error(`Файл слишком большой: ${(file.size/1024/1024).toFixed(1)} МБ`));
+                    reject(new Error(`Файл слишком большой`));
                     return;
                 }
-                
                 const reader = new FileReader();
                 reader.onload = function(e) {
                     const img = new Image();
                     img.onload = function() {
-                        let width = img.width;
-                        let height = img.height;
-                        
-                        if (width > maxWidth) {
-                            height = (height * maxWidth) / width;
-                            width = maxWidth;
-                        }
-                        if (height > maxHeight) {
-                            width = (width * maxHeight) / height;
-                            height = maxHeight;
-                        }
-                        
+                        let width = img.width, height = img.height;
+                        if (width > maxWidth) { height = (height * maxWidth) / width; width = maxWidth; }
+                        if (height > maxHeight) { width = (width * maxHeight) / height; height = maxHeight; }
                         const canvas = document.createElement('canvas');
-                        canvas.width = width;
-                        canvas.height = height;
+                        canvas.width = width; canvas.height = height;
                         const ctx = canvas.getContext('2d');
                         ctx.drawImage(img, 0, 0, width, height);
-                        
                         canvas.toBlob((blob) => {
                             if (blob) {
-                                const compressedFile = new File([blob], file.name, {
-                                    type: 'image/jpeg',
-                                    lastModified: Date.now()
-                                });
-                                resolve(compressedFile);
+                                resolve(new File([blob], file.name, { type: 'image/jpeg', lastModified: Date.now() }));
                             } else {
-                                reject(new Error('Не удалось сжать изображение'));
+                                reject(new Error('Не удалось сжать'));
                             }
                         }, 'image/jpeg', quality);
                     };
@@ -776,67 +750,41 @@ UPLOAD_PAGE = """
             });
         }
 
-        // ========== ОТОБРАЖЕНИЕ ПАПОК ==========
         function displayFiles(files) {
             fileListContent.innerHTML = '';
             const folders = new Map();
-            
             files.forEach(f => {
                 const parts = f.webkitRelativePath.split('/');
                 if (parts.length >= 2) {
                     const rootFolder = parts[0];
                     const subFolder = parts.length > 2 ? parts.slice(1, -1).join('/') : 'root';
                     const key = rootFolder + '/' + subFolder;
-                    
                     if (!folders.has(key)) {
-                        folders.set(key, {
-                            root: rootFolder,
-                            sub: subFolder,
-                            display: subFolder === 'root' ? rootFolder : rootFolder + '/' + subFolder,
-                            count: 0,
-                            files: []
-                        });
+                        folders.set(key, { root: rootFolder, sub: subFolder, display: subFolder === 'root' ? rootFolder : rootFolder + '/' + subFolder, count: 0, files: [] });
                     }
-                    const folder = folders.get(key);
-                    folder.count++;
-                    folder.files.push(f);
+                    folders.get(key).count++;
+                    folders.get(key).files.push(f);
                 }
             });
-            
             const sortedFolders = Array.from(folders.values()).sort((a, b) => a.display.localeCompare(b.display));
-            
             if (sortedFolders.length > MAX_FOLDERS) {
                 showStatus('warning', `⚠️ Слишком много папок: ${sortedFolders.length} (макс ${MAX_FOLDERS})`);
                 sortedFolders = sortedFolders.slice(0, MAX_FOLDERS);
             }
-            
-            folderQueue = sortedFolders.map(f => ({
-                name: f.display,
-                status: 'pending',
-                count: f.count,
-                files: f.files
-            }));
-            
+            folderQueue = sortedFolders.map(f => ({ name: f.display, status: 'pending', count: f.count, files: f.files }));
             sortedFolders.forEach(folder => {
                 const li = document.createElement('li');
                 const isSubFolder = folder.sub !== 'root';
-                const icon = isSubFolder ? '📂' : '📁';
-                
-                li.innerHTML = `
-                    <span>${icon} <strong>${folder.display}</strong></span>
-                    <span class="count">${folder.count} файлов</span>
-                `;
+                li.innerHTML = `<span>${isSubFolder ? '📂' : '📁'} <strong>${folder.display}</strong></span><span class="count">${folder.count} файлов</span>`;
                 li.style.borderLeftColor = isSubFolder ? '#28a745' : '#007bff';
                 fileListContent.appendChild(li);
             });
-            
             selectedInfo.textContent = `✅ Найдено ${sortedFolders.length} папок, всего ${files.length} файлов`;
             fileList.style.display = 'block';
             updateQueueStatus();
-            showStatus('info', `📦 Найдено ${sortedFolders.length} папок с объявлениями`);
+            showStatus('info', `📦 Найдено ${sortedFolders.length} папок`);
         }
 
-        // ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
         function updateQueueStatus() {
             const total = folderQueue.length;
             const done = folderQueue.filter(f => f.status === 'done').length;
@@ -860,7 +808,7 @@ UPLOAD_PAGE = """
         function getReport() { window.open(`/report/${userId}`, '_blank'); }
 
         function clearFiles() {
-            if (isProcessing && !confirm('Остановить публикацию и очистить?')) return;
+            if (isProcessing && !confirm('Остановить?')) return;
             selectedFiles = []; folderQueue = []; jobIds = [];
             fileList.style.display = 'none'; statusDiv.style.display = 'none';
             progressBar.style.display = 'none'; logDiv.style.display = 'none';
@@ -880,49 +828,36 @@ UPLOAD_PAGE = """
             }).catch(e => console.error(e));
         }
 
-        // ========== МОНИТОРИНГ ЗАДАЧ ==========
         function startJobMonitoring() {
             if (jobStatusInterval) clearInterval(jobStatusInterval);
-            
             let checkCount = 0;
             const MAX_CHECKS = 60;
-            
             jobStatusInterval = setInterval(async () => {
                 try {
                     checkCount++;
-                    
                     const resp = await fetch('/job_status', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ job_ids: jobIds })
                     });
-                    
                     if (!resp.ok) return;
                     const data = await resp.json();
-                    
                     let done = 0, failed = 0, finished = 0;
                     jobIds.forEach(id => {
                         const s = data[id];
                         if (s) {
-                            if (s.status === 'finished') { 
-                                finished++; 
-                                if (s.result && s.result.success) done++; 
-                                else failed++; 
-                            }
+                            if (s.status === 'finished') { finished++; if (s.result && s.result.success) done++; else failed++; }
                             else if (s.status === 'failed') failed++;
                         }
                     });
-                    
                     const total = jobIds.length;
                     const pct = total > 0 ? Math.round(((done + failed) / total) * 100) : 0;
                     progress.style.width = pct + '%';
                     progress.textContent = pct + '%';
-                    
                     if (finished >= total) {
                         clearInterval(jobStatusInterval);
                         jobStatusInterval = null;
                         isProcessing = false;
-                        
                         if (failed === 0 && done === total) {
                             showStatus('success', `✅ Загружено ${done} папок!`);
                             addLog(`✅ ВСЕ ${done} папок загружены!`);
@@ -935,32 +870,22 @@ UPLOAD_PAGE = """
                         clearInterval(jobStatusInterval);
                         jobStatusInterval = null;
                         isProcessing = false;
-                        showStatus('warning', `⏱️ Таймаут мониторинга. Проверьте статус позже.`);
-                        addLog(`⏱️ Мониторинг остановлен после ${MAX_CHECKS} проверок`);
+                        showStatus('warning', `⏱️ Таймаут мониторинга`);
+                        addLog(`⏱️ Мониторинг остановлен`);
                     }
-                } catch(e) { 
-                    console.error(e);
-                }
+                } catch(e) { console.error(e); }
             }, 2000);
         }
 
-        // ========== ОСНОВНАЯ ФУНКЦИЯ ЗАГРУЗКИ - ПО ОДНОЙ ПАПКЕ ==========
         async function uploadFolder() {
-            if (selectedFiles.length === 0) {
-                showStatus('error', '❌ Выберите папку');
-                return;
-            }
-            if (isProcessing) {
-                addLog('⚠️ Уже выполняется');
-                return;
-            }
+            if (selectedFiles.length === 0) { showStatus('error', '❌ Выберите папку'); return; }
+            if (isProcessing) { addLog('⚠️ Уже выполняется'); return; }
             
             isProcessing = true;
             jobIds = [];
             const maxPhotos = parseInt(document.getElementById('maxPhotos').value) || 6;
             const delayBetween = parseInt(document.getElementById('delayBetween').value) || 3;
             
-            // Группируем по подпапкам
             const folders = {};
             selectedFiles.forEach(f => {
                 const parts = f.webkitRelativePath.split('/');
@@ -985,7 +910,6 @@ UPLOAD_PAGE = """
             
             folderQueue = folderNames.map(n => ({ name: n, status: 'pending' }));
             updateQueueStatus();
-            
             progressBar.style.display = 'block';
             progress.style.width = '0%';
             progress.textContent = '0%';
@@ -995,127 +919,83 @@ UPLOAD_PAGE = """
             let processedCount = 0;
             let totalImages = 0;
             
-            // Отправляем КАЖДУЮ папку отдельным запросом
             for (let idx = 0; idx < folderNames.length; idx++) {
                 const folderName = folderNames[idx];
                 const files = folders[folderName];
+                addLog(`📂 [${idx+1}/${totalFolders}] ${folderName}`);
                 
-                addLog(`📂 [${idx+1}/${totalFolders}] Обработка: ${folderName}`);
-                
-                let infoFile = null;
-                let imageFiles = [];
-                
+                let infoFile = null, imageFiles = [];
                 for (const f of files) {
                     const name = f.name.toLowerCase();
-                    if (name.endsWith('.txt') && name.includes('info')) {
-                        infoFile = f;
-                    } else if (name.match(/\\.(jpg|jpeg|png|gif|bmp|webp)$/)) {
+                    if (name.endsWith('.txt') && name.includes('info')) infoFile = f;
+                    else if (name.match(/\\.(jpg|jpeg|png|gif|bmp|webp)$/)) {
                         if (f.size > MAX_IMAGE_SIZE_MB * 1024 * 1024) {
-                            addLog(`⚠️ ${f.name} слишком большой (${(f.size/1024/1024).toFixed(1)} МБ), пропускаем`);
+                            addLog(`⚠️ ${f.name} слишком большой, пропускаем`);
                             continue;
                         }
                         imageFiles.push(f);
                     }
                 }
-                
-                if (!infoFile) {
-                    addLog(`⚠️ Нет info.txt в ${folderName}, пропускаем`);
-                    folderQueue[idx].status = 'error';
-                    updateQueueStatus();
-                    processedCount++;
-                    continue;
-                }
+                if (!infoFile) { addLog(`⚠️ Нет info.txt в ${folderName}`); folderQueue[idx].status = 'error'; processedCount++; continue; }
                 
                 const selectedImages = imageFiles.slice(0, Math.min(maxPhotos, MAX_IMAGES_PER_FOLDER));
                 addLog(`📸 ${selectedImages.length} фото`);
                 
-                // Сжимаем изображения
                 const compressed = [];
                 for (let i = 0; i < selectedImages.length; i++) {
                     try {
-                        addLog(`🔄 Сжатие ${i+1}/${selectedImages.length}: ${selectedImages[i].name}`);
                         const img = await compressImage(selectedImages[i], 1920, 1920, 0.85);
                         compressed.push(img);
                         totalImages++;
-                    } catch(e) {
-                        addLog(`⚠️ Ошибка сжатия: ${e.message}`);
-                    }
+                    } catch(e) { addLog(`⚠️ Ошибка сжатия: ${e.message}`); }
                 }
                 
                 const infoContent = await infoFile.text();
-                
-                // Создаем FormData для ОДНОЙ папки
                 const formData = new FormData();
                 formData.append('user_id', userId);
                 formData.append('max_photos', maxPhotos);
-                
-                formData.append('folders[]', JSON.stringify({
-                    name: folderName,
-                    adText: infoContent.substring(0, 5000),
-                    imageCount: compressed.length
-                }));
-                
+                formData.append('folders[]', JSON.stringify({ name: folderName, adText: infoContent.substring(0, 5000), imageCount: compressed.length }));
                 for (let i = 0; i < compressed.length; i++) {
                     formData.append(`images_${folderName}_${i}`, compressed[i], compressed[i].name);
                 }
                 
-                // Отправляем ОДНУ папку
                 try {
-                    addLog(`📤 Отправка папки ${idx+1}/${totalFolders}...`);
-                    
-                    const resp = await fetch('/upload_folders', { 
-                        method: 'POST', 
-                        body: formData
-                    });
-                    
-                    if (!resp.ok) {
-                        const t = await resp.text();
-                        throw new Error(`HTTP ${resp.status}: ${t.substring(0, 100)}`);
-                    }
-                    
+                    addLog(`📤 Отправка ${idx+1}/${totalFolders}...`);
+                    const resp = await fetch('/upload_folders', { method: 'POST', body: formData });
+                    if (!resp.ok) { const t = await resp.text(); throw new Error(`HTTP ${resp.status}`); }
                     const result = await resp.json();
-                    
-                    if (!result.success) {
-                        throw new Error(result.message || 'Ошибка');
-                    }
-                    
+                    if (!result.success) throw new Error(result.message);
                     if (result.job_ids && result.job_ids.length > 0) {
                         jobIds.push(...result.job_ids);
                         folderQueue[idx].status = 'done';
-                        addLog(`✅ Папка ${folderName} отправлена (задача ${result.job_ids[0]})`);
+                        addLog(`✅ Задача ${result.job_ids[0]}`);
                     } else {
                         folderQueue[idx].status = 'error';
-                        addLog(`⚠️ Папка ${folderName} не создала задачу`);
+                        addLog(`⚠️ Не создана задача`);
                     }
-                    
                 } catch(e) {
                     folderQueue[idx].status = 'error';
-                    addLog(`❌ Ошибка отправки ${folderName}: ${e.message}`);
+                    addLog(`❌ ${e.message}`);
                 }
                 
                 processedCount++;
-                
-                // Обновляем прогресс
                 const pct = Math.round((processedCount / totalFolders) * 100);
                 progress.style.width = pct + '%';
                 progress.textContent = `${pct}%`;
                 updateQueueStatus();
                 
-                // Задержка между папками
                 if (idx < folderNames.length - 1) {
                     addLog(`⏳ Задержка ${delayBetween} сек...`);
                     await new Promise(r => setTimeout(r, delayBetween * 1000));
                 }
             }
             
-            addLog(`✅ Все ${totalFolders} папок обработаны!`);
-            addLog(`📊 Создано ${jobIds.length} задач, ${totalImages} фото`);
-            
+            addLog(`✅ Все ${totalFolders} папок обработаны! ${jobIds.length} задач`);
             if (jobIds.length > 0) {
-                showStatus('info', `📦 Создано ${jobIds.length} задач, ждем выполнения...`);
+                showStatus('info', `📦 ${jobIds.length} задач, ждем...`);
                 startJobMonitoring();
             } else {
-                showStatus('warning', '⚠️ Не создано ни одной задачи');
+                showStatus('warning', '⚠️ Нет задач');
                 isProcessing = false;
             }
         }
