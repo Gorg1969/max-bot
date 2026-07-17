@@ -3,15 +3,13 @@
 import logging
 import time
 import os
-import json
-from datetime import datetime
 from .publisher import Publisher
 from .file_manager import FileManager
 from .database import Database
 
 logger = logging.getLogger(__name__)
 
-# Глобальные объекты (будут инициализированы в воркере)
+# Глобальные объекты
 _db = None
 _fm = None
 _publisher = None
@@ -26,14 +24,7 @@ def init_globals(api):
     _publisher = Publisher(_api, _fm, _db)
 
 def process_folder_task(user_id, folder_data, job_id):
-    """
-    RQ задача для обработки одной папки
-    
-    Args:
-        user_id: ID пользователя
-        folder_data: Данные папки (folder_name, ad_text, metadata_text, images)
-        job_id: ID задачи для отслеживания
-    """
+    """RQ задача для обработки одной папки"""
     try:
         logger.info(f"🔵 Задача {job_id}: Начало обработки папки для пользователя {user_id}")
         
@@ -43,14 +34,13 @@ def process_folder_task(user_id, folder_data, job_id):
         images = folder_data.get('images', [])
         
         if not folder_name or not ad_text:
-            logger.error(f"❌ Задача {job_id}: Нет folder_name или ad_text")
             return {
                 'success': False,
                 'message': 'Нет folder_name или ad_text',
-                'folder_name': folder_name
+                'folder_name': folder_name,
+                'job_id': job_id
             }
         
-        # Публикуем папку
         success, message = _publisher.publish_single_folder(
             user_id, folder_name, ad_text, metadata_text, images
         )
