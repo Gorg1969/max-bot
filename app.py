@@ -1,4 +1,4 @@
-# app.py - С ВСТРОЕННЫМ CORS (без flask-cors)
+# app.py - С ВСТРОЕННЫМ CORS И ПОЛНЫМ ИНТЕРФЕЙСОМ
 
 from flask import Flask, request, jsonify, render_template_string, send_file
 import os
@@ -84,375 +84,1194 @@ def init_app():
 # ========== UPLOAD_PAGE HTML ==========
 UPLOAD_PAGE = '''
 <!DOCTYPE html>
-<html>
+<html lang="ru">
 <head>
-<meta charset="UTF-8">
-<title>Загрузка объявлений</title>
-<style>
-body{font-family:Arial;max-width:900px;margin:50px auto;padding:20px;background:#f5f5f5}
-.container{background:white;padding:30px;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}
-h1{color:#333}
-.drop-zone{border:2px dashed #007bff;padding:40px;margin:20px 0;border-radius:10px;background:#f8f9fa;text-align:center;cursor:pointer}
-.drop-zone:hover{background:#e3f2fd}
-.drop-zone.dragover{background:#d4edda;border-color:#28a745}
-input[type=file]{display:none}
-.btn{padding:12px 30px;border:none;border-radius:5px;cursor:pointer;font-size:16px;font-weight:bold}
-.btn-success{background:#28a745;color:white}
-.btn-success:hover{background:#218838}
-.btn-danger{background:#dc3545;color:white}
-.btn-danger:hover{background:#c82333}
-.btn-warning{background:#ffc107;color:#333}
-.btn-warning:hover{background:#e0a800}
-.btn-info{background:#17a2b8;color:white}
-.btn-info:hover{background:#138496}
-.status{margin-top:20px;padding:15px;border-radius:5px;display:none}
-.status.success{background:#d4edda;color:#155724;display:block;border-left:4px solid #28a745}
-.status.error{background:#f8d7da;color:#721c24;display:block;border-left:4px solid #dc3545}
-.status.info{background:#d1ecf1;color:#0c5460;display:block;border-left:4px solid #17a2b8}
-.status.warning{background:#fff3cd;color:#856404;display:block;border-left:4px solid #ffc107}
-.file-list{list-style:none;padding:0}
-.file-list li{background:#f8f9fa;padding:10px 15px;margin:5px 0;border-radius:5px;border-left:3px solid #007bff;display:flex;justify-content:space-between;align-items:center}
-.file-list li .count{background:#007bff;color:white;padding:2px 10px;border-radius:20px;font-size:12px}
-.file-list li .status-badge{font-size:12px;padding:2px 10px;border-radius:20px;margin-left:10px}
-.file-list li .status-badge.pending{background:#ffc107;color:#333}
-.file-list li .status-badge.done{background:#28a745;color:white}
-.file-list li .status-badge.error{background:#dc3545;color:white}
-.progress-bar{width:100%;height:25px;background:#e9ecef;border-radius:10px;overflow:hidden;margin:10px 0;display:none}
-.progress-bar .progress{height:100%;background:linear-gradient(90deg,#28a745,#20c997);transition:width .3s;width:0%;display:flex;align-items:center;justify-content:center;color:white;font-size:12px;font-weight:bold}
-.instructions{background:#fff3cd;padding:15px;border-radius:5px;margin:20px 0;border-left:4px solid #ffc107}
-.settings-section{background:#e7f5ff;padding:15px;border-radius:10px;margin:15px 0}
-.settings-section label{display:inline-block;margin-right:15px;font-weight:bold}
-.settings-section input[type=number]{width:60px;padding:5px;border:1px solid #ccc;border-radius:5px}
-#log{background:#1e1e1e;color:#d4d4d4;padding:15px;border-radius:5px;font-family:monospace;font-size:12px;max-height:300px;overflow-y:auto;margin:20px 0;display:none;white-space:pre-wrap}
-.button-group{display:flex;gap:10px;flex-wrap:wrap;margin-top:15px}
-.selected-info{background:#e7f5ff;padding:10px 15px;border-radius:5px;margin:10px 0;border-left:3px solid #007bff}
-.queue-info{background:#f8f9fa;padding:10px 15px;border-radius:5px;margin:10px 0;border-left:3px solid #17a2b8}
-.footer{text-align:center;margin-top:30px;color:#999;font-size:14px}
-.report-section{margin-top:20px;padding:20px;background:#f8f9fa;border-radius:10px;border:1px solid #dee2e6;text-align:center}
-.stats-section{display:grid;grid-template-columns:repeat(3,1fr);gap:15px;margin:20px 0}
-.stat-card{background:white;padding:20px;border-radius:10px;box-shadow:0 2px 5px rgba(0,0,0,0.1);text-align:center}
-.stat-card .number{font-size:32px;font-weight:bold;color:#007bff}
-.stat-card .label{color:#666;font-size:14px;margin-top:5px}
-</style>
-</head>
-<body>
-<div class="container">
-<h1>📤 Загрузка объявлений</h1>
-<div class="instructions">
-<strong>📌 Как подготовить:</strong><br>
-1️⃣ Создайте головную папку с подпапками<br>
-2️⃣ В каждой подпапке: info.txt и фото (макс 10)<br>
-3️⃣ Используйте разделитель #изъятая<br>
-4️⃣ Перетащите головную папку в поле ниже<br>
-5️⃣ Папки отправляются по одной с задержкой
-</div>
-<div class="settings-section">
-<h4>⚙️ Настройки</h4>
-<label>📸 Максимум фото: <input type="number" id="maxPhotos" value="6" min="1" max="10"></label>
-<label>⏱️ Задержка между папками (сек): <input type="number" id="delayBetween" value="3" min="1" max="30"></label>
-</div>
-<div class="drop-zone" id="dropZone">
-<span style="font-size:48px;">📂</span>
-<p><strong>Перетащите головную папку сюда</strong></p>
-<button class="btn btn-success" onclick="document.getElementById('folderInput').click()">Выбрать папку</button>
-<input type="file" id="folderInput" webkitdirectory multiple>
-</div>
-<div id="fileList" style="display:none;">
-<div class="selected-info" id="selectedInfo"></div>
-<div class="queue-info"><strong>📋 Очередь:</strong> <span id="queueStatus">Ожидание</span></div>
-<ul class="file-list" id="fileListContent"></ul>
-<div class="button-group">
-<button class="btn btn-success" onclick="uploadFolder()">🚀 Загрузить</button>
-<button class="btn btn-danger" onclick="clearFiles()">🗑️ Очистить</button>
-</div>
-</div>
-<div class="progress-bar" id="progressBar"><div class="progress" id="progress">0%</div></div>
-<div id="status" class="status"></div>
-<div id="log"></div>
-<div class="stats-section" id="statsSection">
-<div class="stat-card"><div class="number" id="statTotal">0</div><div class="label">Всего публикаций</div></div>
-<div class="stat-card" style="border-top:3px solid #28a745;"><div class="number" id="statSuccess" style="color:#28a745;">0</div><div class="label">✅ Успешно</div></div>
-<div class="stat-card" style="border-top:3px solid #dc3545;"><div class="number" id="statErrors" style="color:#dc3545;">0</div><div class="label">❌ Ошибок</div></div>
-</div>
-<div class="report-section">
-<button class="btn btn-success" onclick="getReport()">📊 Скачать отчет</button>
-<button class="btn btn-info" onclick="loadStats()">🔄 Обновить статистику</button>
-<p style="margin-top:10px;color:#666;font-size:14px;">После публикации всех папок</p>
-</div>
-<div class="footer">⚡ MAX Bot | SQLite</div>
-</div>
-
-<script>
-const userId = new URLSearchParams(window.location.search).get('user_id') || 151296248;
-let selectedFiles = [], isProcessing = false, folderQueue = [], totalFolders = 0;
-
-window.onload = function() { loadStats(); };
-
-function loadStats() {
-    fetch('/stats/' + userId)
-        .then(res => res.json())
-        .then(data => {
-            document.getElementById('statTotal').textContent = data.total || 0;
-            document.getElementById('statSuccess').textContent = data.success || 0;
-            document.getElementById('statErrors').textContent = data.errors || 0;
-        })
-        .catch(err => console.error('Ошибка загрузки статистики:', err));
-}
-
-function readDirectoryRecursive(entry, path, files, callback) {
-    if (entry.isDirectory) {
-        const reader = entry.createReader();
-        let allEntries = [];
-        function readEntries() {
-            reader.readEntries((entries) => {
-                if (entries.length === 0) {
-                    let pending = allEntries.length;
-                    if (pending === 0) { callback(); return; }
-                    allEntries.forEach(e => {
-                        if (e.isDirectory) {
-                            readDirectoryRecursive(e, path + e.name + '/', files, () => { pending--; if (pending === 0) callback(); });
-                        } else {
-                            e.file((file) => { file.webkitRelativePath = path + file.name; files.push(file); pending--; if (pending === 0) callback(); });
-                        }
-                    });
-                } else { allEntries = allEntries.concat(entries); readEntries(); }
-            });
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MAX Bot - Загрузка объявлений</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
         }
-        readEntries();
-    } else {
-        entry.file((file) => { file.webkitRelativePath = path + file.name; files.push(file); callback(); });
-    }
-}
-
-const dropZone = document.getElementById('dropZone');
-const folderInput = document.getElementById('folderInput');
-
-dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
-dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('dragover'); });
-dropZone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    dropZone.classList.remove('dragover');
-    const items = e.dataTransfer.items;
-    const files = [];
-    let pending = 0;
-    for (let item of items) {
-        if (item.kind === 'file') {
-            const entry = item.webkitGetAsEntry();
-            if (entry) { pending++; readDirectoryRecursive(entry, '', files, () => { pending--; if (pending === 0) { selectedFiles = files; displayFiles(selectedFiles); } }); }
-        }
-    }
-    if (pending === 0 && files.length > 0) { selectedFiles = files; displayFiles(selectedFiles); }
-});
-
-folderInput.addEventListener('change', (e) => {
-    const files = Array.from(e.target.files);
-    if (files.length > 0) { selectedFiles = files; displayFiles(selectedFiles); }
-});
-
-function compressImage(file, maxWidth = 1920, maxHeight = 1920, quality = 0.85) {
-    return new Promise((resolve, reject) => {
-        if (file.size > 20 * 1024 * 1024) { reject(new Error('Файл слишком большой')); return; }
-        const reader = new FileReader();
-        reader.onload = function(e) {
-            const img = new Image();
-            img.onload = function() {
-                let w = img.width, h = img.height;
-                if (w > maxWidth) { h = (h * maxWidth) / w; w = maxWidth; }
-                if (h > maxHeight) { w = (w * maxHeight) / h; h = maxHeight; }
-                const canvas = document.createElement('canvas');
-                canvas.width = w; canvas.height = h;
-                const ctx = canvas.getContext('2d');
-                ctx.drawImage(img, 0, 0, w, h);
-                canvas.toBlob((blob) => {
-                    if (blob) { resolve(new File([blob], file.name, { type: 'image/jpeg', lastModified: Date.now() })); }
-                    else { reject(new Error('Не удалось сжать')); }
-                }, 'image/jpeg', quality);
-            };
-            img.onerror = reject;
-            img.src = e.target.result;
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-    });
-}
-
-function displayFiles(files) {
-    const container = document.getElementById('fileListContent');
-    container.innerHTML = '';
-    const folders = new Map();
-    files.forEach(f => {
-        const parts = f.webkitRelativePath.split('/');
-        if (parts.length >= 2) {
-            const root = parts[0];
-            const sub = parts.length > 2 ? parts.slice(1, -1).join('/') : 'root';
-            const key = root + '/' + sub;
-            if (!folders.has(key)) { folders.set(key, { root: root, sub: sub, display: sub === 'root' ? root : root + '/' + sub, count: 0, files: [] }); }
-            folders.get(key).count++;
-            folders.get(key).files.push(f);
-        }
-    });
-    const sorted = Array.from(folders.values()).sort((a, b) => a.display.localeCompare(b.display));
-    folderQueue = sorted.map(f => ({ name: f.display, status: 'pending', count: f.count, files: f.files }));
-    sorted.forEach(folder => {
-        const li = document.createElement('li');
-        const isSub = folder.sub !== 'root';
-        li.innerHTML = `<span>${isSub ? '📂' : '📁'} <strong>${folder.display}</strong></span><span><span class="count">${folder.count} файлов</span><span class="status-badge pending" id="st-${folder.display.replace(/\\//g,'-')}">⏳</span></span>`;
-        li.style.borderLeftColor = isSub ? '#28a745' : '#007bff';
-        container.appendChild(li);
-    });
-    document.getElementById('selectedInfo').textContent = `✅ Найдено ${sorted.length} папок, ${files.length} файлов`;
-    document.getElementById('fileList').style.display = 'block';
-    updateQueueStatus();
-    totalFolders = sorted.length;
-}
-
-function updateQueueStatus() {
-    const done = folderQueue.filter(f => f.status === 'done').length;
-    const errors = folderQueue.filter(f => f.status === 'error').length;
-    const total = folderQueue.length;
-    document.getElementById('queueStatus').textContent = isProcessing ? `🔄 ${done+errors}/${total}` : `📋 ${done}/${total}`;
-    if (errors > 0) document.getElementById('queueStatus').textContent += ` ⚠️${errors}`;
-}
-
-function updateFolderStatus(name, status) {
-    const idx = folderQueue.findIndex(f => f.name === name);
-    if (idx !== -1) {
-        folderQueue[idx].status = status;
-        updateQueueStatus();
-        const badge = document.getElementById('st-' + name.replace(/\\//g,'-'));
-        if (badge) {
-            badge.className = 'status-badge ' + status;
-            badge.textContent = status === 'pending' ? '⏳' : status === 'processing' ? '🔄' : status === 'done' ? '✅' : '❌';
-        }
-    }
-}
-
-function addLog(msg) {
-    const log = document.getElementById('log');
-    log.style.display = 'block';
-    log.textContent += msg + '\\n';
-    log.scrollTop = log.scrollHeight;
-}
-
-function showStatus(type, msg) {
-    const s = document.getElementById('status');
-    s.className = 'status ' + type;
-    s.textContent = msg;
-    s.style.display = 'block';
-}
-
-function getReport() { window.open('/report/' + userId, '_blank'); }
-
-function clearFiles() {
-    if (isProcessing && !confirm('Остановить?')) return;
-    selectedFiles = []; folderQueue = [];
-    document.getElementById('fileList').style.display = 'none';
-    document.getElementById('status').style.display = 'none';
-    document.getElementById('progressBar').style.display = 'none';
-    document.getElementById('log').style.display = 'none';
-    document.getElementById('progress').style.width = '0%';
-    document.getElementById('progress').textContent = '0%';
-    folderInput.value = '';
-    isProcessing = false;
-}
-
-async function uploadFolder() {
-    if (selectedFiles.length === 0) { showStatus('error', '❌ Выберите папку'); return; }
-    if (isProcessing) { addLog('⚠️ Уже выполняется'); return; }
-    
-    isProcessing = true;
-    const maxPhotos = parseInt(document.getElementById('maxPhotos').value) || 6;
-    const delay = parseInt(document.getElementById('delayBetween').value) || 3;
-    
-    document.getElementById('progressBar').style.display = 'block';
-    document.getElementById('progress').style.width = '0%';
-    document.getElementById('progress').textContent = '0%';
-    document.getElementById('log').textContent = '';
-    addLog('🚀 Загрузка ' + totalFolders + ' папок по одной...');
-    
-    let processed = 0, totalImages = 0, errors = 0;
-    
-    for (let idx = 0; idx < folderQueue.length; idx++) {
-        const folder = folderQueue[idx];
-        const name = folder.name;
-        const files = folder.files;
         
-        updateFolderStatus(name, 'processing');
-        addLog('📂 [' + (idx+1) + '/' + totalFolders + '] ' + name);
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
         
-        let infoFile = null, imageFiles = [];
-        for (const f of files) {
-            const fn = f.name.toLowerCase();
-            if (fn.endsWith('.txt') && fn.includes('info')) infoFile = f;
-            else if (fn.match(/\\.(jpg|jpeg|png|gif|bmp|webp)$/)) {
-                if (f.size > 5 * 1024 * 1024) { addLog('⚠️ ' + f.name + ' слишком большой, пропускаем'); continue; }
-                imageFiles.push(f);
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+            padding: 40px;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 2px solid #f0f0f0;
+        }
+        
+        .header h1 {
+            font-size: 32px;
+            color: #333;
+            margin-bottom: 10px;
+        }
+        
+        .header .subtitle {
+            color: #666;
+            font-size: 16px;
+        }
+        
+        .header .badge {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            margin-top: 10px;
+        }
+        
+        .instructions {
+            background: #fff3cd;
+            padding: 20px;
+            border-radius: 12px;
+            margin: 20px 0;
+            border-left: 4px solid #ffc107;
+        }
+        
+        .instructions strong {
+            color: #856404;
+        }
+        
+        .instructions ul {
+            margin: 10px 0 0 20px;
+            color: #856404;
+        }
+        
+        .instructions ul li {
+            margin: 5px 0;
+        }
+        
+        .settings-section {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 12px;
+            margin: 20px 0;
+            border: 1px solid #e9ecef;
+        }
+        
+        .settings-section h4 {
+            margin-bottom: 15px;
+            color: #333;
+        }
+        
+        .settings-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            align-items: center;
+        }
+        
+        .settings-row label {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 500;
+            color: #555;
+        }
+        
+        .settings-row input[type="number"] {
+            width: 70px;
+            padding: 8px 12px;
+            border: 2px solid #dee2e6;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+        
+        .settings-row input[type="number"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .drop-zone {
+            border: 3px dashed #667eea;
+            padding: 50px 20px;
+            margin: 20px 0;
+            border-radius: 16px;
+            background: #f8f9ff;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .drop-zone:hover {
+            background: #f0f2ff;
+            border-color: #764ba2;
+        }
+        
+        .drop-zone.dragover {
+            background: #e8f5e9;
+            border-color: #4caf50;
+            transform: scale(1.02);
+        }
+        
+        .drop-zone .icon {
+            font-size: 64px;
+            margin-bottom: 15px;
+        }
+        
+        .drop-zone p {
+            color: #666;
+            font-size: 18px;
+            margin: 10px 0;
+        }
+        
+        .drop-zone .hint {
+            color: #999;
+            font-size: 14px;
+        }
+        
+        input[type="file"] {
+            display: none;
+        }
+        
+        .btn {
+            padding: 12px 30px;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(0,0,0,0.15);
+        }
+        
+        .btn:active {
+            transform: translateY(0);
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+        }
+        
+        .btn-success {
+            background: linear-gradient(135deg, #43a047, #66bb6a);
+            color: white;
+        }
+        
+        .btn-danger {
+            background: linear-gradient(135deg, #e53935, #ef5350);
+            color: white;
+        }
+        
+        .btn-warning {
+            background: linear-gradient(135deg, #f57c00, #ffa726);
+            color: white;
+        }
+        
+        .btn-info {
+            background: linear-gradient(135deg, #00838f, #26c6da);
+            color: white;
+        }
+        
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .file-list-section {
+            margin: 20px 0;
+            display: none;
+        }
+        
+        .file-list-section.visible {
+            display: block;
+        }
+        
+        .selected-info {
+            background: #e3f2fd;
+            padding: 12px 20px;
+            border-radius: 10px;
+            margin: 10px 0;
+            border-left: 4px solid #2196f3;
+            color: #0d47a1;
+            font-weight: 500;
+        }
+        
+        .queue-info {
+            background: #f3e5f5;
+            padding: 12px 20px;
+            border-radius: 10px;
+            margin: 10px 0;
+            border-left: 4px solid #9c27b0;
+            color: #4a148c;
+        }
+        
+        .file-list {
+            list-style: none;
+            padding: 0;
+            margin: 15px 0;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .file-list li {
+            background: #f8f9fa;
+            padding: 12px 18px;
+            margin: 6px 0;
+            border-radius: 10px;
+            border-left: 4px solid #667eea;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: background 0.3s;
+        }
+        
+        .file-list li:hover {
+            background: #e9ecef;
+        }
+        
+        .file-list li .folder-name {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .file-list li .folder-name .emoji {
+            font-size: 20px;
+        }
+        
+        .file-list li .folder-name strong {
+            color: #333;
+        }
+        
+        .file-list li .file-count {
+            background: #667eea;
+            color: white;
+            padding: 2px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        
+        .file-list li .status-badge {
+            font-size: 12px;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+        
+        .file-list li .status-badge.pending {
+            background: #ffd54f;
+            color: #f57f17;
+        }
+        
+        .file-list li .status-badge.processing {
+            background: #64b5f6;
+            color: #0d47a1;
+            animation: pulse 1s infinite;
+        }
+        
+        .file-list li .status-badge.done {
+            background: #81c784;
+            color: #1b5e20;
+        }
+        
+        .file-list li .status-badge.error {
+            background: #ef9a9a;
+            color: #b71c1c;
+        }
+        
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+        
+        .button-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin: 15px 0;
+        }
+        
+        .progress-section {
+            margin: 20px 0;
+            display: none;
+        }
+        
+        .progress-section.visible {
+            display: block;
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 30px;
+            background: #e9ecef;
+            border-radius: 15px;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        .progress-bar .progress {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            transition: width 0.5s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 13px;
+            font-weight: 600;
+            width: 0%;
+        }
+        
+        .progress-text {
+            text-align: center;
+            margin-top: 10px;
+            color: #666;
+            font-size: 14px;
+        }
+        
+        .status {
+            margin: 20px 0;
+            padding: 15px 20px;
+            border-radius: 12px;
+            display: none;
+            font-weight: 500;
+        }
+        
+        .status.visible {
+            display: block;
+        }
+        
+        .status.success {
+            background: #e8f5e9;
+            color: #1b5e20;
+            border-left: 4px solid #4caf50;
+        }
+        
+        .status.error {
+            background: #ffebee;
+            color: #b71c1c;
+            border-left: 4px solid #f44336;
+        }
+        
+        .status.info {
+            background: #e3f2fd;
+            color: #0d47a1;
+            border-left: 4px solid #2196f3;
+        }
+        
+        .status.warning {
+            background: #fff3e0;
+            color: #e65100;
+            border-left: 4px solid #ff9800;
+        }
+        
+        .log-section {
+            margin: 20px 0;
+            display: none;
+        }
+        
+        .log-section.visible {
+            display: block;
+        }
+        
+        .log-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        
+        .log-header h4 {
+            color: #333;
+        }
+        
+        .log-header .log-count {
+            background: #333;
+            color: white;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+        }
+        
+        #log {
+            background: #1a1a2e;
+            color: #e0e0e0;
+            padding: 20px;
+            border-radius: 12px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            max-height: 350px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            line-height: 1.6;
+        }
+        
+        #log::-webkit-scrollbar {
+            width: 8px;
+        }
+        
+        #log::-webkit-scrollbar-track {
+            background: #2a2a3e;
+            border-radius: 4px;
+        }
+        
+        #log::-webkit-scrollbar-thumb {
+            background: #667eea;
+            border-radius: 4px;
+        }
+        
+        .log-entry {
+            padding: 2px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        
+        .log-entry .time {
+            color: #888;
+            margin-right: 10px;
+        }
+        
+        .log-entry .emoji {
+            margin-right: 8px;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        
+        .stat-card {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 12px;
+            text-align: center;
+            border: 1px solid #e9ecef;
+            transition: transform 0.3s;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-3px);
+        }
+        
+        .stat-card .number {
+            font-size: 32px;
+            font-weight: 700;
+            color: #333;
+        }
+        
+        .stat-card .label {
+            color: #888;
+            font-size: 14px;
+            margin-top: 5px;
+        }
+        
+        .stat-card.success .number {
+            color: #43a047;
+        }
+        
+        .stat-card.error .number {
+            color: #e53935;
+        }
+        
+        .stat-card.total .number {
+            color: #667eea;
+        }
+        
+        .report-section {
+            background: #f8f9fa;
+            padding: 25px;
+            border-radius: 12px;
+            text-align: center;
+            margin: 20px 0;
+            border: 1px solid #e9ecef;
+        }
+        
+        .report-section p {
+            margin-top: 10px;
+            color: #888;
+            font-size: 14px;
+        }
+        
+        .footer {
+            text-align: center;
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 2px solid #f0f0f0;
+            color: #999;
+            font-size: 14px;
+        }
+        
+        .footer .heart {
+            color: #e53935;
+        }
+        
+        @media (max-width: 768px) {
+            .container {
+                padding: 20px;
+                border-radius: 12px;
+            }
+            
+            .header h1 {
+                font-size: 24px;
+            }
+            
+            .settings-row {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            
+            .button-group {
+                flex-direction: column;
+            }
+            
+            .button-group .btn {
+                width: 100%;
+                justify-content: center;
+            }
+            
+            .stats-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+            
+            .drop-zone {
+                padding: 30px 15px;
+            }
+            
+            .drop-zone .icon {
+                font-size: 40px;
             }
         }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>📤 Загрузка объявлений</h1>
+            <p class="subtitle">MAX Bot — удобная публикация в чаты</p>
+            <span class="badge">⚡ Версия 2.0</span>
+        </div>
         
-        if (!infoFile) { addLog('⚠️ Нет info.txt в ' + name); updateFolderStatus(name, 'error'); errors++; processed++; updateProgress(processed); continue; }
+        <!-- Instructions -->
+        <div class="instructions">
+            <strong>📌 Как подготовить папки:</strong>
+            <ul>
+                <li>Создайте головную папку с подпапками для каждого объявления</li>
+                <li>В каждой подпапке разместите <code>info.txt</code> и фото (до 10 шт)</li>
+                <li>Используйте разделитель <code>#изъятая</code> для метаданных</li>
+                <li>В названии папки укажите chat_id (например: <code>Товары - 1234567890</code>)</li>
+                <li>Перетащите головную папку в поле ниже</li>
+            </ul>
+        </div>
         
-        const selected = imageFiles.slice(0, Math.min(maxPhotos, 10));
-        addLog('📸 ' + selected.length + ' фото');
+        <!-- Settings -->
+        <div class="settings-section">
+            <h4>⚙️ Настройки публикации</h4>
+            <div class="settings-row">
+                <label>
+                    📸 Максимум фото:
+                    <input type="number" id="maxPhotos" value="6" min="1" max="10">
+                </label>
+                <label>
+                    ⏱️ Задержка между папками (сек):
+                    <input type="number" id="delayBetween" value="3" min="1" max="30">
+                </label>
+            </div>
+        </div>
         
-        const compressed = [];
-        for (let i = 0; i < selected.length; i++) {
-            try {
-                addLog('🔄 Сжатие ' + (i+1) + '/' + selected.length + ': ' + selected[i].name);
-                const img = await compressImage(selected[i], 1920, 1920, 0.85);
-                compressed.push(img);
-                totalImages++;
-            } catch(e) { addLog('⚠️ Ошибка сжатия: ' + e.message); }
-        }
+        <!-- Drop Zone -->
+        <div class="drop-zone" id="dropZone">
+            <div class="icon">📂</div>
+            <p><strong>Перетащите головную папку сюда</strong></p>
+            <p class="hint">или нажмите кнопку ниже для выбора</p>
+            <br>
+            <button class="btn btn-primary" onclick="document.getElementById('folderInput').click()">📁 Выбрать папку</button>
+            <input type="file" id="folderInput" webkitdirectory multiple>
+        </div>
         
-        const infoText = await infoFile.text();
-        const formData = new FormData();
-        formData.append('user_id', userId);
-        formData.append('max_photos', maxPhotos);
-        formData.append('folders[]', JSON.stringify({ name: name, adText: infoText.substring(0,5000), imageCount: compressed.length }));
-        for (let i = 0; i < compressed.length; i++) {
-            formData.append('images_' + name + '_' + i, compressed[i], compressed[i].name);
-        }
+        <!-- File List -->
+        <div class="file-list-section" id="fileListSection">
+            <div class="selected-info" id="selectedInfo"></div>
+            <div class="queue-info">
+                <strong>📋 Очередь:</strong> <span id="queueStatus">Ожидание</span>
+            </div>
+            <ul class="file-list" id="fileListContent"></ul>
+            <div class="button-group">
+                <button class="btn btn-success" onclick="uploadFolder()" id="uploadBtn">
+                    🚀 Начать загрузку
+                </button>
+                <button class="btn btn-danger" onclick="clearFiles()">
+                    🗑️ Очистить всё
+                </button>
+            </div>
+        </div>
         
-        try {
-            addLog('📤 Отправка ' + (idx+1) + '/' + totalFolders + '...');
-            const resp = await fetch('/upload_folders', { method: 'POST', body: formData });
-            if (!resp.ok) { const t = await resp.text(); throw new Error('HTTP ' + resp.status + ': ' + t.substring(0,100)); }
-            const result = await resp.json();
-            if (!result.success) throw new Error(result.message || 'Ошибка');
-            updateFolderStatus(name, 'done');
-            addLog('✅ Папка ' + name + ' опубликована');
-        } catch(e) {
-            updateFolderStatus(name, 'error');
-            errors++;
-            addLog('❌ ' + e.message);
-        }
+        <!-- Progress -->
+        <div class="progress-section" id="progressSection">
+            <div class="progress-bar">
+                <div class="progress" id="progress">0%</div>
+            </div>
+            <div class="progress-text" id="progressText">Ожидание начала...</div>
+        </div>
         
-        processed++;
-        updateProgress(processed);
+        <!-- Status -->
+        <div class="status" id="status"></div>
         
-        if (idx < folderQueue.length - 1) {
-            addLog('⏳ Задержка ' + delay + ' сек...');
-            await new Promise(r => setTimeout(r, delay * 1000));
-        }
-    }
-    
-    isProcessing = false;
-    addLog('✅ Готово! ' + (totalFolders - errors) + ' папок загружено, ' + errors + ' с ошибками');
-    addLog('📊 Всего фото: ' + totalImages);
-    if (errors === 0) { showStatus('success', '✅ Загружено ' + totalFolders + ' папок!'); }
-    else { showStatus('warning', '⚠️ Загружено ' + (totalFolders - errors) + ' папок, ' + errors + ' с ошибками'); }
-    if (totalFolders - errors > 0) { addLog('📊 Скачать отчет: /report/' + userId); }
-    
-    loadStats();
-}
+        <!-- Log -->
+        <div class="log-section" id="logSection">
+            <div class="log-header">
+                <h4>📋 Лог операций</h4>
+                <span class="log-count" id="logCount">0 записей</span>
+            </div>
+            <div id="log"></div>
+        </div>
+        
+        <!-- Stats -->
+        <div class="stats-grid" id="statsGrid">
+            <div class="stat-card total">
+                <div class="number" id="statTotal">0</div>
+                <div class="label">📊 Всего публикаций</div>
+            </div>
+            <div class="stat-card success">
+                <div class="number" id="statSuccess">0</div>
+                <div class="label">✅ Успешно</div>
+            </div>
+            <div class="stat-card error">
+                <div class="number" id="statErrors">0</div>
+                <div class="label">❌ Ошибок</div>
+            </div>
+        </div>
+        
+        <!-- Report -->
+        <div class="report-section">
+            <button class="btn btn-info" onclick="getReport()">📊 Скачать отчет</button>
+            <button class="btn btn-warning" onclick="loadStats()">🔄 Обновить статистику</button>
+            <p>После завершения публикации всех папок</p>
+        </div>
+        
+        <!-- Footer -->
+        <div class="footer">
+            Сделано с <span class="heart">❤️</span> для MAX Bot | SQLite
+        </div>
+    </div>
 
-function updateProgress(processed) {
-    const pct = Math.round((processed / totalFolders) * 100);
-    document.getElementById('progress').style.width = pct + '%';
-    document.getElementById('progress').textContent = pct + '%';
-}
-</script>
+    <script>
+        const userId = new URLSearchParams(window.location.search).get('user_id') || 151296248;
+        let selectedFiles = [];
+        let isProcessing = false;
+        let folderQueue = [];
+        let totalFolders = 0;
+        let logEntries = 0;
+
+        // Загрузка статистики при старте
+        window.onload = function() {
+            loadStats();
+        };
+
+        // Загрузка статистики
+        function loadStats() {
+            fetch('/stats/' + userId)
+                .then(res => res.json())
+                .then(data => {
+                    document.getElementById('statTotal').textContent = data.total || 0;
+                    document.getElementById('statSuccess').textContent = data.success || 0;
+                    document.getElementById('statErrors').textContent = data.errors || 0;
+                })
+                .catch(err => console.error('Ошибка загрузки статистики:', err));
+        }
+
+        // Рекурсивное чтение директории
+        function readDirectoryRecursive(entry, path, files, callback) {
+            if (entry.isDirectory) {
+                const reader = entry.createReader();
+                let allEntries = [];
+                
+                function readEntries() {
+                    reader.readEntries((entries) => {
+                        if (entries.length === 0) {
+                            let pending = allEntries.length;
+                            if (pending === 0) { callback(); return; }
+                            
+                            allEntries.forEach(e => {
+                                if (e.isDirectory) {
+                                    readDirectoryRecursive(e, path + e.name + '/', files, () => {
+                                        pending--;
+                                        if (pending === 0) callback();
+                                    });
+                                } else {
+                                    e.file((file) => {
+                                        file.webkitRelativePath = path + file.name;
+                                        files.push(file);
+                                        pending--;
+                                        if (pending === 0) callback();
+                                    });
+                                }
+                            });
+                        } else {
+                            allEntries = allEntries.concat(entries);
+                            readEntries();
+                        }
+                    });
+                }
+                readEntries();
+            } else {
+                entry.file((file) => {
+                    file.webkitRelativePath = path + file.name;
+                    files.push(file);
+                    callback();
+                });
+            }
+        }
+
+        // Drag & Drop
+        const dropZone = document.getElementById('dropZone');
+        const folderInput = document.getElementById('folderInput');
+
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            
+            const items = e.dataTransfer.items;
+            const files = [];
+            let pending = 0;
+            
+            for (let item of items) {
+                if (item.kind === 'file') {
+                    const entry = item.webkitGetAsEntry();
+                    if (entry) {
+                        pending++;
+                        readDirectoryRecursive(entry, '', files, () => {
+                            pending--;
+                            if (pending === 0) {
+                                selectedFiles = files;
+                                displayFiles(selectedFiles);
+                            }
+                        });
+                    }
+                }
+            }
+            
+            if (pending === 0 && files.length > 0) {
+                selectedFiles = files;
+                displayFiles(selectedFiles);
+            }
+        });
+
+        folderInput.addEventListener('change', (e) => {
+            const files = Array.from(e.target.files);
+            if (files.length > 0) {
+                selectedFiles = files;
+                displayFiles(selectedFiles);
+            }
+        });
+
+        // Сжатие изображения
+        function compressImage(file, maxWidth = 1920, maxHeight = 1920, quality = 0.85) {
+            return new Promise((resolve, reject) => {
+                if (file.size > 20 * 1024 * 1024) {
+                    reject(new Error('Файл слишком большой'));
+                    return;
+                }
+                
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const img = new Image();
+                    img.onload = function() {
+                        let w = img.width;
+                        let h = img.height;
+                        
+                        if (w > maxWidth) {
+                            h = (h * maxWidth) / w;
+                            w = maxWidth;
+                        }
+                        if (h > maxHeight) {
+                            w = (w * maxHeight) / h;
+                            h = maxHeight;
+                        }
+                        
+                        const canvas = document.createElement('canvas');
+                        canvas.width = w;
+                        canvas.height = h;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, w, h);
+                        
+                        canvas.toBlob((blob) => {
+                            if (blob) {
+                                resolve(new File([blob], file.name, {
+                                    type: 'image/jpeg',
+                                    lastModified: Date.now()
+                                }));
+                            } else {
+                                reject(new Error('Не удалось сжать'));
+                            }
+                        }, 'image/jpeg', quality);
+                    };
+                    img.onerror = reject;
+                    img.src = e.target.result;
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+            });
+        }
+
+        // Отображение файлов
+        function displayFiles(files) {
+            const container = document.getElementById('fileListContent');
+            container.innerHTML = '';
+            
+            const folders = new Map();
+            
+            files.forEach(f => {
+                const parts = f.webkitRelativePath.split('/');
+                if (parts.length >= 2) {
+                    const root = parts[0];
+                    const sub = parts.length > 2 ? parts.slice(1, -1).join('/') : 'root';
+                    const key = root + '/' + sub;
+                    
+                    if (!folders.has(key)) {
+                        folders.set(key, {
+                            root: root,
+                            sub: sub,
+                            display: sub === 'root' ? root : root + '/' + sub,
+                            count: 0,
+                            files: []
+                        });
+                    }
+                    folders.get(key).count++;
+                    folders.get(key).files.push(f);
+                }
+            });
+            
+            const sorted = Array.from(folders.values()).sort((a, b) => a.display.localeCompare(b.display));
+            
+            folderQueue = sorted.map(f => ({
+                name: f.display,
+                status: 'pending',
+                count: f.count,
+                files: f.files
+            }));
+            
+            sorted.forEach(folder => {
+                const li = document.createElement('li');
+                const isSub = folder.sub !== 'root';
+                li.innerHTML = `
+                    <div class="folder-name">
+                        <span class="emoji">${isSub ? '📂' : '📁'}</span>
+                        <strong>${folder.display}</strong>
+                    </div>
+                    <div>
+                        <span class="file-count">${folder.count} файлов</span>
+                        <span class="status-badge pending" id="st-${folder.display.replace(/[\/\\]/g,'-')}">⏳ Ожидание</span>
+                    </div>
+                `;
+                li.style.borderLeftColor = isSub ? '#4caf50' : '#667eea';
+                container.appendChild(li);
+            });
+            
+            document.getElementById('selectedInfo').textContent = `✅ Найдено ${sorted.length} папок, ${files.length} файлов`;
+            document.getElementById('fileListSection').classList.add('visible');
+            updateQueueStatus();
+            totalFolders = sorted.length;
+            
+            // Показываем кнопку загрузки
+            document.getElementById('uploadBtn').disabled = false;
+        }
+
+        // Обновление статуса очереди
+        function updateQueueStatus() {
+            const done = folderQueue.filter(f => f.status === 'done').length;
+            const errors = folderQueue.filter(f => f.status === 'error').length;
+            const processing = folderQueue.filter(f => f.status === 'processing').length;
+            const total = folderQueue.length;
+            
+            let status = isProcessing ? `🔄 Обработка` : `📋 Готово`;
+            status += ` ${done + errors}/${total}`;
+            if (processing > 0) status += ` (⏳${processing} в процессе)`;
+            if (errors > 0) status += ` ⚠️${errors} ошибок`;
+            
+            document.getElementById('queueStatus').textContent = status;
+        }
+
+        // Обновление статуса папки
+        function updateFolderStatus(name, status) {
+            const idx = folderQueue.findIndex(f => f.name === name);
+            if (idx !== -1) {
+                folderQueue[idx].status = status;
+                updateQueueStatus();
+                
+                const badge = document.getElementById('st-' + name.replace(/[\/\\]/g,'-'));
+                if (badge) {
+                    badge.className = 'status-badge ' + status;
+                    const labels = {
+                        'pending': '⏳ Ожидание',
+                        'processing': '🔄 Обработка...',
+                        'done': '✅ Готово',
+                        'error': '❌ Ошибка'
+                    };
+                    badge.textContent = labels[status] || status;
+                }
+            }
+        }
+
+        // Добавление в лог
+        function addLog(msg, emoji = '📝') {
+            const log = document.getElementById('log');
+            log.style.display = 'block';
+            
+            const time = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `<span class="time">[${time}]</span><span class="emoji">${emoji}</span>${msg}`;
+            log.appendChild(entry);
+            
+            log.scrollTop = log.scrollHeight;
+            logEntries++;
+            document.getElementById('logCount').textContent = logEntries + ' записей';
+            document.getElementById('logSection').classList.add('visible');
+        }
+
+        // Показ статуса
+        function showStatus(type, msg) {
+            const s = document.getElementById('status');
+            s.className = 'status ' + type + ' visible';
+            s.textContent = msg;
+        }
+
+        // Получение отчета
+        function getReport() {
+            window.open('/report/' + userId, '_blank');
+        }
+
+        // Очистка
+        function clearFiles() {
+            if (isProcessing) {
+                if (!confirm('Вы уверены, что хотите остановить загрузку?')) return;
+            }
+            
+            selectedFiles = [];
+            folderQueue = [];
+            document.getElementById('fileListSection').classList.remove('visible');
+            document.getElementById('status').className = 'status';
+            document.getElementById('status').style.display = 'none';
+            document.getElementById('progressSection').classList.remove('visible');
+            document.getElementById('progress').style.width = '0%';
+            document.getElementById('progress').textContent = '0%';
+            document.getElementById('progressText').textContent = 'Ожидание начала...';
+            document.getElementById('logSection').classList.remove('visible');
+            document.getElementById('log').innerHTML = '';
+            document.getElementById('log').style.display = 'none';
+            document.getElementById('logCount').textContent = '0 записей';
+            logEntries = 0;
+            folderInput.value = '';
+            isProcessing = false;
+            document.getElementById('uploadBtn').disabled = false;
+        }
+
+        // Основная функция загрузки
+        async function uploadFolder() {
+            if (selectedFiles.length === 0) {
+                showStatus('error', '❌ Выберите папку для загрузки');
+                return;
+            }
+            
+            if (isProcessing) {
+                addLog('⚠️ Загрузка уже выполняется', '⚠️');
+                return;
+            }
+            
+            isProcessing = true;
+            document.getElementById('uploadBtn').disabled = true;
+            
+            const maxPhotos = parseInt(document.getElementById('maxPhotos').value) || 6;
+            const delay = parseInt(document.getElementById('delayBetween').value) || 3;
+            
+            // Показываем прогресс
+            document.getElementById('progressSection').classList.add('visible');
+            document.getElementById('progress').style.width = '0%';
+            document.getElementById('progress').textContent = '0%';
+            document.getElementById('progressText').textContent = 'Подготовка к загрузке...';
+            
+            // Очищаем лог
+            document.getElementById('log').innerHTML = '';
+            logEntries = 0;
+            document.getElementById('logCount').textContent = '0 записей';
+            
+            addLog('🚀 Начинаем загрузку ' + totalFolders + ' папок', '🚀');
+            addLog(`📸 Максимум фото: ${maxPhotos}, задержка: ${delay} сек`, '⚙️');
+            
+            let processed = 0;
+            let totalImages = 0;
+            let errors = 0;
+            let successCount = 0;
+            
+            for (let idx = 0; idx < folderQueue.length; idx++) {
+                const folder = folderQueue[idx];
+                const name = folder.name;
+                const files = folder.files;
+                
+                updateFolderStatus(name, 'processing');
+                addLog(`📂 [${idx+1}/${totalFolders}] Обработка: ${name}`, '📂');
+                
+                // Находим info.txt и изображения
+                let infoFile = null;
+                let imageFiles = [];
+                
+                for (const f of files) {
+                    const fn = f.name.toLowerCase();
+                    if (fn.endsWith('.txt') && fn.includes('info')) {
+                        infoFile = f;
+                    } else if (fn.match(/\.(jpg|jpeg|png|gif|bmp|webp)$/)) {
+                        if (f.size > 5 * 1024 * 1024) {
+                            addLog(`⚠️ ${f.name} слишком большой, пропускаем`, '⚠️');
+                            continue;
+                        }
+                        imageFiles.push(f);
+                    }
+                }
+                
+                if (!infoFile) {
+                    addLog(`❌ Нет info.txt в папке ${name}`, '❌');
+                    updateFolderStatus(name, 'error');
+                    errors++;
+                    processed++;
+                    updateProgress(processed);
+                    continue;
+                }
+                
+                // Выбираем и сжимаем изображения
+                const selected = imageFiles.slice(0, Math.min(maxPhotos, 10));
+                addLog(`📸 Найдено ${selected.length} изображений`, '📸');
+                
+                const compressed = [];
+                for (let i = 0; i < selected.length; i++) {
+                    try {
+                        addLog(`🔄 Сжатие ${i+1}/${selected.length}: ${selected[i].name}`, '🔄');
+                        const img = await compressImage(selected[i], 1920, 1920, 0.85);
+                        compressed.push(img);
+                        totalImages++;
+                    } catch(e) {
+                        addLog(`⚠️ Ошибка сжатия ${selected[i].name}: ${e.message}`, '⚠️');
+                    }
+                }
+                
+                // Читаем текст объявления
+                const infoText = await infoFile.text();
+                const formData = new FormData();
+                formData.append('user_id', userId);
+                formData.append('max_photos', maxPhotos);
+                formData.append('folders[]', JSON.stringify({
+                    name: name,
+                    adText: infoText.substring(0, 5000),
+                    imageCount: compressed.length
+                }));
+                
+                for (let i = 0; i < compressed.length; i++) {
+                    formData.append('images_' + name + '_' + i, compressed[i], compressed[i].name);
+                }
+                
+                // Отправка
+                try {
+                    addLog(`📤 Отправка ${idx+1}/${totalFolders}...`, '📤');
+                    const resp = await fetch('/upload_folders', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    if (!resp.ok) {
+                        const t = await resp.text();
+                        throw new Error('HTTP ' + resp.status + ': ' + t.substring(0, 100));
+                    }
+                    
+                    const result = await resp.json();
+                    if (!result.success) {
+                        throw new Error(result.message || 'Ошибка');
+                    }
+                    
+                    updateFolderStatus(name, 'done');
+                    successCount++;
+                    addLog(`✅ Папка "${name}" успешно опубликована`, '✅');
+                } catch(e) {
+                    updateFolderStatus(name, 'error');
+                    errors++;
+                    addLog(`❌ Ошибка публикации "${name}": ${e.message}`, '❌');
+                }
+                
+                processed++;
+                updateProgress(processed);
+                
+                // Задержка между папками
+                if (idx < folderQueue.length - 1) {
+                    addLog(`⏳ Задержка ${delay} секунд...`, '⏳');
+                    await new Promise(r => setTimeout(r, delay * 1000));
+                }
+            }
+            
+            // Завершение
+            isProcessing = false;
+            document.getElementById('uploadBtn').disabled = false;
+            
+            addLog(`✅ Загрузка завершена!`, '🎉');
+            addLog(`📊 Успешно: ${successCount}, Ошибок: ${errors}, Фото: ${totalImages}`, '📊');
+            
+            if (errors === 0) {
+                showStatus('success', `✅ Все ${totalFolders} папок успешно загружены!`);
+            } else if (successCount > 0) {
+                showStatus('warning', `⚠️ Загружено ${successCount} папок, ${errors} с ошибками`);
+            } else {
+                showStatus('error', `❌ Все ${totalFolders} папок завершились ошибкой`);
+            }
+            
+            if (successCount > 0) {
+                addLog(`📊 Скачать отчет: /report/${userId}`, '📊');
+            }
+            
+            loadStats();
+        }
+
+        // Обновление прогресса
+        function updateProgress(processed) {
+            const pct = Math.round((processed / totalFolders) * 100);
+            document.getElementById('progress').style.width = pct + '%';
+            document.getElementById('progress').textContent = pct + '%';
+            document.getElementById('progressText').textContent = 
+                `Обработано ${processed} из ${totalFolders} папок (${pct}%)`;
+        }
+    </script>
 </body>
 </html>
 '''
@@ -505,7 +1324,6 @@ def upload_folders():
             if field_name in request.files:
                 img_file = request.files[field_name]
                 try:
-                    # Читаем файл
                     img_data = img_file.read()
                     
                     if len(img_data) > MAX_IMAGE_SIZE:
@@ -513,7 +1331,6 @@ def upload_folders():
                         continue
                     
                     if img_data:
-                        # Формируем данные для publisher
                         img_base64 = base64.b64encode(img_data).decode('ascii')
                         images.append({
                             'name': img_file.filename,
@@ -525,7 +1342,6 @@ def upload_folders():
                     logger.error(f"❌ Ошибка чтения файла {img_file.filename}: {e}")
                     continue
                 finally:
-                    # Освобождаем память
                     gc.collect()
         
         # Разбираем метаданные
@@ -596,7 +1412,6 @@ def webhook():
         logger.info(f"👤 USER_ID: {user_id}, ТЕКСТ: {text}")
         
         if text and text.strip() == '/start':
-            # Проверяем инициализацию БД
             if db is None:
                 init_app()
             
@@ -734,11 +1549,9 @@ def status():
     }
 
 # ========== ИНИЦИАЛИЗАЦИЯ ПРИ ЗАПУСКЕ ==========
-# Инициализируем модули при старте
 init_app()
 
 # ========== ЗАПУСК ==========
 if __name__ == '__main__':
-    # Для локального запуска
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
