@@ -1,7 +1,6 @@
-# app.py - ИСПРАВЛЕННАЯ ВЕРСИЯ
+# app.py - С ВСТРОЕННЫМ CORS (без flask-cors)
 
 from flask import Flask, request, jsonify, render_template_string, send_file
-from flask_cors import CORS
 import os
 import logging
 import json
@@ -18,8 +17,15 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24).hex())
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 
-# ========== CORS ==========
-CORS(app)
+# ========== ВСТРОЕННЫЙ CORS (без внешних библиотек) ==========
+@app.after_request
+def after_request(response):
+    """Добавляет CORS заголовки ко всем ответам"""
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,Accept')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    return response
 
 # ========== ЛОГИРОВАНИЕ ==========
 logging.basicConfig(level=logging.INFO)
@@ -499,7 +505,7 @@ def upload_folders():
             if field_name in request.files:
                 img_file = request.files[field_name]
                 try:
-                    # Читаем файл с контекстным менеджером
+                    # Читаем файл
                     img_data = img_file.read()
                     
                     if len(img_data) > MAX_IMAGE_SIZE:
