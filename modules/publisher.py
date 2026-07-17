@@ -8,7 +8,7 @@ import requests
 import threading
 import json
 from datetime import datetime
-import hashlib
+import hashlib  # ✅ добавлен импорт
 
 logger = logging.getLogger(__name__)
 
@@ -67,28 +67,25 @@ class Publisher:
                 logger.error(f"❌ Не получен URL: {upload_data}")
                 return None
             
-            # ✅ Извлекаем байты без создания list() (экономия памяти)
-            if isinstance(image_data, dict):
-                if 'data' in image_data:
-                    img_data = image_data['data']
-                else:
-                    for key, value in image_data.items():
-                        if isinstance(value, (list, bytes, bytearray)):
-                            img_data = value
-                            break
-                    else:
-                        logger.error(f"❌ В словаре нет данных")
-                        return None
-            else:
-                img_data = image_data
+            # ✅ Извлекаем байты - поддерживаем оба формата
+            image_bytes = None
             
-            # ✅ Конвертируем в байты напрямую (без list())
-            if isinstance(img_data, list):
-                image_bytes = bytes(img_data)
-            elif isinstance(img_data, (bytes, bytearray)):
-                image_bytes = bytes(img_data)
+            if isinstance(image_data, dict):
+                # ✅ Если есть поле 'bytes' - используем его
+                if 'bytes' in image_data:
+                    image_bytes = image_data['bytes']
+                # ✅ Иначе берем 'data' и декодируем из base64
+                elif 'data' in image_data:
+                    import base64
+                    image_bytes = base64.b64decode(image_data['data'])
+            elif isinstance(image_data, (bytes, bytearray)):
+                image_bytes = bytes(image_data)
             else:
-                logger.error(f"❌ Неподдерживаемый тип данных: {type(img_data)}")
+                logger.error(f"❌ Неподдерживаемый тип данных: {type(image_data)}")
+                return None
+            
+            if not image_bytes:
+                logger.error("❌ Не удалось получить байты изображения")
                 return None
             
             # 3. Отправляем файл
