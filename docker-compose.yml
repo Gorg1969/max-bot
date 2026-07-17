@@ -23,6 +23,7 @@ services:
     ports:
       - "3000:3000"
     environment:
+      # ✅ ТОЛЬКО ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ (без .env)
       - MAX_TOKEN=${MAX_TOKEN}
       - MAX_BOT_TOKEN=${MAX_BOT_TOKEN}
       - TOKEN=${TOKEN}
@@ -45,6 +46,7 @@ services:
     container_name: maxbot-worker
     restart: unless-stopped
     environment:
+      # ✅ ТОЛЬКО ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ (без .env)
       - MAX_TOKEN=${MAX_TOKEN}
       - MAX_BOT_TOKEN=${MAX_BOT_TOKEN}
       - TOKEN=${TOKEN}
