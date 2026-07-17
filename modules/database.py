@@ -1,40 +1,72 @@
-# modules/database.py - SQLite версия с оптимизацией
+# modules/database.py - Синглтон с WAL для многопользовательской работы
 
 import os
 import logging
 import sqlite3
 from datetime import datetime
-import json
 import threading
 from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
 class Database:
+    """Синглтон для работы с SQLite с поддержкой многопользовательского режима"""
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls, db_path=None):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super(Database, cls).__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+    
     def __init__(self, db_path=None):
-        """Инициализация SQLite с поддержкой многопоточности"""
-        self.db_path = db_path or os.environ.get(
-            "DATABASE_URL", 
-            "/app/data/maxbot.db"
-        )
+        if self._initialized:
+            return
         
-        # Если DATABASE_URL начинается с postgresql, используем SQLite
+        self.db_path = db_path or os.environ.get("DATABASE_URL", "/app/data/maxbot.db")
+        
         if self.db_path.startswith("postgresql"):
             self.db_path = "/app/data/maxbot.db"
         
-        # Создаем директорию для БД
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         
-        # Локальная блокировка для потокобезопасности
         self._lock = threading.Lock()
         
+        # Настройка SQLite для многопользовательской работы
+        self._setup_connection_pragmas()
+        
         self._init_db()
-        logger.info(f"✅ Подключение к SQLite: {self.db_path}")
+        self._initialized = True
+        logger.info(f"✅ SQLite синглтон инициализирован: {self.db_path}")
+    
+    def _setup_connection_pragmas(self):
+        """Настройка SQLite для многопользовательской работы"""
+        with self.get_connection() as conn:
+            # WAL режим - позволяет читать и писать одновременно
+            conn.execute('PRAGMA journal_mode=WAL')
+            # SYNCHRONOUS=NORMAL - баланс скорости и надежности
+            conn.execute('PRAGMA synchronous=NORMAL')
+            # Увеличиваем кэш для скорости
+            conn.execute('PRAGMA cache_size=-20000')  # 20MB
+            # Храним временные таблицы в памяти
+            conn.execute('PRAGMA temp_store=MEMORY')
+            # Включаем поддержку внешних ключей
+            conn.execute('PRAGMA foreign_keys=ON')
+            # Увеличиваем таймаут для блокировок
+            conn.execute('PRAGMA busy_timeout=30000')  # 30 секунд
     
     @contextmanager
     def get_connection(self):
         """Получает соединение с SQLite (контекстный менеджер)"""
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = sqlite3.connect(
+            self.db_path, 
+            timeout=30,
+            isolation_level=None,  # Автокоммит для простоты
+            check_same_thread=False  # Разрешаем использование из разных потоков
+        )
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -46,9 +78,6 @@ class Database:
         with self.get_connection() as conn:
             try:
                 cur = conn.cursor()
-                
-                # Включаем поддержку внешних ключей
-                cur.execute('PRAGMA foreign_keys = ON')
                 
                 # Таблица пользователей
                 cur.execute('''
@@ -127,7 +156,7 @@ class Database:
                     ON ad_metadata(user_id, folder_name)
                 ''')
                 
-                # Таблица очереди задач (для асинхронной обработки)
+                # Таблица очереди задач
                 cur.execute('''
                     CREATE TABLE IF NOT EXISTS task_queue (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -155,6 +184,8 @@ class Database:
                 conn.rollback()
                 raise
     
+    # ========== МЕТОДЫ ДЛЯ РАБОТЫ С ДАННЫМИ ==========
+    
     def add_publication(self, user_id, folder_name, group_id, post_id=None):
         """Добавляет запись о публикации"""
         with self.get_connection() as conn:
@@ -167,7 +198,7 @@ class Database:
                 
                 pub_id = cur.lastrowid
                 conn.commit()
-                logger.info(f"📝 Добавлена публикация: {folder_name} -> {group_id}, post_id={post_id}")
+                logger.info(f"📝 Добавлена публикация: {folder_name} -> {group_id}")
                 return pub_id
             except Exception as e:
                 logger.error(f"❌ Ошибка добавления публикации: {e}")
@@ -197,7 +228,7 @@ class Database:
                       published_at, title, source_link, offer_code, price))
                 
                 conn.commit()
-                logger.info(f"📊 Метаданные сохранены для {folder_name}, post_link={post_link}")
+                logger.info(f"📊 Метаданные сохранены для {folder_name}")
                 return True
                 
             except Exception as e:
@@ -234,7 +265,7 @@ class Database:
                 return {}
     
     def get_publications(self, user_id, limit=None, status=None):
-        """Получает список публикаций пользователя с фильтрацией"""
+        """Получает список публикаций пользователя"""
         with self.get_connection() as conn:
             try:
                 cur = conn.cursor()
@@ -271,40 +302,6 @@ class Database:
                 logger.error(f"❌ Ошибка получения публикаций: {e}")
                 return []
     
-    def get_user_publications_count(self, user_id):
-        """Получает количество публикаций пользователя"""
-        with self.get_connection() as conn:
-            try:
-                cur = conn.cursor()
-                cur.execute('''
-                    SELECT COUNT(*) as count 
-                    FROM publications 
-                    WHERE user_id = ?
-                ''', (user_id,))
-                
-                row = cur.fetchone()
-                return row['count'] if row else 0
-            except Exception as e:
-                logger.error(f"❌ Ошибка подсчета публикаций: {e}")
-                return 0
-    
-    def get_all_users(self):
-        """Получает список всех пользователей"""
-        with self.get_connection() as conn:
-            try:
-                cur = conn.cursor()
-                cur.execute('''
-                    SELECT DISTINCT user_id 
-                    FROM publications 
-                    ORDER BY user_id
-                ''')
-                
-                rows = cur.fetchall()
-                return [row['user_id'] for row in rows]
-            except Exception as e:
-                logger.error(f"❌ Ошибка получения списка пользователей: {e}")
-                return []
-    
     def get_user_stats(self, user_id):
         """Получает статистику пользователя"""
         with self.get_connection() as conn:
@@ -331,93 +328,19 @@ class Database:
                 logger.error(f"❌ Ошибка получения статистики: {e}")
                 return {'total': 0, 'success': 0, 'errors': 0}
     
-    def add_task(self, user_id, folder_name):
-        """Добавляет задачу в очередь"""
+    def get_all_users(self):
+        """Получает список всех пользователей"""
         with self.get_connection() as conn:
             try:
                 cur = conn.cursor()
                 cur.execute('''
-                    INSERT INTO task_queue (user_id, folder_name, status)
-                    VALUES (?, ?, 'pending')
-                ''', (user_id, folder_name))
+                    SELECT DISTINCT user_id 
+                    FROM publications 
+                    ORDER BY user_id
+                ''')
                 
-                task_id = cur.lastrowid
-                conn.commit()
-                return task_id
-            except Exception as e:
-                logger.error(f"❌ Ошибка добавления задачи: {e}")
-                conn.rollback()
-                return None
-    
-    def update_task_status(self, task_id, status, error=None, result=None):
-        """Обновляет статус задачи"""
-        with self.get_connection() as conn:
-            try:
-                cur = conn.cursor()
-                now = datetime.now()
-                
-                if status == 'started':
-                    cur.execute('''
-                        UPDATE task_queue 
-                        SET status = ?, started_at = ?
-                        WHERE id = ?
-                    ''', (status, now, task_id))
-                elif status == 'completed' or status == 'error':
-                    cur.execute('''
-                        UPDATE task_queue 
-                        SET status = ?, completed_at = ?, error = ?, result = ?
-                        WHERE id = ?
-                    ''', (status, now, error, result, task_id))
-                else:
-                    cur.execute('''
-                        UPDATE task_queue 
-                        SET status = ?
-                        WHERE id = ?
-                    ''', (status, task_id))
-                
-                conn.commit()
-                return True
-            except Exception as e:
-                logger.error(f"❌ Ошибка обновления задачи: {e}")
-                conn.rollback()
-                return False
-    
-    def get_pending_tasks(self, user_id=None, limit=10):
-        """Получает ожидающие задачи"""
-        with self.get_connection() as conn:
-            try:
-                cur = conn.cursor()
-                query = '''
-                    SELECT id, user_id, folder_name, status, created_at
-                    FROM task_queue 
-                    WHERE status = 'pending'
-                '''
-                params = []
-                
-                if user_id:
-                    query += ' AND user_id = ?'
-                    params.append(user_id)
-                
-                query += ' ORDER BY created_at ASC LIMIT ?'
-                params.append(limit)
-                
-                cur.execute(query, params)
                 rows = cur.fetchall()
-                
-                tasks = []
-                for row in rows:
-                    tasks.append({
-                        'id': row['id'],
-                        'user_id': row['user_id'],
-                        'folder_name': row['folder_name'],
-                        'status': row['status'],
-                        'created_at': row['created_at']
-                    })
-                return tasks
+                return [row['user_id'] for row in rows]
             except Exception as e:
-                logger.error(f"❌ Ошибка получения задач: {e}")
+                logger.error(f"❌ Ошибка получения списка пользователей: {e}")
                 return []
-    
-    def close(self):
-        """Закрывает все соединения"""
-        logger.info("🔒 Соединения с SQLite закрыты")
