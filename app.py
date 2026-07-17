@@ -8,30 +8,47 @@ import requests
 from rq import Queue
 from rq.job import Job
 from redis import Redis
-from modules import Database, FileManager, Publisher
+from modules import Database, FileManager
 from modules.report_generator import ReportGenerator
 from modules.tasks import process_folder_task, cleanup_user_task
 
+# ========== ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЯ ==========
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")
+app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24).hex())
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-logging.basicConfig(level=logging.INFO)
+# ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
+logging.basicConfig(
+    level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO")),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# Конфигурация
-DATA_DIR = "/app/data"
-REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+# ========== КОНФИГУРАЦИЯ ИЗ ОКРУЖЕНИЯ ==========
+# ✅ ТОЛЬКО ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ!
 TOKEN = os.environ.get("MAX_TOKEN") or os.environ.get("MAX_BOT_TOKEN") or os.environ.get("TOKEN")
+DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
+REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+MAX_API_URL = os.environ.get("MAX_API_URL", "https://platform-api2.max.ru")
 
 if not TOKEN:
-    logger.error("❌ ТОКЕН НЕ НАЙДЕН!")
+    logger.error("❌ ТОКЕН НЕ НАЙДЕН в переменных окружения!")
+    # В продакшене лучше завершить работу
+    # raise RuntimeError("MAX_TOKEN not found in environment variables")
 
-# Инициализация RQ
-redis_conn = Redis.from_url(REDIS_URL)
-queue = Queue('default', connection=redis_conn)
+logger.info(f"✅ Токен загружен из окружения (первые 10 символов): {TOKEN[:10]}...")
 
-# Инициализация БД и менеджеров (только для веб-части)
+# ========== ИНИЦИАЛИЗАЦИЯ RQ ==========
+try:
+    redis_conn = Redis.from_url(REDIS_URL)
+    queue = Queue('default', connection=redis_conn)
+    logger.info(f"✅ Подключение к Redis: {REDIS_URL}")
+except Exception as e:
+    logger.error(f"❌ Ошибка подключения к Redis: {e}")
+    redis_conn = None
+    queue = None
+
+# ========== ИНИЦИАЛИЗАЦИЯ БД И МЕНЕДЖЕРОВ ==========
 db = Database()
 fm = FileManager(DATA_DIR)
 report_gen = ReportGenerator(fm, db)
@@ -635,6 +652,10 @@ def upload_folders():
             
             folder_data_list.append(folder_data)
         
+        # Проверяем что очередь доступна
+        if queue is None:
+            return jsonify({'success': False, 'message': 'Очередь недоступна'}), 500
+        
         # Создаем задачи в RQ
         for folder_data in folder_data_list:
             job = queue.enqueue(
@@ -720,7 +741,8 @@ def stop_publish():
                 logger.warning(f"⚠️ Не удалось отменить задачу {job_id}: {e}")
         
         # Добавляем задачу очистки
-        queue.enqueue(cleanup_user_task, user_id, timeout=60)
+        if queue:
+            queue.enqueue(cleanup_user_task, user_id, timeout=60)
         
         logger.info(f"⏹️ Остановка публикации для пользователя {user_id}, отменено {cancelled} задач")
         return jsonify({
@@ -757,8 +779,7 @@ def webhook():
         logger.info(f"💬 user_id={user_id}, text={text}")
         
         if text and text.strip() == '/start':
-            # Отправляем сообщение через API
-            url = f"https://platform-api2.max.ru/messages?user_id={user_id}"
+            url = f"{MAX_API_URL}/messages?user_id={user_id}"
             payload = {
                 "text": "🏠 **Главное меню**\n\n"
                        "🌐 **Загрузить папку:**\n"
@@ -769,8 +790,7 @@ def webhook():
                        "📋 **Инструкция:**\n"
                        "1. Подготовьте папки с объявлениями\n"
                        "2. Используйте разделитель #изъятая\n"
-                       "3. Фото до 10 шт на объявление\n\n"
-                       "⚙️ **Настройки в веб-интерфейсе:**",
+                       "3. Фото до 10 шт на объявление",
                 "format": "markdown"
             }
             headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
@@ -778,8 +798,7 @@ def webhook():
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/stop':
-            # Останавливаем публикацию
-            url = f"https://platform-api2.max.ru/messages?user_id={user_id}"
+            url = f"{MAX_API_URL}/messages?user_id={user_id}"
             payload = {
                 "text": "⏹️ **Публикация остановлена!**",
                 "format": "markdown"
@@ -790,21 +809,22 @@ def webhook():
         
         if text and text.strip() == '/report':
             report_path = report_gen.generate_report(user_id)
+            url = f"{MAX_API_URL}/messages?user_id={user_id}"
+            headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
+            
             if report_path:
                 filename = os.path.basename(report_path)
                 download_url = f"https://maxbot.bothost.tech/download_report/{user_id}/{filename}"
-                url = f"https://platform-api2.max.ru/messages?user_id={user_id}"
                 payload = {
                     "text": f"📊 **Отчет создан!**\n\n🔗 [Скачать отчет]({download_url})",
                     "format": "markdown"
                 }
-                headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
-                requests.post(url, headers=headers, json=payload, timeout=30, verify=False)
             else:
-                url = f"https://platform-api2.max.ru/messages?user_id={user_id}"
-                payload = {"text": "❌ Нет данных для отчета.", "format": "markdown"}
-                headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
-                requests.post(url, headers=headers, json=payload, timeout=30, verify=False)
+                payload = {
+                    "text": "❌ Нет данных для отчета.",
+                    "format": "markdown"
+                }
+            requests.post(url, headers=headers, json=payload, timeout=30, verify=False)
             return jsonify({"ok": True}), 200
         
         return jsonify({"ok": True}), 200
@@ -852,10 +872,35 @@ def health():
 
 @app.route('/status')
 def status():
-    return {"status": "running", "token_set": bool(TOKEN)}
+    return {
+        "status": "running",
+        "token_set": bool(TOKEN),
+        "redis_connected": redis_conn is not None,
+        "queue_available": queue is not None
+    }
+
+@app.route('/setup_webhook')
+def setup_webhook():
+    token = request.args.get('token') or TOKEN
+    if not token:
+        return "❌ Токен не найден", 400
+    webhook_url = "https://maxbot.bothost.tech/webhook"
+    headers = {"Authorization": token, "Content-Type": "application/json"}
+    try:
+        r = requests.post(
+            f"{MAX_API_URL}/subscriptions",
+            headers=headers,
+            json={"url": webhook_url, "update_types": ["message_created", "bot_started", "bot_stopped"]},
+            timeout=10,
+            verify=False
+        )
+        if r.status_code == 200:
+            return f"✅ Вебхук настроен: {webhook_url}"
+        else:
+            return f"❌ Ошибка: {r.status_code} - {r.text}"
+    except Exception as e:
+        return f"❌ Ошибка: {e}"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
-    if TOKEN:
-        logger.info(f"✅ Токен найден (первые 10): {TOKEN[:10]}...")
     app.run(host='0.0.0.0', port=port, debug=False)
