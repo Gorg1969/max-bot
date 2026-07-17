@@ -7,6 +7,7 @@ import urllib3
 import json
 import threading
 import time
+import base64
 from werkzeug.exceptions import ClientDisconnected
 from modules import Database, FileManager, Publisher, WebInterface
 from modules.report_generator import ReportGenerator
@@ -15,7 +16,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")
-app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200MB
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,6 +30,10 @@ if not TOKEN:
 
 db = Database()
 fm = FileManager(DATA_DIR)
+
+# Глобальные переменные для управления очередью
+active_queues = {}  # user_id -> {'queue': list, 'processing': bool, 'stop_flag': bool}
+queue_lock = threading.Lock()
 
 class APIClient:
     def __init__(self):
@@ -143,16 +148,25 @@ UPLOAD_PAGE = """
         .btn-success:hover { background: #218838; }
         .btn-danger { background: #dc3545; color: white; }
         .btn-danger:hover { background: #c82333; }
+        .btn-stop { background: #ff6b35; color: white; }
+        .btn-stop:hover { background: #e55a2b; }
         .status { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
         .status.success { background: #d4edda; color: #155724; display: block; border-left: 4px solid #28a745; }
         .status.error { background: #f8d7da; color: #721c24; display: block; border-left: 4px solid #dc3545; }
         .status.info { background: #d1ecf1; color: #0c5460; display: block; border-left: 4px solid #17a2b8; }
         .status.warning { background: #fff3cd; color: #856404; display: block; border-left: 4px solid #ffc107; }
+        .status.stop { background: #f8d7da; color: #721c24; display: block; border-left: 4px solid #dc3545; }
         .file-list { text-align: left; margin: 20px 0; padding: 0; list-style: none; }
         .file-list li { background: #f8f9fa; padding: 10px 15px; margin: 5px 0; border-radius: 5px; border-left: 3px solid #007bff; display: flex; justify-content: space-between; align-items: center; }
         .file-list li .count { background: #007bff; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
+        .file-list li .status-badge { background: #28a745; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
+        .file-list li .status-badge.pending { background: #ffc107; }
+        .file-list li .status-badge.error { background: #dc3545; }
+        .file-list li .status-badge.done { background: #28a745; }
+        .file-list li .status-badge.stopped { background: #dc3545; }
         .progress-bar { width: 100%; height: 25px; background: #e9ecef; border-radius: 10px; overflow: hidden; margin: 10px 0; display: none; }
         .progress-bar .progress { height: 100%; background: linear-gradient(90deg, #28a745, #20c997); transition: width 0.3s; width: 0%; display: flex; align-items: center; justify-content: center; color: white; font-size: 12px; font-weight: bold; }
+        .progress-bar .progress.stopped { background: linear-gradient(90deg, #dc3545, #c82333); }
         .instructions { background: #fff3cd; padding: 15px 20px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107; }
         .instructions code { background: #f8f9fa; padding: 2px 8px; border-radius: 3px; font-size: 14px; color: #d63384; }
         #log { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; font-family: 'Courier New', monospace; font-size: 12px; max-height: 300px; overflow-y: auto; margin: 20px 0; display: none; white-space: pre-wrap; line-height: 1.5; }
@@ -160,6 +174,7 @@ UPLOAD_PAGE = """
         .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
         .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; }
         .report-section { margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 10px; border: 1px solid #dee2e6; text-align: center; }
+        .queue-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; display: none; }
     </style>
 </head>
 <body>
@@ -190,9 +205,12 @@ UPLOAD_PAGE = """
             <ul class="file-list" id="fileListContent"></ul>
             <div class="button-group">
                 <button class="btn btn-success" onclick="uploadFolder()">🚀 Загрузить</button>
+                <button class="btn btn-stop" onclick="stopProcessing()">⏹ Остановить</button>
                 <button class="btn btn-danger" onclick="clearFiles()">🗑️ Очистить</button>
             </div>
         </div>
+        
+        <div class="queue-info" id="queueInfo"></div>
         
         <div class="progress-bar" id="progressBar">
             <div class="progress" id="progress">0%</div>
@@ -215,6 +233,10 @@ UPLOAD_PAGE = """
         
         let selectedFiles = [];
         let isProcessing = false;
+        let isStopped = false;
+        let processedCount = 0;
+        let totalFolders = 0;
+        let folderResults = [];
         
         const dropZone = document.getElementById('dropZone');
         const folderInput = document.getElementById('folderInput');
@@ -225,6 +247,7 @@ UPLOAD_PAGE = """
         const logDiv = document.getElementById('log');
         const progressBar = document.getElementById('progressBar');
         const progress = document.getElementById('progress');
+        const queueInfo = document.getElementById('queueInfo');
 
         dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
         dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('dragover'); });
@@ -293,6 +316,7 @@ UPLOAD_PAGE = """
                 const count = fileCount[folder] || 0;
                 const displayName = folder.includes('/') ? folder.split('/')[1] : folder;
                 li.innerHTML = `<span>📁 <strong>${displayName}</strong></span><span class="count">${count} файлов</span>`;
+                li.id = `folder-${folder.replace(/[^a-zA-Z0-9]/g, '_')}`;
                 fileListContent.appendChild(li);
             });
             
@@ -306,10 +330,16 @@ UPLOAD_PAGE = """
             fileList.style.display = 'none';
             statusDiv.style.display = 'none';
             progressBar.style.display = 'none';
+            queueInfo.style.display = 'none';
             logDiv.style.display = 'none';
             progress.style.width = '0%';
             progress.textContent = '0%';
+            progress.className = 'progress';
             folderInput.value = '';
+            isStopped = false;
+            processedCount = 0;
+            totalFolders = 0;
+            folderResults = [];
         }
 
         function addLog(message) {
@@ -328,8 +358,41 @@ UPLOAD_PAGE = """
             window.open(`/report/${userId}`, '_blank');
         }
 
+        async function stopProcessing() {
+            if (!isProcessing) {
+                showStatus('warning', '⚠️ Нет активных процессов для остановки');
+                return;
+            }
+            
+            isStopped = true;
+            showStatus('stop', '⏹ Остановка... Ожидайте завершения текущей операции');
+            addLog('⏹ ПОЛУЧЕНА КОМАНДА ОСТАНОВКИ');
+            
+            try {
+                const response = await fetch('/stop_processing', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: parseInt(userId) })
+                });
+                
+                const result = await response.json();
+                if (result.success) {
+                    showStatus('stop', '⏹ Процесс остановлен!');
+                    addLog(`✅ ${result.message}`);
+                    addLog(`🗑️ ${result.cleaned || 'Очередь очищена'}`);
+                    progress.className = 'progress stopped';
+                } else {
+                    showStatus('error', `❌ Ошибка остановки: ${result.message}`);
+                }
+            } catch (error) {
+                addLog(`❌ Ошибка при остановке: ${error.message}`);
+            }
+            
+            isProcessing = false;
+        }
+
         async function prepareFolderData(folderName, files) {
-            const txtFile = files.find(f => f.name === 'info' || f.name.endsWith('.txt'));
+            const txtFile = files.find(f => f.name === 'info.txt' || f.name.endsWith('.txt'));
             if (!txtFile) {
                 return null;
             }
@@ -352,13 +415,18 @@ UPLOAD_PAGE = """
             const images = [];
             for (const img of imageFiles) {
                 try {
-                    const arrayBuffer = await img.arrayBuffer();
+                    const reader = new FileReader();
+                    const dataUrl = await new Promise((resolve) => {
+                        reader.onload = (e) => resolve(e.target.result);
+                        reader.readAsDataURL(img);
+                    });
+                    
                     images.push({
                         name: img.name,
-                        data: Array.from(new Uint8Array(arrayBuffer)),
+                        data: dataUrl,
                         type: img.type || 'image/jpeg'
                     });
-                    addLog(`✅ Фото ${img.name} преобразовано`);
+                    addLog(`✅ Фото ${img.name} подготовлено`);
                 } catch (e) {
                     addLog(`⚠️ Ошибка чтения ${img.name}: ${e.message}`);
                 }
@@ -385,12 +453,17 @@ UPLOAD_PAGE = """
             }
             
             isProcessing = true;
+            isStopped = false;
+            processedCount = 0;
+            folderResults = [];
             
             showStatus('info', '⏳ Подготовка данных...');
             progressBar.style.display = 'block';
             progress.style.width = '0%';
             progress.textContent = '0%';
+            progress.className = 'progress';
             logDiv.textContent = '';
+            queueInfo.style.display = 'block';
             addLog('🚀 Начинаем обработку...');
             
             const folders = {};
@@ -406,22 +479,37 @@ UPLOAD_PAGE = """
             });
             
             const folderNames = Object.keys(folders);
-            const totalFolders = folderNames.length;
+            totalFolders = folderNames.length;
             
             addLog(`📁 Найдено ${totalFolders} папок`);
+            queueInfo.textContent = `📋 В очереди: ${totalFolders} папок | Обработано: 0/${totalFolders}`;
             showStatus('info', `⏳ Подготовка 0/${totalFolders} папок...`);
             
             let uploadedFolders = 0;
             let failedFolders = 0;
+            let stoppedByUser = false;
             const results = [];
             
             for (let i = 0; i < folderNames.length; i++) {
+                // Проверяем флаг остановки
+                if (isStopped) {
+                    stoppedByUser = true;
+                    addLog(`⏹ ОСТАНОВЛЕНО ПОЛЬЗОВАТЕЛЕМ! Обработано ${i}/${totalFolders} папок`);
+                    // Очищаем оставшиеся папки из очереди
+                    const remaining = folderNames.length - i;
+                    if (remaining > 0) {
+                        addLog(`🗑️ Удалено ${remaining} папок из очереди`);
+                    }
+                    break;
+                }
+                
                 const folderName = folderNames[i];
                 const files = folders[folderName];
                 
                 const percent = Math.round((i / totalFolders) * 100);
                 progress.style.width = percent + '%';
                 progress.textContent = `${i}/${totalFolders}`;
+                queueInfo.textContent = `📋 В очереди: ${totalFolders - i} папок | Обработано: ${i}/${totalFolders}`;
                 showStatus('info', `⏳ Подготовка ${i+1}/${totalFolders}: ${folderName}`);
                 
                 try {
@@ -433,6 +521,13 @@ UPLOAD_PAGE = """
                         failedFolders++;
                         results.push(`❌ ${folderName}: нет текстового файла`);
                         continue;
+                    }
+                    
+                    // Проверяем флаг остановки перед отправкой
+                    if (isStopped) {
+                        stoppedByUser = true;
+                        addLog(`⏹ ОСТАНОВЛЕНО! Пропускаем ${folderName}`);
+                        break;
                     }
                     
                     addLog(`📤 Отправка ${i+1}/${totalFolders}: ${folderName} (${folderData.images.length} фото)`);
@@ -464,11 +559,25 @@ UPLOAD_PAGE = """
                     results.push(`❌ ${folderName}: ${error.message}`);
                 }
                 
+                processedCount = i + 1;
                 await new Promise(r => setTimeout(r, 500));
+            }
+            
+            // Если остановлено пользователем, завершаем с сообщением
+            if (stoppedByUser) {
+                progress.style.width = '100%';
+                progress.textContent = `${processedCount}/${totalFolders} (Остановлено)`;
+                progress.className = 'progress stopped';
+                showStatus('stop', `⏹ Остановлено! Обработано ${processedCount}/${totalFolders} папок`);
+                addLog(`⏹ ПРОЦЕСС ОСТАНОВЛЕН ПОЛЬЗОВАТЕЛЕМ`);
+                addLog(`📊 Обработано: ${uploadedFolders} успешно, ${failedFolders} с ошибками`);
+                isProcessing = false;
+                return;
             }
             
             progress.style.width = '100%';
             progress.textContent = `${totalFolders}/${totalFolders}`;
+            queueInfo.textContent = `✅ Завершено! Обработано ${totalFolders} папок`;
             
             if (failedFolders === 0) {
                 showStatus('success', `✅ Загружено ${uploadedFolders} папок!`);
@@ -511,10 +620,16 @@ def upload_page():
 def publish_folder():
     try:
         data = request.get_json()
+        
+        if not data:
+            logger.error("❌ Нет данных в запросе")
+            return jsonify({'success': False, 'message': 'Нет данных'}), 400
+        
         user_id = data.get('user_id')
         folder_data = data.get('folder')
         
         if not user_id or not folder_data:
+            logger.error(f"❌ Нет user_id или folder_data: user_id={user_id}")
             return jsonify({'success': False, 'message': 'Нет данных'}), 400
         
         folder_name = folder_data.get('folderName')
@@ -525,8 +640,30 @@ def publish_folder():
         logger.info(f"📦 Получена папка: {folder_name} от пользователя {user_id}")
         logger.info(f"📝 Текст: {len(ad_text)} символов, 🖼️ Фото: {len(images)}")
         
+        # Обработка изображений из base64
+        processed_images = []
+        for img in images:
+            try:
+                if img.get('data') and img['data'].startswith('data:image'):
+                    # Извлекаем base64 часть
+                    data_parts = img['data'].split(',')
+                    if len(data_parts) > 1:
+                        image_data = base64.b64decode(data_parts[1])
+                        processed_images.append({
+                            'name': img.get('name', 'image.jpg'),
+                            'data': list(image_data),
+                            'type': img.get('type', 'image/jpeg')
+                        })
+                    else:
+                        processed_images.append(img)
+                else:
+                    processed_images.append(img)
+            except Exception as e:
+                logger.error(f"❌ Ошибка обработки изображения: {e}")
+                processed_images.append(img)
+        
         success, message = publisher.publish_single_folder(
-            user_id, folder_name, ad_text, metadata_text, images
+            user_id, folder_name, ad_text, metadata_text, processed_images
         )
         
         if success:
@@ -536,6 +673,60 @@ def publish_folder():
         
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/stop_processing', methods=['POST'])
+def stop_processing():
+    """Останавливает все процессы и очищает очередь"""
+    try:
+        data = request.get_json()
+        user_id = data.get('user_id')
+        
+        if not user_id:
+            return jsonify({'success': False, 'message': 'Нет user_id'}), 400
+        
+        logger.info(f"⏹ ПОЛУЧЕНА КОМАНДА ОСТАНОВКИ для пользователя {user_id}")
+        
+        # 1. Останавливаем publisher
+        publisher.stop(user_id)
+        
+        # 2. Очищаем временные файлы пользователя
+        fm.clear_temp_files(user_id)
+        
+        # 3. Очищаем очередь в глобальной переменной
+        with queue_lock:
+            if user_id in active_queues:
+                queue_size = len(active_queues[user_id].get('queue', []))
+                active_queues[user_id] = {
+                    'queue': [],
+                    'processing': False,
+                    'stop_flag': True
+                }
+                logger.info(f"🗑️ Очищена очередь для {user_id} ({queue_size} элементов)")
+            else:
+                active_queues[user_id] = {
+                    'queue': [],
+                    'processing': False,
+                    'stop_flag': True
+                }
+        
+        # 4. Отправляем подтверждение пользователю
+        api.send_message(
+            user_id, 
+            "⏹️ **Публикация остановлена!**\n\n"
+            "✅ Все процессы остановлены\n"
+            "🗑️ Временные файлы удалены\n"
+            "🗑️ Очередь очищена"
+        )
+        
+        return jsonify({
+            'success': True, 
+            'message': 'Процесс остановлен и очередь очищена',
+            'cleaned': 'Временные файлы и очередь удалены'
+        })
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка остановки: {e}")
         return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/webhook', methods=['POST'])
@@ -578,8 +769,32 @@ def webhook():
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/stop':
+            # Полная остановка всех процессов
             publisher.stop(user_id)
-            api.send_message(user_id, "⏹️ **Публикация остановлена!**\n\n✅ Все процессы остановлены\n🗑️ Временные файлы удалены")
+            fm.clear_temp_files(user_id)
+            
+            with queue_lock:
+                if user_id in active_queues:
+                    queue_size = len(active_queues[user_id].get('queue', []))
+                    active_queues[user_id] = {
+                        'queue': [],
+                        'processing': False,
+                        'stop_flag': True
+                    }
+                else:
+                    active_queues[user_id] = {
+                        'queue': [],
+                        'processing': False,
+                        'stop_flag': True
+                    }
+            
+            api.send_message(
+                user_id, 
+                "⏹️ **Публикация остановлена!**\n\n"
+                "✅ Все процессы остановлены\n"
+                "🗑️ Временные файлы удалены\n"
+                "🗑️ Очередь очищена"
+            )
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/report':
