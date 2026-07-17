@@ -1,84 +1,219 @@
-# app.py - РАБОЧАЯ ВЕРСИЯ
-
 from flask import Flask, request, jsonify, render_template_string, send_file
-import os
-import logging
-import json
 import requests
-import traceback
+import logging
+import os
+import json
+import re
 import time
-import base64
-import gc
-import urllib3
+import sqlite3
 from datetime import datetime
+import urllib3
+import threading
+import base64
 
-# ========== ИНИЦИАЛИЗАЦИЯ ==========
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24).hex())
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
+app.secret_key = "SUPER_SECRET_KEY_CHANGE_ME"
+app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-# ========== ВСТРОЕННЫЙ CORS ==========
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,Accept')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    response.headers.add('Access-Control-Allow-Credentials', 'true')
-    return response
-
-# ========== ЛОГИРОВАНИЕ ==========
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ========== ПЕРЕМЕННЫЕ ==========
-TOKEN = os.environ.get("MAX_TOKEN") or os.environ.get("MAX_BOT_TOKEN") or os.environ.get("TOKEN")
-DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
-MAX_API_URL = os.environ.get("MAX_API_URL", "https://platform-api2.max.ru")
-BASE_URL = os.environ.get("BASE_URL", "https://platform-api2.max.ru")
+# ========== НАСТРОЙКИ ==========
+TOKEN = os.environ.get("MAX_TOKEN", "ВАШ_ТОКЕН_ЗДЕСЬ")
+MAX_API_URL = "https://platform-api2.max.ru"
+DATA_DIR = "data"
+os.makedirs(DATA_DIR, exist_ok=True)
 
-if not TOKEN:
-    logger.error("❌ ТОКЕН НЕ НАЙДЕН!")
+# ========== БАЗА ДАННЫХ ==========
+class Database:
+    def __init__(self):
+        self.db_path = os.path.join(DATA_DIR, "bot.db")
+        self._init_db()
+    
+    def _init_db(self):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS ads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            folder_name TEXT,
+            chat_id TEXT,
+            title TEXT,
+            link TEXT,
+            code TEXT,
+            price TEXT,
+            published_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS tokens (
+            user_id INTEGER PRIMARY KEY,
+            token TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.commit()
+        conn.close()
+    
+    def add_user(self, user_id, username=None):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute('INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)', (user_id, username))
+        conn.commit()
+        conn.close()
+    
+    def save_ad(self, user_id, folder_name, chat_id, title, link, code, price):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute('''INSERT INTO ads (user_id, folder_name, chat_id, title, link, code, price, published_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
+            (user_id, folder_name, chat_id, title, link, code, price, datetime.now()))
+        conn.commit()
+        conn.close()
+    
+    def get_ads(self, user_id):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute('''SELECT folder_name, chat_id, title, link, code, price, published_at 
+            FROM ads WHERE user_id = ? ORDER BY published_at DESC''', (user_id,))
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    
+    def save_token(self, user_id, token):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute('INSERT OR REPLACE INTO tokens (user_id, token) VALUES (?, ?)', (user_id, token))
+        conn.commit()
+        conn.close()
+    
+    def get_token(self, user_id):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute('SELECT token FROM tokens WHERE user_id = ?', (user_id,))
+        row = c.fetchone()
+        conn.close()
+        return row[0] if row else None
 
-# ========== SSL - ВСЕГДА ОТКЛЮЧЕН ==========
-SSL_VERIFY = False
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+db = Database()
 
-# ========== ИНИЦИАЛИЗАЦИЯ МОДУЛЕЙ ==========
-db = None
-fm = None
-report_gen = None
-publisher = None
+# ========== PUBLISHER ==========
+class Publisher:
+    def __init__(self, token):
+        self.token = token
+        self.base_url = MAX_API_URL
+        self.stop_flags = {}
+    
+    def extract_chat_id(self, folder_name):
+        match = re.search(r'-\s*(\d+)', folder_name)
+        if match:
+            chat_id = match.group(1)
+            if len(chat_id) >= 10:
+                return chat_id
+        match = re.search(r'(\d{10,})$', folder_name)
+        if match:
+            return match.group(1)
+        return None
+    
+    def upload_image(self, image_data):
+        try:
+            # Получаем URL для загрузки
+            resp = requests.post(
+                f"{self.base_url}/uploads",
+                headers={"Authorization": self.token},
+                params={"type": "image"},
+                timeout=30,
+                verify=False
+            )
+            if resp.status_code != 200:
+                return None
+            upload_url = resp.json().get('url')
+            if not upload_url:
+                return None
+            
+            # Загружаем изображение
+            files = {'data': ('image.jpg', image_data, 'image/jpeg')}
+            resp = requests.post(upload_url, files=files, timeout=60, verify=False)
+            if resp.status_code != 200:
+                return None
+            
+            result = resp.json()
+            token = None
+            if 'photos' in result:
+                for photo in result['photos'].values():
+                    if isinstance(photo, dict) and 'token' in photo:
+                        token = photo['token']
+                        break
+            if not token and 'token' in result:
+                token = result['token']
+            return token
+        except Exception as e:
+            logger.error(f"Ошибка загрузки: {e}")
+            return None
+    
+    def send_to_chat(self, chat_id, text, image_tokens):
+        try:
+            attachments = []
+            for token in image_tokens[:10]:
+                attachments.append({"type": "image", "payload": {"token": token}})
+            
+            payload = {"text": text, "format": "markdown"}
+            if attachments:
+                payload["attachments"] = attachments
+            
+            chat_id_with_dash = f"-{chat_id}" if not str(chat_id).startswith('-') else chat_id
+            
+            resp = requests.post(
+                f"{self.base_url}/messages?chat_id={chat_id_with_dash}",
+                headers={"Authorization": self.token, "Content-Type": "application/json"},
+                json=payload,
+                timeout=60,
+                verify=False
+            )
+            return resp.status_code == 200
+        except Exception as e:
+            logger.error(f"Ошибка отправки: {e}")
+            return False
+    
+    def publish(self, user_id, folder_name, ad_text, metadata, images):
+        try:
+            chat_id = self.extract_chat_id(folder_name)
+            if not chat_id:
+                return False, "Не удалось извлечь chat_id"
+            
+            # Загружаем изображения
+            image_tokens = []
+            for img in images[:10]:
+                token = self.upload_image(img)
+                if token:
+                    image_tokens.append(token)
+            
+            # Отправляем в чат
+            success = self.send_to_chat(chat_id, ad_text, image_tokens)
+            if not success:
+                return False, "Не удалось отправить в чат"
+            
+            # Сохраняем в БД
+            db.save_ad(
+                user_id, folder_name, f"-{chat_id}",
+                metadata.get('Название', ''),
+                metadata.get('Ссылка', ''),
+                metadata.get('Код предложения', ''),
+                metadata.get('Цена в лизинге', '')
+            )
+            
+            return True, f"Опубликовано с {len(image_tokens)} фото"
+        except Exception as e:
+            return False, str(e)
 
-def init_app():
-    global db, fm, report_gen, publisher
-    try:
-        from modules import Database, FileManager
-        from modules.report_generator import ReportGenerator
-        from modules.publisher import Publisher
-        
-        logger.info("🔄 Инициализация...")
-        db = Database()
-        fm = FileManager(DATA_DIR)
-        report_gen = ReportGenerator(fm, db)
-        
-        # ========== СОЗДАЕМ APIClient ==========
-        class APIClient:
-            def __init__(self):
-                self.token = TOKEN
-                self.base_url = MAX_API_URL
-                self.verify = False
-        
-        # ========== ПЕРЕДАЕМ В PUBLISHER ==========
-        publisher = Publisher(APIClient(), fm, db)
-        
-        logger.info(f"✅ Готово! BASE_URL: {MAX_API_URL}")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Ошибка инициализации: {e}")
-        logger.error(traceback.format_exc())
-        return False
+publisher = Publisher(TOKEN)
 
-# ========== СТРАНИЦА ==========
+# ========== HTML СТРАНИЦА (КРАСИВЫЙ ИНТЕРФЕЙС) ==========
 UPLOAD_PAGE = '''
 <!DOCTYPE html>
 <html lang="ru">
@@ -87,97 +222,54 @@ UPLOAD_PAGE = '''
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MAX Bot - Загрузка</title>
     <style>
-        *{margin:0;padding:0;box-sizing:border-box}
-        body{font-family:Arial,sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;padding:20px}
-        .container{max-width:1000px;margin:0 auto;background:white;border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,0.3);padding:40px}
-        .header{text-align:center;margin-bottom:30px;padding-bottom:20px;border-bottom:2px solid #f0f0f0}
-        .header h1{font-size:32px;color:#333}
-        .instructions{background:#fff3cd;padding:20px;border-radius:12px;margin:20px 0;border-left:4px solid #ffc107}
-        .instructions ul{margin:10px 0 0 20px;color:#856404}
-        .settings-section{background:#f8f9fa;padding:20px;border-radius:12px;margin:20px 0}
-        .settings-row{display:flex;flex-wrap:wrap;gap:20px;align-items:center}
-        .settings-row label{display:flex;align-items:center;gap:10px;font-weight:500}
-        .settings-row input[type="number"]{width:70px;padding:8px 12px;border:2px solid #dee2e6;border-radius:8px;font-size:14px}
-        .drop-zone{border:3px dashed #667eea;padding:50px 20px;margin:20px 0;border-radius:16px;background:#f8f9ff;text-align:center;cursor:pointer;transition:all 0.3s}
-        .drop-zone:hover{background:#f0f2ff;border-color:#764ba2}
-        .drop-zone.dragover{background:#e8f5e9;border-color:#4caf50;transform:scale(1.02)}
-        .drop-zone .icon{font-size:64px;margin-bottom:15px}
-        .drop-zone p{color:#666;font-size:18px;margin:10px 0}
-        input[type="file"]{display:none}
-        .btn{padding:12px 30px;border:none;border-radius:10px;cursor:pointer;font-size:16px;font-weight:600;transition:all 0.3s;display:inline-flex;align-items:center;gap:8px}
-        .btn:hover{transform:translateY(-2px);box-shadow:0 5px 20px rgba(0,0,0,0.15)}
-        .btn-primary{background:linear-gradient(135deg,#667eea,#764ba2);color:white}
-        .btn-success{background:linear-gradient(135deg,#43a047,#66bb6a);color:white}
-        .btn-danger{background:linear-gradient(135deg,#e53935,#ef5350);color:white}
-        .btn-warning{background:linear-gradient(135deg,#f57c00,#ffa726);color:white}
-        .btn-info{background:linear-gradient(135deg,#00838f,#26c6da);color:white}
-        .file-list-section{display:none;margin:20px 0}
-        .file-list-section.visible{display:block}
-        .selected-info{background:#e3f2fd;padding:12px 20px;border-radius:10px;margin:10px 0;border-left:4px solid #2196f3;color:#0d47a1}
-        .queue-info{background:#f3e5f5;padding:12px 20px;border-radius:10px;margin:10px 0;border-left:4px solid #9c27b0;color:#4a148c}
-        .file-list{list-style:none;padding:0;margin:15px 0;max-height:400px;overflow-y:auto}
-        .file-list li{background:#f8f9fa;padding:12px 18px;margin:6px 0;border-radius:10px;border-left:4px solid #667eea;display:flex;justify-content:space-between;align-items:center}
-        .file-list li .folder-name{display:flex;align-items:center;gap:10px}
-        .file-list li .file-count{background:#667eea;color:white;padding:2px 12px;border-radius:20px;font-size:12px}
-        .file-list li .status-badge{font-size:12px;padding:4px 12px;border-radius:20px;font-weight:600;margin-left:10px}
-        .file-list li .status-badge.pending{background:#ffd54f;color:#f57f17}
-        .file-list li .status-badge.processing{background:#64b5f6;color:#0d47a1;animation:pulse 1s infinite}
-        .file-list li .status-badge.done{background:#81c784;color:#1b5e20}
-        .file-list li .status-badge.error{background:#ef9a9a;color:#b71c1c}
-        @keyframes pulse{0%{opacity:1}50%{opacity:0.5}100%{opacity:1}}
-        .button-group{display:flex;flex-wrap:wrap;gap:10px;margin:15px 0}
-        .progress-section{display:none;margin:20px 0}
-        .progress-section.visible{display:block}
-        .progress-bar{width:100%;height:30px;background:#e9ecef;border-radius:15px;overflow:hidden;position:relative}
-        .progress-bar .progress{height:100%;background:linear-gradient(90deg,#667eea,#764ba2);transition:width 0.5s;display:flex;align-items:center;justify-content:center;color:white;font-size:13px;font-weight:600;width:0%}
-        .status{padding:15px 20px;border-radius:12px;display:none;font-weight:500;margin:20px 0}
-        .status.visible{display:block}
-        .status.success{background:#e8f5e9;color:#1b5e20;border-left:4px solid #4caf50}
-        .status.error{background:#ffebee;color:#b71c1c;border-left:4px solid #f44336}
-        .status.warning{background:#fff3e0;color:#e65100;border-left:4px solid #ff9800}
-        .log-section{display:none;margin:20px 0}
-        .log-section.visible{display:block}
-        #log{background:#1a1a2e;color:#e0e0e0;padding:20px;border-radius:12px;font-family:monospace;font-size:13px;max-height:350px;overflow-y:auto;white-space:pre-wrap;line-height:1.6}
-        #log::-webkit-scrollbar{width:8px}
-        #log::-webkit-scrollbar-track{background:#2a2a3e;border-radius:4px}
-        #log::-webkit-scrollbar-thumb{background:#667eea;border-radius:4px}
-        .log-entry{padding:2px 0;border-bottom:1px solid rgba(255,255,255,0.05)}
-        .log-entry .time{color:#888;margin-right:10px}
-        .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:15px;margin:20px 0}
-        .stat-card{background:#f8f9fa;padding:20px;border-radius:12px;text-align:center;border:1px solid #e9ecef}
-        .stat-card .number{font-size:32px;font-weight:700;color:#333}
-        .stat-card .label{color:#888;font-size:14px;margin-top:5px}
-        .stat-card.success .number{color:#43a047}
-        .stat-card.error .number{color:#e53935}
-        .stat-card.total .number{color:#667eea}
-        .report-section{background:#f8f9fa;padding:25px;border-radius:12px;text-align:center;margin:20px 0}
-        .footer{text-align:center;margin-top:30px;padding-top:20px;border-top:2px solid #f0f0f0;color:#999}
-        @media(max-width:768px){.container{padding:20px}}
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; background: white; border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); padding: 40px; }
+        h1 { text-align: center; color: #333; margin-bottom: 10px; }
+        .subtitle { text-align: center; color: #888; margin-bottom: 30px; }
+        .drop-zone { border: 3px dashed #667eea; padding: 60px 20px; border-radius: 16px; text-align: center; cursor: pointer; transition: 0.3s; background: #f8f9ff; }
+        .drop-zone:hover { background: #f0f2ff; border-color: #764ba2; }
+        .drop-zone.dragover { background: #e8f5e9; border-color: #4caf50; transform: scale(1.02); }
+        .drop-zone .icon { font-size: 64px; margin-bottom: 15px; }
+        .drop-zone p { color: #666; font-size: 18px; }
+        .btn { padding: 12px 30px; border: none; border-radius: 10px; cursor: pointer; font-size: 16px; font-weight: 600; transition: 0.3s; }
+        .btn:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(0,0,0,0.15); }
+        .btn-primary { background: linear-gradient(135deg, #667eea, #764ba2); color: white; }
+        .btn-success { background: linear-gradient(135deg, #43a047, #66bb6a); color: white; }
+        .btn-danger { background: linear-gradient(135deg, #e53935, #ef5350); color: white; }
+        .btn-info { background: linear-gradient(135deg, #00838f, #26c6da); color: white; }
+        .file-list-section { display: none; margin: 20px 0; }
+        .file-list-section.visible { display: block; }
+        .selected-info { background: #e3f2fd; padding: 12px 20px; border-radius: 10px; margin: 10px 0; border-left: 4px solid #2196f3; }
+        .file-list { list-style: none; padding: 0; max-height: 400px; overflow-y: auto; }
+        .file-list li { background: #f8f9fa; padding: 12px 18px; margin: 6px 0; border-radius: 10px; border-left: 4px solid #667eea; display: flex; justify-content: space-between; align-items: center; }
+        .file-list li .count { background: #667eea; color: white; padding: 2px 12px; border-radius: 20px; font-size: 12px; }
+        .button-group { display: flex; gap: 10px; flex-wrap: wrap; margin: 15px 0; }
+        .progress-section { display: none; margin: 20px 0; }
+        .progress-section.visible { display: block; }
+        .progress-bar { width: 100%; height: 30px; background: #e9ecef; border-radius: 15px; overflow: hidden; }
+        .progress-bar .progress { height: 100%; background: linear-gradient(90deg, #667eea, #764ba2); transition: width 0.5s; display: flex; align-items: center; justify-content: center; color: white; font-size: 13px; font-weight: 600; width: 0%; }
+        .status { padding: 15px 20px; border-radius: 12px; display: none; font-weight: 500; margin: 20px 0; }
+        .status.visible { display: block; }
+        .status.success { background: #e8f5e9; color: #1b5e20; border-left: 4px solid #4caf50; }
+        .status.error { background: #ffebee; color: #b71c1c; border-left: 4px solid #f44336; }
+        .status.warning { background: #fff3e0; color: #e65100; border-left: 4px solid #ff9800; }
+        #log { background: #1a1a2e; color: #e0e0e0; padding: 20px; border-radius: 12px; font-family: monospace; font-size: 13px; max-height: 350px; overflow-y: auto; white-space: pre-wrap; line-height: 1.6; display: none; }
+        #log .time { color: #888; margin-right: 10px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin: 20px 0; }
+        .stat-card { background: #f8f9fa; padding: 20px; border-radius: 12px; text-align: center; border: 1px solid #e9ecef; }
+        .stat-card .number { font-size: 32px; font-weight: 700; color: #333; }
+        .stat-card .label { color: #888; font-size: 14px; margin-top: 5px; }
+        .report-section { background: #f8f9fa; padding: 25px; border-radius: 12px; text-align: center; margin: 20px 0; }
+        .footer { text-align: center; margin-top: 30px; padding-top: 20px; border-top: 2px solid #f0f0f0; color: #999; }
+        @media(max-width:768px){ .container { padding: 20px; } }
+        input[type="file"] { display: none; }
     </style>
 </head>
 <body>
 <div class="container">
-    <div class="header">
-        <h1>📤 Загрузка объявлений</h1>
-    </div>
-    
-    <div class="instructions">
-        <strong>📌 Как подготовить:</strong>
-        <ul>
-            <li>Создайте головную папку с подпапками для каждого объявления</li>
-            <li>В каждой подпапке: info.txt и фото (до 10 шт)</li>
-            <li>В названии папки укажите chat_id (например: Товары - 1234567890)</li>
-            <li>Перетащите головную папку в поле ниже</li>
-        </ul>
-    </div>
-    
-    <div class="settings-section">
-        <h4>⚙️ Настройки</h4>
-        <div class="settings-row">
-            <label>📸 Максимум фото: <input type="number" id="maxPhotos" value="6" min="1" max="10"></label>
-            <label>⏱️ Задержка (сек): <input type="number" id="delayBetween" value="3" min="1" max="30"></label>
-        </div>
-    </div>
+    <h1>📤 Загрузка объявлений</h1>
+    <p class="subtitle">Перетащите папку с объявлениями для публикации в MAX</p>
     
     <div class="drop-zone" id="dropZone">
         <div class="icon">📂</div>
@@ -189,7 +281,6 @@ UPLOAD_PAGE = '''
     
     <div class="file-list-section" id="fileListSection">
         <div class="selected-info" id="selectedInfo"></div>
-        <div class="queue-info"><strong>📋 Очередь:</strong> <span id="queueStatus">Ожидание</span></div>
         <ul class="file-list" id="fileListContent"></ul>
         <div class="button-group">
             <button class="btn btn-success" onclick="uploadFolder()" id="uploadBtn">🚀 Начать загрузку</button>
@@ -203,11 +294,9 @@ UPLOAD_PAGE = '''
     
     <div class="status" id="status"></div>
     
-    <div class="log-section" id="logSection">
-        <div id="log"></div>
-    </div>
+    <div id="log"></div>
     
-    <div class="stats-grid">
+    <div class="stats-grid" id="statsGrid">
         <div class="stat-card total"><div class="number" id="statTotal">0</div><div class="label">📊 Всего</div></div>
         <div class="stat-card success"><div class="number" id="statSuccess">0</div><div class="label">✅ Успешно</div></div>
         <div class="stat-card error"><div class="number" id="statErrors">0</div><div class="label">❌ Ошибок</div></div>
@@ -215,7 +304,6 @@ UPLOAD_PAGE = '''
     
     <div class="report-section">
         <button class="btn btn-info" onclick="getReport()">📊 Скачать отчет</button>
-        <button class="btn btn-warning" onclick="loadStats()">🔄 Обновить</button>
     </div>
     
     <div class="footer">⚡ MAX Bot</div>
@@ -288,33 +376,6 @@ folderInput.addEventListener('change', (e) => {
     if (files.length > 0) { selectedFiles = files; displayFiles(selectedFiles); }
 });
 
-function compressImage(file, maxWidth = 1920, maxHeight = 1920, quality = 0.85) {
-    return new Promise((resolve, reject) => {
-        if (file.size > 20 * 1024 * 1024) { reject(new Error('Файл слишком большой')); return; }
-        const reader = new FileReader();
-        reader.onload = function(e) {
-            const img = new Image();
-            img.onload = function() {
-                let w = img.width, h = img.height;
-                if (w > maxWidth) { h = (h * maxWidth) / w; w = maxWidth; }
-                if (h > maxHeight) { w = (w * maxHeight) / h; h = maxHeight; }
-                const canvas = document.createElement('canvas');
-                canvas.width = w; canvas.height = h;
-                const ctx = canvas.getContext('2d');
-                ctx.drawImage(img, 0, 0, w, h);
-                canvas.toBlob((blob) => {
-                    if (blob) { resolve(new File([blob], file.name, { type: 'image/jpeg', lastModified: Date.now() })); }
-                    else { reject(new Error('Не удалось сжать')); }
-                }, 'image/jpeg', quality);
-            };
-            img.onerror = reject;
-            img.src = e.target.result;
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-    });
-}
-
 function displayFiles(files) {
     const container = document.getElementById('fileListContent');
     container.innerHTML = '';
@@ -334,55 +395,21 @@ function displayFiles(files) {
     folderQueue = sorted.map(f => ({ name: f.display, status: 'pending', count: f.count, files: f.files }));
     sorted.forEach(folder => {
         const li = document.createElement('li');
-        const isSub = folder.sub !== 'root';
-        li.innerHTML = `
-            <div class="folder-name">
-                <span>${isSub ? '📂' : '📁'}</span>
-                <strong>${folder.display}</strong>
-            </div>
-            <div>
-                <span class="file-count">${folder.count} файлов</span>
-                <span class="status-badge pending" id="st-${folder.display.replace(/[\/\\]/g,'-')}">⏳</span>
-            </div>
-        `;
-        li.style.borderLeftColor = isSub ? '#4caf50' : '#667eea';
+        li.innerHTML = `<span>📁 <strong>${folder.display}</strong></span><span class="count">${folder.count} файлов</span>`;
         container.appendChild(li);
     });
     document.getElementById('selectedInfo').textContent = `✅ Найдено ${sorted.length} папок, ${files.length} файлов`;
     document.getElementById('fileListSection').classList.add('visible');
-    updateQueueStatus();
     totalFolders = sorted.length;
     document.getElementById('uploadBtn').disabled = false;
-}
-
-function updateQueueStatus() {
-    const done = folderQueue.filter(f => f.status === 'done').length;
-    const errors = folderQueue.filter(f => f.status === 'error').length;
-    const total = folderQueue.length;
-    document.getElementById('queueStatus').textContent = isProcessing ? `🔄 ${done+errors}/${total}` : `📋 ${done}/${total}`;
-    if (errors > 0) document.getElementById('queueStatus').textContent += ` ⚠️${errors}`;
-}
-
-function updateFolderStatus(name, status) {
-    const idx = folderQueue.findIndex(f => f.name === name);
-    if (idx !== -1) {
-        folderQueue[idx].status = status;
-        updateQueueStatus();
-        const badge = document.getElementById('st-' + name.replace(/[\/\\]/g,'-'));
-        if (badge) {
-            badge.className = 'status-badge ' + status;
-            badge.textContent = status === 'pending' ? '⏳' : status === 'processing' ? '🔄' : status === 'done' ? '✅' : '❌';
-        }
-    }
 }
 
 function addLog(msg) {
     const log = document.getElementById('log');
     log.style.display = 'block';
     const time = new Date().toLocaleTimeString();
-    log.innerHTML += `<div class="log-entry"><span class="time">[${time}]</span>${msg}</div>`;
+    log.innerHTML += `<div><span class="time">[${time}]</span>${msg}</div>`;
     log.scrollTop = log.scrollHeight;
-    document.getElementById('logSection').classList.add('visible');
 }
 
 function showStatus(type, msg) {
@@ -400,8 +427,6 @@ function clearFiles() {
     document.getElementById('status').className = 'status';
     document.getElementById('progressSection').classList.remove('visible');
     document.getElementById('progress').style.width = '0%';
-    document.getElementById('progress').textContent = '0%';
-    document.getElementById('logSection').classList.remove('visible');
     document.getElementById('log').innerHTML = '';
     folderInput.value = '';
     isProcessing = false;
@@ -414,80 +439,81 @@ async function uploadFolder() {
     
     isProcessing = true;
     document.getElementById('uploadBtn').disabled = true;
-    const maxPhotos = parseInt(document.getElementById('maxPhotos').value) || 6;
-    const delay = parseInt(document.getElementById('delayBetween').value) || 3;
-    
     document.getElementById('progressSection').classList.add('visible');
     document.getElementById('progress').style.width = '0%';
-    document.getElementById('progress').textContent = '0%';
     document.getElementById('log').innerHTML = '';
     
     addLog('🚀 Загрузка ' + totalFolders + ' папок');
-    let processed = 0, totalImages = 0, errors = 0, successCount = 0;
+    let processed = 0, errors = 0, successCount = 0;
     
     for (let idx = 0; idx < folderQueue.length; idx++) {
         const folder = folderQueue[idx];
         const name = folder.name;
         const files = folder.files;
         
-        updateFolderStatus(name, 'processing');
         addLog('📂 [' + (idx+1) + '/' + totalFolders + '] ' + name);
         
         let infoFile = null, imageFiles = [];
         for (const f of files) {
             const fn = f.name.toLowerCase();
             if (fn.endsWith('.txt') && fn.includes('info')) infoFile = f;
-            else if (fn.match(/\.(jpg|jpeg|png|gif|bmp|webp)$/)) {
+            else if (fn.match(/\\.(jpg|jpeg|png|gif|bmp|webp)$/)) {
                 if (f.size > 5 * 1024 * 1024) { addLog('⚠️ ' + f.name + ' слишком большой'); continue; }
                 imageFiles.push(f);
             }
         }
         
-        if (!infoFile) { addLog('❌ Нет info.txt в ' + name); updateFolderStatus(name, 'error'); errors++; processed++; updateProgress(processed); continue; }
-        
-        const selected = imageFiles.slice(0, Math.min(maxPhotos, 10));
-        addLog('📸 ' + selected.length + ' фото');
-        
-        const compressed = [];
-        for (let i = 0; i < selected.length; i++) {
-            try {
-                const img = await compressImage(selected[i], 1920, 1920, 0.85);
-                compressed.push(img);
-                totalImages++;
-            } catch(e) { addLog('⚠️ Ошибка сжатия: ' + e.message); }
-        }
+        if (!infoFile) { addLog('❌ Нет info.txt в ' + name); errors++; processed++; updateProgress(processed); continue; }
         
         const infoText = await infoFile.text();
-        const formData = new FormData();
-        formData.append('user_id', userId);
-        formData.append('max_photos', maxPhotos);
-        formData.append('folders[]', JSON.stringify({ name: name, adText: infoText.substring(0,5000), imageCount: compressed.length }));
-        for (let i = 0; i < compressed.length; i++) {
-            formData.append('images_' + name + '_' + i, compressed[i], compressed[i].name);
+        let adText = infoText;
+        let metadataText = '';
+        if (infoText.includes('#изъятая')) {
+            const parts = infoText.split('#изъятая');
+            adText = parts[0].trim();
+            metadataText = parts[1] ? parts[1].trim() : '';
         }
         
+        // Читаем изображения
+        const images = [];
+        for (const img of imageFiles.slice(0, 6)) {
+            try {
+                const arrayBuffer = await img.arrayBuffer();
+                images.push(new Uint8Array(arrayBuffer));
+            } catch(e) { addLog('⚠️ Ошибка чтения ' + img.name); }
+        }
+        
+        addLog('📸 ' + images.length + ' фото');
+        
         try {
-            addLog('📤 Отправка...');
-            const resp = await fetch('/upload_folders', { method: 'POST', body: formData });
-            if (!resp.ok) { const t = await resp.text(); throw new Error('HTTP ' + resp.status); }
+            const formData = new FormData();
+            formData.append('user_id', userId);
+            formData.append('folder_name', name);
+            formData.append('ad_text', adText);
+            formData.append('metadata_text', metadataText);
+            for (const img of images) {
+                const blob = new Blob([img], { type: 'image/jpeg' });
+                formData.append('images[]', blob, 'image.jpg');
+            }
+            
+            const resp = await fetch('/publish', { method: 'POST', body: formData });
             const result = await resp.json();
-            if (!result.success) throw new Error(result.message || 'Ошибка');
-            updateFolderStatus(name, 'done');
-            successCount++;
-            addLog('✅ Папка ' + name + ' опубликована');
+            
+            if (result.success) {
+                successCount++;
+                addLog('✅ ' + name + ' опубликована');
+            } else {
+                errors++;
+                addLog('❌ ' + name + ': ' + result.message);
+            }
         } catch(e) {
-            updateFolderStatus(name, 'error');
             errors++;
-            addLog('❌ ' + e.message);
+            addLog('❌ ' + name + ': ' + e.message);
         }
         
         processed++;
         updateProgress(processed);
-        
-        if (idx < folderQueue.length - 1) {
-            addLog('⏳ Задержка ' + delay + ' сек...');
-            await new Promise(r => setTimeout(r, delay * 1000));
-        }
+        await new Promise(r => setTimeout(r, 2000));
     }
     
     isProcessing = false;
@@ -512,99 +538,147 @@ function updateProgress(processed) {
 
 @app.route('/')
 def index():
-    return "🤖 MAX Bot is running!"
+    return render_template_string('''
+    <html><body style="font-family:Arial;text-align:center;padding:50px;">
+        <h1>🤖 MAX Bot</h1>
+        <p>Перейдите на <a href="/upload">/upload</a> для загрузки</p>
+    </body></html>
+    ''')
 
 @app.route('/upload', methods=['GET'])
 def upload_page():
     return render_template_string(UPLOAD_PAGE)
 
-@app.route('/upload_folders', methods=['POST', 'OPTIONS'])
-def upload_folders():
+@app.route('/publish', methods=['POST'])
+def publish():
     try:
-        if request.method == 'OPTIONS':
-            return '', 200
+        user_id = int(request.form.get('user_id', 0))
+        folder_name = request.form.get('folder_name')
+        ad_text = request.form.get('ad_text')
+        metadata_text = request.form.get('metadata_text')
         
-        if publisher is None:
-            if not init_app():
-                return jsonify({'success': False, 'message': 'Ошибка инициализации'}), 500
+        if not user_id or not folder_name or not ad_text:
+            return jsonify({'success': False, 'message': 'Нет данных'})
         
-        user_id = request.form.get('user_id', type=int)
-        if not user_id:
-            return jsonify({'success': False, 'message': 'Нет user_id'}), 400
+        # Парсим метаданные
+        metadata = {}
+        if metadata_text:
+            fields = {
+                'Название': r'Название:\s*(.+)',
+                'Ссылка': r'Ссылка:\s*(.+)',
+                'Код предложения': r'Код предложения:\s*(.+)',
+                'Цена в лизинге': r'Цена\s*[вВ]\s*лизинге:\s*(.+)',
+            }
+            for key, pattern in fields.items():
+                match = re.search(pattern, metadata_text, re.IGNORECASE)
+                if match:
+                    metadata[key] = match.group(1).strip()
         
-        max_photos = request.form.get('max_photos', 6, type=int)
-        max_photos = max(1, min(10, max_photos))
-        
-        folders_info = request.form.getlist('folders[]')
-        if not folders_info:
-            return jsonify({'success': False, 'message': 'Нет данных'}), 400
-        
-        folder_json = folders_info[0]
-        folder_data = json.loads(folder_json)
-        folder_name = folder_data.get('name', 'folder')
-        ad_text = folder_data.get('adText', '')
-        image_count = folder_data.get('imageCount', 0)
-        
-        MAX_IMAGE_SIZE = 5 * 1024 * 1024
+        # Читаем изображения
         images = []
+        for file in request.files.getlist('images[]'):
+            if file and file.filename:
+                images.append(file.read())
         
-        for i in range(min(image_count, max_photos)):
-            field_name = f'images_{folder_name}_{i}'
-            if field_name in request.files:
-                img_file = request.files[field_name]
-                try:
-                    img_data = img_file.read()
-                    if len(img_data) > MAX_IMAGE_SIZE:
-                        continue
-                    if img_data:
-                        img_base64 = base64.b64encode(img_data).decode('ascii')
-                        images.append({
-                            'name': img_file.filename,
-                            'data': img_base64,
-                            'type': img_file.content_type or 'image/jpeg',
-                            'bytes': img_data
-                        })
-                except Exception as e:
-                    logger.error(f"❌ Ошибка: {e}")
-                    continue
-                finally:
-                    gc.collect()
-        
-        metadata_text = ''
-        if '#изъятая' in ad_text:
-            parts = ad_text.split('#изъятая')
-            ad_text = parts[0].strip()
-            metadata_text = parts[1] if len(parts) > 1 else ''
-        
-        success, message = publisher.publish_single_folder(
-            user_id, folder_name, ad_text, metadata_text, images
-        )
-        
-        del images
-        gc.collect()
-        
-        if success:
-            return jsonify({
-                'success': True,
-                'message': message,
-                'job_ids': ['sync'],
-                'total_folders': 1,
-                'total_images': len(images) if images else 0
-            })
-        else:
-            return jsonify({'success': False, 'message': message}), 500
+        # Публикуем
+        success, message = publisher.publish(user_id, folder_name, ad_text, metadata, images)
+        return jsonify({'success': success, 'message': message})
         
     except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
-        logger.error(traceback.format_exc())
-        return jsonify({'success': False, 'message': str(e)}), 500
+        logger.error(f"Ошибка: {e}")
+        return jsonify({'success': False, 'message': str(e)})
+
+@app.route('/stats/<int:user_id>')
+def stats(user_id):
+    ads = db.get_ads(user_id)
+    return jsonify({
+        'total': len(ads),
+        'success': len([a for a in ads if a[0]]),
+        'errors': 0
+    })
+
+@app.route('/report/<int:user_id>')
+def report(user_id):
+    ads = db.get_ads(user_id)
+    if not ads:
+        return "❌ Нет данных для отчета", 404
+    
+    # Генерируем HTML отчет
+    html = '''
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>Отчет</title>
+        <style>
+            body { font-family: Arial; padding: 30px; background: #f5f5f5; }
+            .container { max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            h1 { color: #333; }
+            table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+            th { background: #667eea; color: white; padding: 12px; text-align: left; }
+            td { padding: 10px 12px; border-bottom: 1px solid #eee; }
+            tr:hover { background: #f8f9ff; }
+            .btn { display: inline-block; padding: 10px 25px; background: #667eea; color: white; text-decoration: none; border-radius: 5px; margin: 10px 0; }
+            .btn:hover { background: #5a6fd6; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>📊 Отчет по публикациям</h1>
+            <p>Пользователь: <strong>''' + str(user_id) + '''</strong></p>
+            <p>Всего публикаций: <strong>''' + str(len(ads)) + '''</strong></p>
+            <a href="/download_report/''' + str(user_id) + '''" class="btn">📥 Скачать CSV</a>
+            <a href="/upload" class="btn" style="background:#6c757d;">⬅️ Назад</a>
+            <table>
+                <tr><th>#</th><th>Папка</th><th>Название</th><th>Ссылка</th><th>Код</th><th>Цена</th><th>Дата</th></tr>
+    '''
+    
+    for i, ad in enumerate(ads, 1):
+        html += f'''
+            <tr>
+                <td>{i}</td>
+                <td>{ad[0]}</td>
+                <td>{ad[2] or ''}</td>
+                <td><a href="{ad[3]}" target="_blank">{ad[3][:30] if ad[3] else ''}</a></td>
+                <td>{ad[4] or ''}</td>
+                <td>{ad[5] or ''}</td>
+                <td>{ad[6]}</td>
+            </tr>
+        '''
+    
+    html += '''
+            </table>
+        </div>
+    </body>
+    </html>
+    '''
+    return html
+
+@app.route('/download_report/<int:user_id>')
+def download_report(user_id):
+    ads = db.get_ads(user_id)
+    if not ads:
+        return "Нет данных", 404
+    
+    import csv
+    from io import StringIO
+    
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['Папка', 'Название', 'Ссылка', 'Код', 'Цена', 'Дата'])
+    for ad in ads:
+        writer.writerow([ad[0], ad[2] or '', ad[3] or '', ad[4] or '', ad[5] or '', ad[6]])
+    
+    response = app.response_class(
+        output.getvalue(),
+        mimetype='text/csv',
+        headers={'Content-Disposition': f'attachment;filename=report_{user_id}.csv'}
+    )
+    return response
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         data = request.get_json()
-        logger.info(f"📨 Вебхук: {data}")
-        
         if not data:
             return jsonify({"ok": True}), 200
         
@@ -615,170 +689,55 @@ def webhook():
             msg = data['message']
             if 'sender' in msg:
                 user_id = msg['sender'].get('user_id')
-            elif 'user_id' in msg:
-                user_id = msg['user_id']
-            
             if 'body' in msg:
-                if isinstance(msg['body'], dict):
-                    text = msg['body'].get('text')
-                else:
-                    text = msg['body']
+                text = msg['body'].get('text')
         
         if not user_id:
-            if 'user' in data and 'user_id' in data['user']:
-                user_id = data['user']['user_id']
-        
-        if not user_id:
-            logger.warning("⚠️ Нет user_id")
             return jsonify({"ok": True}), 200
         
-        logger.info(f"👤 USER_ID: {user_id}, ТЕКСТ: {text}")
-        
         if text and text.strip() == '/start':
-            if db is None:
-                init_app()
+            db.add_user(user_id)
+            upload_url = f"{MAX_API_URL}/upload?user_id={user_id}"  # ВАШ URL
             
-            stats = db.get_user_stats(user_id) if db else {'total': 0, 'success': 0, 'errors': 0}
+            msg = f"""🏠 **Главное меню**
             
-            upload_url = f"{BASE_URL}/upload?user_id={user_id}"
+📊 **Ваша статистика:**
+📝 Всего: 0
+✅ Успешно: 0
+
+🌐 **Загрузить папку:**
+🔗 {upload_url}
+
+📊 **Отчет:**
+🔗 {MAX_API_URL}/report/{user_id}"""
             
-            message_text = (
-                f"🏠 **Главное меню**\n\n"
-                f"📊 **Ваша статистика:**\n"
-                f"📝 Всего: {stats['total']}\n"
-                f"✅ Успешно: {stats['success']}\n"
-                f"❌ Ошибок: {stats['errors']}\n\n"
-                f"🌐 **Загрузить папку:**\n"
-                f"🔗 {upload_url}\n\n"
-                f"📊 **Отчет:**\n"
-                f"🔗 {BASE_URL}/report/{user_id}"
+            requests.post(
+                f"{MAX_API_URL}/messages?user_id={user_id}",
+                headers={"Authorization": TOKEN, "Content-Type": "application/json"},
+                json={"text": msg, "format": "markdown"},
+                timeout=30,
+                verify=False
             )
-            
-            url = f"{MAX_API_URL}/messages?user_id={user_id}"
-            payload = {
-                "text": message_text,
-                "format": "markdown"
-            }
-            headers = {
-                "Authorization": TOKEN,
-                "Content-Type": "application/json"
-            }
-            
-            response = requests.post(url, headers=headers, json=payload, timeout=30, verify=False)
-            logger.info(f"✅ Ответ отправлен, статус: {response.status_code}")
         
         return jsonify({"ok": True}), 200
-        
     except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Ошибка: {e}")
         return jsonify({"ok": False}), 500
 
-@app.route('/set_webhook', methods=['GET'])
-def set_webhook():
-    try:
-        if not BASE_URL:
-            return jsonify({"success": False, "message": "BASE_URL не установлен"}), 500
-            
-        webhook_url = f"{BASE_URL}/webhook"
-        logger.info(f"🔄 Установка вебхука: {webhook_url}")
-        
-        url = f"{MAX_API_URL}/webhook"
-        payload = {
-            "url": webhook_url,
-            "secret": app.secret_key
-        }
-        headers = {
-            "Authorization": TOKEN,
-            "Content-Type": "application/json"
-        }
-        
-        response = requests.post(url, headers=headers, json=payload, timeout=30, verify=False)
-        
-        if response.status_code == 200:
-            return jsonify({"success": True, "message": f"Вебхук установлен: {webhook_url}"})
-        else:
-            return jsonify({"success": False, "message": f"Ошибка: {response.status_code}"}), 500
-            
-    except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
-        return jsonify({"success": False, "message": str(e)}), 500
-
-@app.route('/report/<int:user_id>')
-def report_page(user_id):
-    if report_gen is None:
-        init_app()
-    
-    report_path = report_gen.generate_report(user_id)
-    if not report_path:
-        return "❌ Нет данных", 404
-    filename = os.path.basename(report_path)
-    return f"""
-    <html>
-    <body style="text-align:center;padding:50px;font-family:Arial;">
-        <h1>📊 Отчет готов!</h1>
-        <p><a href="/download_report/{user_id}/{filename}">📥 Скачать</a></p>
-        <p><a href="/upload">⬅️ Назад</a></p>
-    </body>
-    </html>
-    """
-
-@app.route('/download_report/<int:user_id>/<path:filename>')
-def download_report(user_id, filename):
-    try:
-        if fm is None:
-            init_app()
-        
-        user_folder = fm.get_user_folder(user_id)
-        file_path = os.path.join(user_folder, filename)
-        if not os.path.exists(file_path):
-            return "❌ Файл не найден", 404
-        return send_file(file_path, as_attachment=True, download_name=filename)
-    except Exception as e:
-        return str(e), 500
-
-@app.route('/stats/<int:user_id>')
-def get_stats(user_id):
-    try:
-        if db is None:
-            init_app()
-        
-        stats = db.get_user_stats(user_id) if db else {'total': 0, 'success': 0, 'errors': 0}
-        return jsonify(stats)
-    except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
-        return jsonify({'total': 0, 'success': 0, 'errors': 0}), 500
-
-@app.route('/health')
-def health():
-    return {"status": "ok", "database": "SQLite"}
-
-@app.route('/status')
-def status():
-    return {
-        "status": "running",
-        "token_set": bool(TOKEN),
-        "ssl_verify": False,
-        "base_url": BASE_URL,
-        "modules_initialized": db is not None
-    }
-
-@app.route('/test_publisher')
-def test_publisher():
-    """Тестовый маршрут для проверки Publisher"""
-    if publisher is None:
-        init_app()
-    
-    return jsonify({
-        "publisher_initialized": publisher is not None,
-        "api_token_set": bool(publisher.api.token) if publisher else False,
-        "api_base_url": publisher.api.base_url if publisher else None,
-        "status": "ok"
-    })
-
-# ========== ЗАПУСК ==========
-init_app()
+@app.route('/setup_webhook')
+def setup_webhook():
+    webhook_url = request.host_url.rstrip('/') + '/webhook'
+    resp = requests.post(
+        f"{MAX_API_URL}/subscriptions",
+        headers={"Authorization": TOKEN, "Content-Type": "application/json"},
+        json={"url": webhook_url, "update_types": ["message_created"]},
+        timeout=10,
+        verify=False
+    )
+    return f"✅ Вебхук: {webhook_url}<br>Ответ: {resp.status_code}"
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    print(f"🚀 Запуск на http://localhost:{port}")
+    print(f"📤 Страница загрузки: http://localhost:{port}/upload")
+    app.run(host='0.0.0.0', port=port, debug=True)
