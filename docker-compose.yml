@@ -10,8 +10,6 @@ services:
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
-    networks:
-      - default
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -34,13 +32,12 @@ services:
       - SECRET_KEY=${SECRET_KEY:-dev_secret_key}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - PORT=3000
+      - PYTHONUNBUFFERED=1
     volumes:
       - ./data:/app/data
     depends_on:
       redis:
         condition: service_healthy
-    networks:
-      - default
     command: gunicorn -c gunicorn.conf.py app:app
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
@@ -60,13 +57,12 @@ services:
       - DATA_DIR=/app/data
       - MAX_API_URL=https://platform-api2.max.ru
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PYTHONUNBUFFERED=1
     volumes:
       - ./data:/app/data
     depends_on:
       redis:
         condition: service_healthy
-    networks:
-      - default
     command: python worker.py
     healthcheck:
       test: ["CMD", "python", "-c", "import redis; r=redis.Redis(host='redis', port=6379); r.ping()"]
