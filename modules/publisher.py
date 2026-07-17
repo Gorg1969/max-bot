@@ -1,4 +1,4 @@
-# modules/publisher.py - ИСПРАВЛЕННАЯ ВЕРСИЯ
+# modules/publisher.py - РАБОЧАЯ ВЕРСИЯ
 
 import logging
 import os
@@ -22,22 +22,17 @@ class Publisher:
         self.STOP_FLAG = {}
 
     def extract_chat_id(self, folder_name):
-        """Извлекает chat_id из названия папки"""
         try:
-            # Попытка найти chat_id в разных форматах
-            # Формат 1: "название - 1234567890"
             match = re.search(r'-\s*(\d+)', folder_name)
             if match:
                 chat_id = match.group(1)
                 if len(chat_id) >= 10:
                     return chat_id
             
-            # Формат 2: заканчивается на 10+ цифр
             match = re.search(r'(\d{10,})$', folder_name)
             if match:
                 return match.group(1)
             
-            # Формат 3: любое число в строке
             match = re.search(r'(\d+)', folder_name)
             if match:
                 chat_id = match.group(1)
@@ -50,12 +45,10 @@ class Publisher:
             return None
 
     def _upload_file_to_max(self, image_data, user_id):
-        """Загружает ОДНО изображение"""
         try:
             if self.STOP_FLAG.get(user_id, False):
                 return None
 
-            # Получаем URL для загрузки
             response = requests.post(
                 f"{self.api.base_url}/uploads",
                 headers={"Authorization": self.api.token},
@@ -75,7 +68,6 @@ class Publisher:
                 logger.error(f"❌ Не получен URL: {upload_data}")
                 return None
             
-            # Извлекаем байты изображения
             image_bytes = None
             
             if isinstance(image_data, dict):
@@ -86,14 +78,13 @@ class Publisher:
             elif isinstance(image_data, (bytes, bytearray)):
                 image_bytes = bytes(image_data)
             else:
-                logger.error(f"❌ Неподдерживаемый тип данных: {type(image_data)}")
+                logger.error(f"❌ Неподдерживаемый тип: {type(image_data)}")
                 return None
             
             if not image_bytes:
-                logger.error("❌ Не удалось получить байты изображения")
+                logger.error("❌ Нет байтов")
                 return None
             
-            # Отправляем файл
             files = {'data': ('image.jpg', image_bytes, 'image/jpeg')}
             
             upload_response = requests.post(
@@ -109,7 +100,6 @@ class Publisher:
             
             upload_result = upload_response.json()
             
-            # Извлекаем токен
             token = None
             if 'photos' in upload_result and isinstance(upload_result['photos'], dict):
                 for photo_data in upload_result['photos'].values():
@@ -121,12 +111,10 @@ class Publisher:
                 token = upload_result['token']
             
             if not token:
-                logger.error(f"❌ Не получен токен: {upload_result}")
+                logger.error(f"❌ Нет токена: {upload_result}")
                 return None
             
-            # Освобождаем память
             del image_bytes
-            
             time.sleep(0.3)
             return token
             
@@ -135,7 +123,6 @@ class Publisher:
             return None
 
     def _send_to_chat(self, chat_id, text, image_tokens):
-        """Отправляет сообщение в чат"""
         try:
             if not self.api.token:
                 return False, None
@@ -182,11 +169,10 @@ class Publisher:
                 return False, None
                 
         except Exception as e:
-            logger.error(f"❌ Ошибка отправки в чат: {e}")
+            logger.error(f"❌ Ошибка: {e}")
             return False, None
 
     def _send_to_user(self, user_id, text, image_tokens):
-        """Отправляет в личные сообщения"""
         try:
             if not self.api.token:
                 return False, None
@@ -231,11 +217,10 @@ class Publisher:
                 return False, None
                 
         except Exception as e:
-            logger.error(f"❌ Ошибка отправки в личные: {e}")
+            logger.error(f"❌ Ошибка: {e}")
             return False, None
 
     def _parse_metadata(self, metadata_text):
-        """Парсит метаданные"""
         metadata = {}
         if not metadata_text:
             return metadata
@@ -255,29 +240,25 @@ class Publisher:
         return metadata
 
     def publish_single_folder(self, user_id, folder_name, ad_text, metadata_text, images_data):
-        """Публикует одну папку для конкретного пользователя"""
         try:
-            # Проверяем флаг остановки
             if self.STOP_FLAG.get(user_id, False):
-                return False, "Остановка пользователем"
+                return False, "Остановка"
             
             start_time = time.time()
             
-            # Извлекаем chat_id
             chat_id = self.extract_chat_id(folder_name)
             if not chat_id:
-                return False, f"Не удалось извлечь chat_id из {folder_name}"
+                return False, f"Нет chat_id в {folder_name}"
             
-            # Загружаем изображения (максимум 10)
             image_tokens = []
             max_images = min(len(images_data), 10) if isinstance(images_data, list) else 0
             
             for i in range(max_images):
                 if self.STOP_FLAG.get(user_id, False):
-                    return False, "Остановка пользователем"
+                    return False, "Остановка"
                 
                 if time.time() - start_time > self.FOLDER_TIMEOUT:
-                    return False, f"Таймаут обработки папки {folder_name}"
+                    return False, f"Таймаут {folder_name}"
                 
                 img_data = images_data[i]
                 if not img_data:
@@ -287,17 +268,14 @@ class Publisher:
                 if token:
                     image_tokens.append(token)
             
-            # Отправляем сообщение
             chat_id_with_dash = f"-{chat_id}" if not str(chat_id).startswith('-') else chat_id
             post_id = None
             
-            # Пробуем отправить в чат
             if image_tokens:
                 success, post_id = self._send_to_chat(chat_id, ad_text, image_tokens)
             else:
                 success, post_id = self._send_to_chat(chat_id, ad_text, [])
             
-            # Если не получилось - отправляем в личные
             if not success:
                 if image_tokens:
                     success, post_id = self._send_to_user(user_id, ad_text, image_tokens)
@@ -305,16 +283,14 @@ class Publisher:
                     success, post_id = self._send_to_user(user_id, ad_text, [])
             
             if not success:
-                return False, "Не удалось отправить сообщение"
+                return False, "Не удалось отправить"
             
-            # Генерируем post_id если не получен
             if not post_id:
                 hash_input = f"{chat_id}_{time.time()}_{folder_name}"
                 post_id = hashlib.md5(hash_input.encode()).hexdigest()[:12]
             
             post_link = f"https://max.ru/c/{chat_id_with_dash}/{post_id}"
             
-            # Сохраняем метаданные
             metadata = self._parse_metadata(metadata_text)
             metadata['post_link'] = post_link
             metadata['post_id'] = post_id
@@ -326,15 +302,14 @@ class Publisher:
                 )
                 self.db.add_publication(user_id, folder_name, chat_id_with_dash, post_id)
             
-            return True, f"✅ Папка {folder_name} опубликована с {len(image_tokens)} фото"
+            return True, f"✅ Опубликовано с {len(image_tokens)} фото"
             
         except Exception as e:
-            logger.error(f"❌ Ошибка публикации {folder_name}: {e}")
+            logger.error(f"❌ Ошибка: {e}")
             return False, str(e)
 
     def stop(self, user_id):
-        """Останавливает публикацию для пользователя"""
-        logger.info(f"⏹️ Остановка для пользователя {user_id}")
+        logger.info(f"⏹️ Остановка {user_id}")
         self.STOP_FLAG[user_id] = True
         
         def reset_stop_flag():
