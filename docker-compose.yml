@@ -20,7 +20,7 @@ services:
       timeout: 3s
       retries: 10
     networks:
-      - maxbot-network
+      - maxbot-network  # ✅ Добавить сеть
 
   redis:
     image: redis:7-alpine
@@ -37,7 +37,7 @@ services:
       timeout: 3s
       retries: 10
     networks:
-      - maxbot-network
+      - maxbot-network  # ✅ Добавить сеть
 
   web:
     build: .
@@ -65,7 +65,7 @@ services:
       redis:
         condition: service_healthy
     networks:
-      - maxbot-network
+      - maxbot-network  # ✅ Добавить сеть
     command: gunicorn -c gunicorn.conf.py app:app
 
   worker:
@@ -90,7 +90,7 @@ services:
       redis:
         condition: service_healthy
     networks:
-      - maxbot-network
+      - maxbot-network  # ✅ Добавить сеть
     command: python worker.py
 
 volumes:
@@ -98,5 +98,5 @@ volumes:
   redis_data:
 
 networks:
-  maxbot-network:
+  maxbot-network:  # ✅ ОПРЕДЕЛИТЬ СЕТЬ
     driver: bridge
