@@ -1,3 +1,5 @@
+# modules/database.py
+
 import sqlite3
 import os
 import logging
@@ -12,6 +14,7 @@ class Database:
         self._init_db()
     
     def _init_db(self):
+        """Инициализация базы данных и миграция при первом запуске"""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         
@@ -34,12 +37,20 @@ class Database:
                 user_id INTEGER NOT NULL,
                 folder_name TEXT NOT NULL,
                 group_id TEXT NOT NULL,
+                post_id TEXT,
                 status TEXT DEFAULT 'pending',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP,
                 error TEXT
             )
         ''')
+        
+        # Проверяем и добавляем колонку post_id если её нет
+        try:
+            c.execute("SELECT post_id FROM publications LIMIT 1")
+        except sqlite3.OperationalError:
+            c.execute("ALTER TABLE publications ADD COLUMN post_id TEXT")
+            logger.info("✅ Добавлена колонка post_id в publications")
         
         # Таблица метаданных для отчетов
         c.execute('''
@@ -48,6 +59,8 @@ class Database:
                 user_id INTEGER NOT NULL,
                 folder_name TEXT NOT NULL,
                 chat_id TEXT NOT NULL,
+                post_id TEXT,
+                post_link TEXT,
                 published_at TIMESTAMP,
                 title TEXT,
                 source_link TEXT,
@@ -57,24 +70,38 @@ class Database:
             )
         ''')
         
+        # Проверяем и добавляем колонку post_id если её нет
+        try:
+            c.execute("SELECT post_id FROM ad_metadata LIMIT 1")
+        except sqlite3.OperationalError:
+            c.execute("ALTER TABLE ad_metadata ADD COLUMN post_id TEXT")
+            logger.info("✅ Добавлена колонка post_id в ad_metadata")
+        
+        # Проверяем и добавляем колонку post_link если её нет
+        try:
+            c.execute("SELECT post_link FROM ad_metadata LIMIT 1")
+        except sqlite3.OperationalError:
+            c.execute("ALTER TABLE ad_metadata ADD COLUMN post_link TEXT")
+            logger.info("✅ Добавлена колонка post_link в ad_metadata")
+        
         conn.commit()
         conn.close()
-        logger.info("✅ База данных инициализирована")
+        logger.info("✅ База данных инициализирована и проверена")
     
-    def add_publication(self, user_id, folder_name, group_id):
+    def add_publication(self, user_id, folder_name, group_id, post_id=None):
         """Добавляет запись о публикации"""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         c.execute('''
-            INSERT INTO publications (user_id, folder_name, group_id, status)
-            VALUES (?, ?, ?, ?)
-        ''', (user_id, folder_name, group_id, 'success'))
+            INSERT INTO publications (user_id, folder_name, group_id, post_id, status)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, folder_name, group_id, post_id, 'success'))
         conn.commit()
         conn.close()
-        logger.info(f"📝 Добавлена публикация: {folder_name} -> {group_id}")
+        logger.info(f"📝 Добавлена публикация: {folder_name} -> {group_id}, post_id={post_id}")
     
-    def save_ad_metadata(self, user_id, folder_name, chat_id, metadata, published_at):
-        """Сохраняет метаданные для отчета"""
+    def save_ad_metadata(self, user_id, folder_name, chat_id, metadata, published_at, post_id=None, post_link=None):
+        """Сохраняет метаданные для отчета с post_id и post_link"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
@@ -89,13 +116,13 @@ class Database:
             
             c.execute('''
                 INSERT INTO ad_metadata 
-                (user_id, folder_name, chat_id, published_at, title, source_link, offer_code, price)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (user_id, folder_name, chat_id, published_at, title, source_link, offer_code, price))
+                (user_id, folder_name, chat_id, post_id, post_link, published_at, title, source_link, offer_code, price)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (user_id, folder_name, chat_id, post_id, post_link, published_at, title, source_link, offer_code, price))
             
             conn.commit()
             conn.close()
-            logger.info(f"📊 Метаданные сохранены для {folder_name}")
+            logger.info(f"📊 Метаданные сохранены для {folder_name}, post_link={post_link}")
             return True
             
         except Exception as e:
@@ -108,7 +135,7 @@ class Database:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
             c.execute('''
-                SELECT title, source_link, offer_code, price 
+                SELECT title, source_link, offer_code, price, post_link, post_id
                 FROM ad_metadata 
                 WHERE user_id = ? AND folder_name = ?
                 ORDER BY id DESC LIMIT 1
@@ -121,7 +148,9 @@ class Database:
                     'Название': row[0] or '',
                     'Ссылка': row[1] or '',
                     'Код предложения': row[2] or '',
-                    'Цена в лизинге': row[3] or ''
+                    'Цена в лизинге': row[3] or '',
+                    'post_link': row[4] or '',
+                    'post_id': row[5] or ''
                 }
             return {}
         except Exception as e:
@@ -129,15 +158,15 @@ class Database:
             return {}
     
     def get_publications(self, user_id, limit=None):
-        """Получает список публикаций пользователя"""
+        """Получает список публикаций пользователя в порядке создания (старые -> новые)"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
             query = '''
-                SELECT folder_name, group_id, status, created_at 
+                SELECT folder_name, group_id, post_id, status, created_at 
                 FROM publications 
                 WHERE user_id = ?
-                ORDER BY created_at DESC
+                ORDER BY created_at ASC
             '''
             if limit:
                 query += f" LIMIT {limit}"
@@ -151,8 +180,9 @@ class Database:
                 publications.append({
                     'folder_name': row[0],
                     'group_id': row[1],
-                    'status': row[2],
-                    'created_at': row[3]
+                    'post_id': row[2],
+                    'status': row[3],
+                    'created_at': row[4]
                 })
             return publications
         except Exception as e:
