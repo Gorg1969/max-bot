@@ -1,21 +1,6 @@
 version: '3.8'
 
 services:
-  redis:
-    image: redis:7-alpine
-    container_name: maxbot-redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
   web:
     build: .
     container_name: maxbot-web
@@ -26,7 +11,6 @@ services:
       - MAX_TOKEN=${MAX_TOKEN}
       - MAX_BOT_TOKEN=${MAX_BOT_TOKEN}
       - TOKEN=${TOKEN}
-      - REDIS_URL=redis://redis:6379/0
       - DATA_DIR=/app/data
       - MAX_API_URL=https://platform-api2.max.ru
       - SECRET_KEY=${SECRET_KEY:-dev_secret_key}
@@ -35,30 +19,4 @@ services:
       - PYTHONUNBUFFERED=1
     volumes:
       - ./data:/app/data
-    depends_on:
-      redis:
-        condition: service_healthy
     command: gunicorn -c gunicorn.conf.py app:app
-
-  worker:
-    build: .
-    container_name: maxbot-worker
-    restart: unless-stopped
-    environment:
-      - MAX_TOKEN=${MAX_TOKEN}
-      - MAX_BOT_TOKEN=${MAX_BOT_TOKEN}
-      - TOKEN=${TOKEN}
-      - REDIS_URL=redis://redis:6379/0
-      - DATA_DIR=/app/data
-      - MAX_API_URL=https://platform-api2.max.ru
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - PYTHONUNBUFFERED=1
-    volumes:
-      - ./data:/app/data
-    depends_on:
-      redis:
-        condition: service_healthy
-    command: python worker.py
-
-volumes:
-  redis_data:
