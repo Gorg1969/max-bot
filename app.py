@@ -1,3 +1,4 @@
+# app.py
 from flask import Flask, request, jsonify, render_template_string, send_file
 import requests
 import logging
@@ -124,7 +125,7 @@ api = APIClient()
 publisher = Publisher(api, fm, db)
 report_gen = ReportGenerator(fm, db)
 
-# ========== HTML СТРАНИЦА ==========
+# ========== HTML СТРАНИЦА ЗАГРУЗКИ ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -132,54 +133,75 @@ UPLOAD_PAGE = """
     <meta charset="UTF-8">
     <title>Загрузка объявлений</title>
     <style>
-        body { font-family: Arial; max-width: 800px; margin: 50px auto; padding: 20px; background: #f5f5f5; }
-        .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h1 { color: #333; margin-top: 0; }
-        .drop-zone { border: 2px dashed #007bff; padding: 40px; margin: 20px 0; border-radius: 10px; background: #f8f9fa; text-align: center; cursor: pointer; transition: all 0.3s; }
-        .drop-zone:hover { background: #e3f2fd; }
+        * { box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; max-width: 900px; margin: 30px auto; padding: 20px; background: #f0f2f5; }
+        .container { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #1a1a2e; margin-top: 0; display: flex; align-items: center; gap: 10px; }
+        .drop-zone { border: 2px dashed #4a6fa5; padding: 50px 20px; margin: 20px 0; border-radius: 12px; background: #f8faff; text-align: center; cursor: pointer; transition: all 0.3s; }
+        .drop-zone:hover { background: #eef4ff; border-color: #2d4a7a; }
         .drop-zone.dragover { background: #d4edda; border-color: #28a745; }
-        .drop-zone p { margin: 0; color: #666; }
-        .drop-zone .icon { font-size: 48px; display: block; margin-bottom: 10px; }
+        .drop-zone .icon { font-size: 56px; display: block; margin-bottom: 10px; }
+        .drop-zone p { margin: 5px 0; color: #555; }
         input[type="file"] { display: none; }
-        .btn { padding: 12px 30px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; font-weight: bold; transition: all 0.3s; }
-        .btn-primary { background: #007bff; color: white; }
-        .btn-primary:hover { background: #0056b3; }
+        .btn { padding: 12px 28px; border: none; border-radius: 8px; cursor: pointer; font-size: 15px; font-weight: 600; transition: all 0.3s; }
+        .btn-primary { background: #4a6fa5; color: white; }
+        .btn-primary:hover { background: #2d4a7a; transform: translateY(-1px); }
         .btn-success { background: #28a745; color: white; }
-        .btn-success:hover { background: #218838; }
+        .btn-success:hover { background: #1e7e34; transform: translateY(-1px); }
         .btn-danger { background: #dc3545; color: white; }
-        .btn-danger:hover { background: #c82333; }
-        .btn-stop { background: #ff6b35; color: white; }
-        .btn-stop:hover { background: #e55a2b; }
-        .status { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
+        .btn-danger:hover { background: #b02a37; transform: translateY(-1px); }
+        .btn-stop { background: #fd7e14; color: white; }
+        .btn-stop:hover { background: #e06b0a; transform: translateY(-1px); }
+        .btn-warning { background: #ffc107; color: #333; }
+        .btn-warning:hover { background: #e0a800; transform: translateY(-1px); }
+        .btn-outline { background: transparent; color: #4a6fa5; border: 2px solid #4a6fa5; }
+        .btn-outline:hover { background: #4a6fa5; color: white; }
+        .status { margin-top: 20px; padding: 15px 20px; border-radius: 8px; display: none; }
         .status.success { background: #d4edda; color: #155724; display: block; border-left: 4px solid #28a745; }
         .status.error { background: #f8d7da; color: #721c24; display: block; border-left: 4px solid #dc3545; }
         .status.info { background: #d1ecf1; color: #0c5460; display: block; border-left: 4px solid #17a2b8; }
         .status.warning { background: #fff3cd; color: #856404; display: block; border-left: 4px solid #ffc107; }
         .status.stop { background: #f8d7da; color: #721c24; display: block; border-left: 4px solid #dc3545; }
-        .file-list { text-align: left; margin: 20px 0; padding: 0; list-style: none; }
-        .file-list li { background: #f8f9fa; padding: 10px 15px; margin: 5px 0; border-radius: 5px; border-left: 3px solid #007bff; display: flex; justify-content: space-between; align-items: center; }
-        .file-list li .count { background: #007bff; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
-        .file-list li .status-badge { background: #28a745; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
-        .file-list li .status-badge.pending { background: #ffc107; }
-        .file-list li .status-badge.error { background: #dc3545; }
-        .file-list li .status-badge.done { background: #28a745; }
-        .file-list li .status-badge.stopped { background: #dc3545; }
-        .progress-bar { width: 100%; height: 25px; background: #e9ecef; border-radius: 10px; overflow: hidden; margin: 10px 0; display: none; }
-        .progress-bar .progress { height: 100%; background: linear-gradient(90deg, #28a745, #20c997); transition: width 0.3s; width: 0%; display: flex; align-items: center; justify-content: center; color: white; font-size: 12px; font-weight: bold; }
+        .file-list { text-align: left; margin: 15px 0; padding: 0; list-style: none; max-height: 300px; overflow-y: auto; }
+        .file-list li { background: #f8f9fa; padding: 10px 15px; margin: 4px 0; border-radius: 6px; border-left: 3px solid #4a6fa5; display: flex; justify-content: space-between; align-items: center; }
+        .file-list li .count { background: #4a6fa5; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
+        .file-list li .status-badge { padding: 2px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+        .file-list li .status-badge.pending { background: #ffc107; color: #333; }
+        .file-list li .status-badge.error { background: #dc3545; color: white; }
+        .file-list li .status-badge.done { background: #28a745; color: white; }
+        .file-list li .status-badge.stopped { background: #dc3545; color: white; }
+        .progress-bar { width: 100%; height: 28px; background: #e9ecef; border-radius: 14px; overflow: hidden; margin: 15px 0; display: none; }
+        .progress-bar .progress { height: 100%; background: linear-gradient(90deg, #28a745, #20c997); transition: width 0.4s; width: 0%; display: flex; align-items: center; justify-content: center; color: white; font-size: 13px; font-weight: 600; }
         .progress-bar .progress.stopped { background: linear-gradient(90deg, #dc3545, #c82333); }
-        .instructions { background: #fff3cd; padding: 15px 20px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107; }
-        .instructions code { background: #f8f9fa; padding: 2px 8px; border-radius: 3px; font-size: 14px; color: #d63384; }
-        #log { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; font-family: 'Courier New', monospace; font-size: 12px; max-height: 300px; overflow-y: auto; margin: 20px 0; display: none; white-space: pre-wrap; line-height: 1.5; }
+        .instructions { background: #fff8e1; padding: 15px 20px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #ffc107; font-size: 14px; line-height: 1.6; }
+        .instructions code { background: #f8f9fa; padding: 2px 8px; border-radius: 4px; font-size: 13px; color: #d63384; }
+        #log { background: #1e1e2e; color: #cdd6f4; padding: 15px; border-radius: 8px; font-family: 'Courier New', monospace; font-size: 12px; max-height: 350px; overflow-y: auto; margin: 15px 0; display: none; white-space: pre-wrap; line-height: 1.6; }
         .button-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px; }
-        .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
-        .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; }
+        .selected-info { background: #e7f5ff; padding: 12px 18px; border-radius: 8px; margin: 10px 0; border-left: 3px solid #4a6fa5; }
+        .footer { text-align: center; margin-top: 30px; color: #999; font-size: 13px; border-top: 1px solid #eee; padding-top: 20px; }
         .report-section { margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 10px; border: 1px solid #dee2e6; text-align: center; }
-        .queue-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; display: none; }
+        .report-section h3 { margin-top: 0; color: #1a1a2e; }
+        .report-section .btn-group { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+        .queue-info { background: #e7f5ff; padding: 12px 18px; border-radius: 8px; margin: 10px 0; border-left: 3px solid #4a6fa5; display: none; font-weight: 500; }
+        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 15px 0; }
+        .stats .stat { background: #f8f9fa; padding: 12px; border-radius: 8px; text-align: center; }
+        .stats .stat .num { font-size: 24px; font-weight: 700; }
+        .stats .stat .label { font-size: 12px; color: #666; }
+        .stats .stat.success-stat .num { color: #28a745; }
+        .stats .stat.error-stat .num { color: #dc3545; }
+        .stats .stat.total-stat .num { color: #4a6fa5; }
+        @media (max-width: 600px) {
+            body { padding: 10px; margin: 10px; }
+            .container { padding: 15px; }
+            .stats { grid-template-columns: 1fr; }
+            .button-group { flex-direction: column; }
+            .btn { width: 100%; }
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>📤 Загрузка объявлений</h1>
+        <h1>📤 Загрузка объявлений в MAX</h1>
         
         <div class="instructions">
             <strong>📌 Как подготовить папку:</strong><br>
@@ -196,6 +218,7 @@ UPLOAD_PAGE = """
         <div class="drop-zone" id="dropZone">
             <span class="icon">📂</span>
             <p><strong>Перетащите головную папку сюда</strong></p>
+            <p style="font-size: 14px; color: #888;">или</p>
             <button class="btn btn-primary" onclick="document.getElementById('folderInput').click()">Выбрать папку</button>
             <input type="file" id="folderInput" webkitdirectory multiple>
         </div>
@@ -212,6 +235,21 @@ UPLOAD_PAGE = """
         
         <div class="queue-info" id="queueInfo"></div>
         
+        <div class="stats" id="stats" style="display:none;">
+            <div class="stat total-stat">
+                <div class="num" id="totalCount">0</div>
+                <div class="label">Всего папок</div>
+            </div>
+            <div class="stat success-stat">
+                <div class="num" id="successCount">0</div>
+                <div class="label">✅ Успешно</div>
+            </div>
+            <div class="stat error-stat">
+                <div class="num" id="errorCount">0</div>
+                <div class="label">❌ Ошибок</div>
+            </div>
+        </div>
+        
         <div class="progress-bar" id="progressBar">
             <div class="progress" id="progress">0%</div>
         </div>
@@ -220,11 +258,20 @@ UPLOAD_PAGE = """
         <div id="log"></div>
         
         <div class="report-section">
-            <button class="btn btn-primary" onclick="getReport()">📊 Скачать отчет</button>
-            <p style="margin-top: 10px; color: #666; font-size: 14px;">После публикации всех папок</p>
+            <h3>📊 Отчеты</h3>
+            <p style="color: #666; font-size: 14px; margin-bottom: 15px;">
+                После завершения публикации скачайте отчеты. Данные будут автоматически очищены.
+            </p>
+            <div class="btn-group">
+                <button class="btn btn-success" onclick="getReport()">📥 Отчет (успешные)</button>
+                <button class="btn btn-warning" onclick="getErrorReport()">⚠️ Отчет (ошибки)</button>
+            </div>
+            <div style="margin-top: 15px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;">
+                <button class="btn btn-outline" onclick="getStats()" style="font-size: 13px;">📊 Статистика</button>
+            </div>
         </div>
         
-        <div class="footer">⚡ MAX Bot | Загрузка объявлений</div>
+        <div class="footer">⚡ MAX Bot | Загрузка объявлений v2.0</div>
     </div>
 
     <script>
@@ -237,6 +284,8 @@ UPLOAD_PAGE = """
         let processedCount = 0;
         let totalFolders = 0;
         let folderResults = [];
+        let successCount = 0;
+        let errorCount = 0;
         
         const dropZone = document.getElementById('dropZone');
         const folderInput = document.getElementById('folderInput');
@@ -248,6 +297,7 @@ UPLOAD_PAGE = """
         const progressBar = document.getElementById('progressBar');
         const progress = document.getElementById('progress');
         const queueInfo = document.getElementById('queueInfo');
+        const statsDiv = document.getElementById('stats');
 
         dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
         dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('dragover'); });
@@ -323,6 +373,7 @@ UPLOAD_PAGE = """
             selectedInfo.textContent = `✅ Выбрано ${sortedFolders.length} папок, всего ${files.length} файлов`;
             fileList.style.display = 'block';
             showStatus('info', '📦 Нажмите "Загрузить" для отправки');
+            statsDiv.style.display = 'none';
         }
 
         function clearFiles() {
@@ -331,6 +382,7 @@ UPLOAD_PAGE = """
             statusDiv.style.display = 'none';
             progressBar.style.display = 'none';
             queueInfo.style.display = 'none';
+            statsDiv.style.display = 'none';
             logDiv.style.display = 'none';
             progress.style.width = '0%';
             progress.textContent = '0%';
@@ -340,6 +392,8 @@ UPLOAD_PAGE = """
             processedCount = 0;
             totalFolders = 0;
             folderResults = [];
+            successCount = 0;
+            errorCount = 0;
         }
 
         function addLog(message) {
@@ -356,6 +410,77 @@ UPLOAD_PAGE = """
 
         function getReport() {
             window.open(`/report/${userId}`, '_blank');
+        }
+
+        function getErrorReport() {
+            window.open(`/report_errors/${userId}`, '_blank');
+        }
+
+        async function getStats() {
+            try {
+                const response = await fetch(`/stats/${userId}`);
+                const data = await response.json();
+                if (data.success) {
+                    showStatus('info', `📊 Всего: ${data.total}, ✅ Успешно: ${data.success}, ❌ Ошибок: ${data.errors}`);
+                } else {
+                    showStatus('error', '❌ ' + data.message);
+                }
+            } catch (e) {
+                showStatus('error', '❌ Ошибка получения статистики');
+            }
+        }
+
+        // Функция сжатия изображения на клиенте
+        function compressImage(file, maxWidth = 800, maxHeight = 800, quality = 0.75) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = (event) => {
+                    const img = new Image();
+                    img.src = event.target.result;
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        let width = img.width;
+                        let height = img.height;
+                        
+                        if (width > height) {
+                            if (width > maxWidth) {
+                                height = height * (maxWidth / width);
+                                width = maxWidth;
+                            }
+                        } else {
+                            if (height > maxHeight) {
+                                width = width * (maxHeight / height);
+                                height = maxHeight;
+                            }
+                        }
+                        
+                        canvas.width = width;
+                        canvas.height = height;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, width, height);
+                        
+                        let mimeType = file.type || 'image/jpeg';
+                        if (mimeType === 'image/png') {
+                            mimeType = 'image/jpeg';
+                        }
+                        
+                        canvas.toBlob((blob) => {
+                            if (blob) {
+                                const compressedFile = new File([blob], file.name, {
+                                    type: mimeType,
+                                    lastModified: Date.now()
+                                });
+                                resolve(compressedFile);
+                            } else {
+                                reject(new Error('Не удалось сжать изображение'));
+                            }
+                        }, mimeType, quality);
+                    };
+                    img.onerror = reject;
+                };
+                reader.onerror = reject;
+            });
         }
 
         async function stopProcessing() {
@@ -379,7 +504,6 @@ UPLOAD_PAGE = """
                 if (result.success) {
                     showStatus('stop', '⏹ Процесс остановлен!');
                     addLog(`✅ ${result.message}`);
-                    addLog(`🗑️ ${result.cleaned || 'Очередь очищена'}`);
                     progress.className = 'progress stopped';
                 } else {
                     showStatus('error', `❌ Ошибка остановки: ${result.message}`);
@@ -415,20 +539,40 @@ UPLOAD_PAGE = """
             const images = [];
             for (const img of imageFiles) {
                 try {
+                    // Сжимаем изображение перед отправкой
+                    const compressed = await compressImage(img, 800, 800, 0.75);
+                    
                     const reader = new FileReader();
                     const dataUrl = await new Promise((resolve) => {
                         reader.onload = (e) => resolve(e.target.result);
-                        reader.readAsDataURL(img);
+                        reader.readAsDataURL(compressed);
                     });
                     
                     images.push({
-                        name: img.name,
+                        name: compressed.name,
                         data: dataUrl,
-                        type: img.type || 'image/jpeg'
+                        type: compressed.type || 'image/jpeg',
+                        originalSize: img.size,
+                        compressedSize: compressed.size
                     });
-                    addLog(`✅ Фото ${img.name} подготовлено`);
+                    
+                    addLog(`✅ Фото ${img.name} сжато: ${(img.size/1024).toFixed(0)}KB -> ${(compressed.size/1024).toFixed(0)}KB`);
                 } catch (e) {
-                    addLog(`⚠️ Ошибка чтения ${img.name}: ${e.message}`);
+                    addLog(`⚠️ Ошибка сжатия ${img.name}: ${e.message}, используем оригинал`);
+                    try {
+                        const reader = new FileReader();
+                        const dataUrl = await new Promise((resolve) => {
+                            reader.onload = (e) => resolve(e.target.result);
+                            reader.readAsDataURL(img);
+                        });
+                        images.push({
+                            name: img.name,
+                            data: dataUrl,
+                            type: img.type || 'image/jpeg'
+                        });
+                    } catch (e2) {
+                        addLog(`⚠️ Ошибка чтения ${img.name}: ${e2.message}`);
+                    }
                 }
             }
             
@@ -456,6 +600,8 @@ UPLOAD_PAGE = """
             isStopped = false;
             processedCount = 0;
             folderResults = [];
+            successCount = 0;
+            errorCount = 0;
             
             showStatus('info', '⏳ Подготовка данных...');
             progressBar.style.display = 'block';
@@ -463,6 +609,10 @@ UPLOAD_PAGE = """
             progress.textContent = '0%';
             progress.className = 'progress';
             logDiv.textContent = '';
+            statsDiv.style.display = 'grid';
+            document.getElementById('totalCount').textContent = '0';
+            document.getElementById('successCount').textContent = '0';
+            document.getElementById('errorCount').textContent = '0';
             queueInfo.style.display = 'block';
             addLog('🚀 Начинаем обработку...');
             
@@ -482,24 +632,13 @@ UPLOAD_PAGE = """
             totalFolders = folderNames.length;
             
             addLog(`📁 Найдено ${totalFolders} папок`);
+            document.getElementById('totalCount').textContent = totalFolders;
             queueInfo.textContent = `📋 В очереди: ${totalFolders} папок | Обработано: 0/${totalFolders}`;
             showStatus('info', `⏳ Подготовка 0/${totalFolders} папок...`);
             
-            let uploadedFolders = 0;
-            let failedFolders = 0;
-            let stoppedByUser = false;
-            const results = [];
-            
             for (let i = 0; i < folderNames.length; i++) {
-                // Проверяем флаг остановки
                 if (isStopped) {
-                    stoppedByUser = true;
                     addLog(`⏹ ОСТАНОВЛЕНО ПОЛЬЗОВАТЕЛЕМ! Обработано ${i}/${totalFolders} папок`);
-                    // Очищаем оставшиеся папки из очереди
-                    const remaining = folderNames.length - i;
-                    if (remaining > 0) {
-                        addLog(`🗑️ Удалено ${remaining} папок из очереди`);
-                    }
                     break;
                 }
                 
@@ -518,14 +657,13 @@ UPLOAD_PAGE = """
                     
                     if (!folderData) {
                         addLog(`⚠️ Пропускаем ${folderName}: нет текстового файла`);
-                        failedFolders++;
-                        results.push(`❌ ${folderName}: нет текстового файла`);
+                        errorCount++;
+                        folderResults.push(`❌ ${folderName}: нет текстового файла`);
+                        document.getElementById('errorCount').textContent = errorCount;
                         continue;
                     }
                     
-                    // Проверяем флаг остановки перед отправкой
                     if (isStopped) {
-                        stoppedByUser = true;
                         addLog(`⏹ ОСТАНОВЛЕНО! Пропускаем ${folderName}`);
                         break;
                     }
@@ -544,33 +682,36 @@ UPLOAD_PAGE = """
                     const result = await response.json();
                     
                     if (result.success) {
-                        uploadedFolders++;
+                        successCount++;
                         addLog(`✅ ${folderName}: опубликовано`);
-                        results.push(`✅ ${folderName}: успешно`);
+                        folderResults.push(`✅ ${folderName}: успешно`);
                     } else {
-                        failedFolders++;
+                        errorCount++;
                         addLog(`❌ ${folderName}: ${result.message}`);
-                        results.push(`❌ ${folderName}: ${result.message}`);
+                        folderResults.push(`❌ ${folderName}: ${result.message}`);
                     }
                     
+                    document.getElementById('successCount').textContent = successCount;
+                    document.getElementById('errorCount').textContent = errorCount;
+                    
                 } catch (error) {
-                    failedFolders++;
+                    errorCount++;
                     addLog(`❌ ${folderName}: ошибка - ${error.message}`);
-                    results.push(`❌ ${folderName}: ${error.message}`);
+                    folderResults.push(`❌ ${folderName}: ${error.message}`);
+                    document.getElementById('errorCount').textContent = errorCount;
                 }
                 
                 processedCount = i + 1;
-                await new Promise(r => setTimeout(r, 500));
+                await new Promise(r => setTimeout(r, 300));
             }
             
-            // Если остановлено пользователем, завершаем с сообщением
-            if (stoppedByUser) {
+            if (isStopped) {
                 progress.style.width = '100%';
                 progress.textContent = `${processedCount}/${totalFolders} (Остановлено)`;
                 progress.className = 'progress stopped';
                 showStatus('stop', `⏹ Остановлено! Обработано ${processedCount}/${totalFolders} папок`);
                 addLog(`⏹ ПРОЦЕСС ОСТАНОВЛЕН ПОЛЬЗОВАТЕЛЕМ`);
-                addLog(`📊 Обработано: ${uploadedFolders} успешно, ${failedFolders} с ошибками`);
+                addLog(`📊 Обработано: ${successCount} успешно, ${errorCount} с ошибками`);
                 isProcessing = false;
                 return;
             }
@@ -579,24 +720,25 @@ UPLOAD_PAGE = """
             progress.textContent = `${totalFolders}/${totalFolders}`;
             queueInfo.textContent = `✅ Завершено! Обработано ${totalFolders} папок`;
             
-            if (failedFolders === 0) {
-                showStatus('success', `✅ Загружено ${uploadedFolders} папок!`);
-                addLog(`✅ ВСЕ ${uploadedFolders} папок загружены!`);
+            if (errorCount === 0) {
+                showStatus('success', `✅ Загружено ${successCount} папок!`);
+                addLog(`✅ ВСЕ ${successCount} папок загружены!`);
             } else {
-                showStatus('warning', `⚠️ Загружено ${uploadedFolders} папок, ${failedFolders} с ошибками`);
-                addLog(`⚠️ Загружено ${uploadedFolders} папок, ${failedFolders} с ошибками`);
+                showStatus('warning', `⚠️ Загружено ${successCount} папок, ${errorCount} с ошибками`);
+                addLog(`⚠️ Загружено ${successCount} папок, ${errorCount} с ошибками`);
             }
             
-            if (results.length > 0) {
+            if (folderResults.length > 0) {
                 addLog('\\n📋 Детали:');
-                results.slice(0, 20).forEach(r => addLog(r));
-                if (results.length > 20) {
-                    addLog(`... и еще ${results.length - 20} папок`);
+                folderResults.slice(0, 20).forEach(r => addLog(r));
+                if (folderResults.length > 20) {
+                    addLog(`... и еще ${folderResults.length - 20} папок`);
                 }
             }
             
-            if (uploadedFolders > 0) {
+            if (successCount > 0) {
                 addLog(`\\n📊 Скачать отчет: /report/${userId}`);
+                addLog(`⚠️ Скачать ошибки: /report_errors/${userId}`);
             }
             
             isProcessing = false;
@@ -645,7 +787,6 @@ def publish_folder():
         for img in images:
             try:
                 if img.get('data') and img['data'].startswith('data:image'):
-                    # Извлекаем base64 часть
                     data_parts = img['data'].split(',')
                     if len(data_parts) > 1:
                         image_data = base64.b64decode(data_parts[1])
@@ -691,7 +832,10 @@ def stop_processing():
         publisher.stop(user_id)
         
         # 2. Очищаем временные файлы пользователя
-        fm.clear_temp_files(user_id)
+        try:
+            fm.clear_temp_files(user_id)
+        except Exception as e:
+            logger.error(f"⚠️ Ошибка очистки временных файлов: {e}")
         
         # 3. Очищаем очередь в глобальной переменной
         with queue_lock:
@@ -760,6 +904,8 @@ def webhook():
                 f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
                 "📊 **Получить отчет:**\n"
                 f"🔗 https://maxbot.bothost.tech/report/{user_id}\n\n"
+                "⚠️ **Отчет с ошибками:**\n"
+                f"🔗 https://maxbot.bothost.tech/report_errors/{user_id}\n\n"
                 "⏹ **Остановить публикацию:** `/stop`\n\n"
                 "📋 **Инструкция:**\n"
                 "1. Подготовьте папки с объявлениями\n"
@@ -769,7 +915,6 @@ def webhook():
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/stop':
-            # Полная остановка всех процессов
             publisher.stop(user_id)
             fm.clear_temp_files(user_id)
             
@@ -819,6 +964,7 @@ def webhook():
 
 @app.route('/report/<int:user_id>')
 def report_page(user_id):
+    """Страница со ссылкой на скачивание отчета"""
     report_path = report_gen.generate_report(user_id)
     if not report_path:
         return "❌ Нет данных для отчета", 404
@@ -828,17 +974,86 @@ def report_page(user_id):
     
     return f"""
     <html>
-    <head><title>Отчет</title></head>
-    <body style="font-family: Arial; max-width: 600px; margin: 50px auto; text-align: center;">
+    <head>
+        <title>Отчет</title>
+        <style>
+            body {{ font-family: Arial; max-width: 600px; margin: 50px auto; text-align: center; padding: 20px; }}
+            h1 {{ color: #1a1a2e; }}
+            .btn {{ display: inline-block; padding: 14px 35px; background: #28a745; color: white; text-decoration: none; border-radius: 8px; font-weight: 600; }}
+            .btn:hover {{ background: #1e7e34; }}
+            .links {{ margin-top: 30px; display: flex; gap: 15px; justify-content: center; flex-wrap: wrap; }}
+            .links a {{ color: #4a6fa5; text-decoration: none; }}
+            .links a:hover {{ text-decoration: underline; }}
+        </style>
+    </head>
+    <body>
         <h1>📊 Отчет готов!</h1>
-        <p><a href="{download_url}" style="display: inline-block; padding: 12px 30px; background: #28a745; color: white; text-decoration: none; border-radius: 5px;">📥 Скачать отчет</a></p>
-        <p><a href="/upload">⬅️ Вернуться к загрузке</a></p>
+        <p style="color: #666;">Все данные будут автоматически очищены после скачивания</p>
+        <br>
+        <a href="{download_url}" class="btn">📥 Скачать отчет</a>
+        <div class="links">
+            <a href="/report_errors/{user_id}">⚠️ Отчет с ошибками</a>
+            <a href="/upload">⬅️ Вернуться к загрузке</a>
+        </div>
     </body>
     </html>
     """
 
+@app.route('/report_errors/<int:user_id>')
+def report_errors_page(user_id):
+    """Страница со ссылкой на скачивание отчета об ошибках"""
+    report_path = report_gen.generate_error_report(user_id)
+    if not report_path:
+        return "❌ Нет ошибок для отчета", 404
+    
+    filename = os.path.basename(report_path)
+    download_url = f"/download_report/{user_id}/{filename}"
+    
+    return f"""
+    <html>
+    <head>
+        <title>Отчет об ошибках</title>
+        <style>
+            body {{ font-family: Arial; max-width: 600px; margin: 50px auto; text-align: center; padding: 20px; }}
+            h1 {{ color: #1a1a2e; }}
+            .btn {{ display: inline-block; padding: 14px 35px; background: #ffc107; color: #333; text-decoration: none; border-radius: 8px; font-weight: 600; }}
+            .btn:hover {{ background: #e0a800; }}
+            .links {{ margin-top: 30px; display: flex; gap: 15px; justify-content: center; flex-wrap: wrap; }}
+            .links a {{ color: #4a6fa5; text-decoration: none; }}
+            .links a:hover {{ text-decoration: underline; }}
+        </style>
+    </head>
+    <body>
+        <h1>⚠️ Отчет об ошибках</h1>
+        <p style="color: #666;">Список папок, которые не удалось опубликовать</p>
+        <br>
+        <a href="{download_url}" class="btn">📥 Скачать отчет об ошибках</a>
+        <div class="links">
+            <a href="/report/{user_id}">📊 Основной отчет</a>
+            <a href="/upload">⬅️ Вернуться к загрузке</a>
+        </div>
+    </body>
+    </html>
+    """
+
+@app.route('/stats/<int:user_id>')
+def stats_page(user_id):
+    """Возвращает статистику публикаций пользователя"""
+    try:
+        stats = db.get_stats(user_id)
+        return jsonify({
+            'success': True,
+            'total': stats['total'],
+            'success': stats['success'],
+            'errors': stats['errors']
+        })
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения статистики: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
+
 @app.route('/download_report/<int:user_id>/<path:filename>')
 def download_report(user_id, filename):
+    """Скачивание отчета"""
     try:
         user_folder = fm.get_user_folder(user_id)
         file_path = os.path.join(user_folder, filename)
