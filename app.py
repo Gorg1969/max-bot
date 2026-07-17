@@ -668,27 +668,17 @@ def setup_webhook():
     except Exception as e:
         return f"❌ Ошибка: {e}"
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 3000))
-    if TOKEN:
-        logger.info(f"✅ Токен найден (первые 10): {TOKEN[:10]}...")
-    app.run(host='0.0.0.0', port=port, threaded=True)
-
-# Добавьте это в конец секции определений маршрутов,
-# перед строкой "if __name__ == '__main__':"
-
 @app.errorhandler(Exception)
 def handle_all_exceptions(error):
-    # Пишем полную информацию об ошибке в лог сервера для себя
     logger.error(f"Критическая ошибка обработки запроса: {error}", exc_info=True)
-    
-    # Возвращаем браузеру ТОЛЬКО чистый JSON
     return jsonify({
         'success': False,
         'message': 'Внутренняя ошибка сервера',
         'details': str(error)
     }), 500
-    
-    if __name__ == '__main__':
+
+if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    if TOKEN:
+        logger.info(f"✅ Токен найден (первые 10): {TOKEN[:10]}...")
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
