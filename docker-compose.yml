@@ -39,11 +39,6 @@ services:
       redis:
         condition: service_healthy
     command: gunicorn -c gunicorn.conf.py app:app
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
   worker:
     build: .
@@ -64,11 +59,6 @@ services:
       redis:
         condition: service_healthy
     command: python worker.py
-    healthcheck:
-      test: ["CMD", "python", "-c", "import redis; r=redis.Redis(host='redis', port=6379); r.ping()"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
 volumes:
   redis_data:
