@@ -1,4 +1,4 @@
-# app.py - ПОЛНАЯ ВЕРСИЯ С АВТОЗАПУСКОМ REDIS
+# app.py - ПОЛНАЯ ВЕРСИЯ (ОТПРАВКА ПО ОДНОЙ ПАПКЕ)
 
 from flask import Flask, request, jsonify, render_template_string, send_file
 import os
@@ -172,6 +172,7 @@ def upload_page():
 
 @app.route('/upload_folders', methods=['POST', 'OPTIONS'])
 def upload_folders():
+    """Принимает FormData с ОДНОЙ папкой и создает задачу в RQ"""
     log_request()
     
     try:
@@ -203,119 +204,91 @@ def upload_folders():
         if not folders_info:
             return jsonify({'success': False, 'message': 'Нет данных о папках'}), 400
         
-        MAX_FOLDERS = 50
-        if len(folders_info) > MAX_FOLDERS:
-            logger.warning(f"⚠️ Слишком много папок: {len(folders_info)}, ограничено {MAX_FOLDERS}")
-            folders_info = folders_info[:MAX_FOLDERS]
+        # Обрабатываем ОДНУ папку (первую из списка)
+        folder_json = folders_info[0]
         
-        job_ids = []
-        errors = []
-        total_images_processed = 0
-        total_size_processed = 0
-        
-        start_time = time.time()
-        MAX_PROCESSING_TIME = 20
-        
-        for idx, folder_json in enumerate(folders_info):
-            if time.time() - start_time > MAX_PROCESSING_TIME:
-                logger.warning(f"⏱️ Таймаут подготовки, обработано {idx} из {len(folders_info)}")
-                break
+        try:
+            folder_data = json.loads(folder_json)
+            folder_name = folder_data.get('name', 'folder')
+            ad_text = folder_data.get('adText', '')
+            image_count = folder_data.get('imageCount', 0)
             
-            try:
-                folder_data = json.loads(folder_json)
-                folder_name = folder_data.get('name', f'folder_{idx}')
-                ad_text = folder_data.get('adText', '')
-                image_count = folder_data.get('imageCount', 0)
-                
-                if not isinstance(image_count, int) or image_count < 0:
-                    image_count = 0
-                image_count = min(image_count, max_photos)
-                
-                MAX_IMAGE_SIZE = 5 * 1024 * 1024
-                images = []
-                
-                if image_count > 0:
-                    for i in range(image_count):
-                        field_name = f'images_{folder_name}_{i}'
-                        if field_name in request.files:
-                            try:
-                                img_file = request.files[field_name]
-                                if img_file and img_file.filename:
-                                    img_data = img_file.read()
+            if not isinstance(image_count, int) or image_count < 0:
+                image_count = 0
+            image_count = min(image_count, max_photos)
+            
+            MAX_IMAGE_SIZE = 5 * 1024 * 1024
+            images = []
+            
+            if image_count > 0:
+                for i in range(image_count):
+                    field_name = f'images_{folder_name}_{i}'
+                    if field_name in request.files:
+                        try:
+                            img_file = request.files[field_name]
+                            if img_file and img_file.filename:
+                                img_data = img_file.read()
+                                
+                                if len(img_data) > MAX_IMAGE_SIZE:
+                                    logger.warning(f"⚠️ Изображение {img_file.filename} слишком большое: {len(img_data)} байт")
+                                    continue
+                                
+                                if img_data and len(img_data) > 0:
+                                    img_base64 = base64.b64encode(img_data).decode('ascii')
                                     
-                                    if len(img_data) > MAX_IMAGE_SIZE:
-                                        logger.warning(f"⚠️ Изображение {img_file.filename} слишком большое: {len(img_data)} байт")
-                                        continue
+                                    images.append({
+                                        'name': img_file.filename,
+                                        'data': img_base64,
+                                        'type': img_file.content_type or 'image/jpeg',
+                                        'size': len(img_data)
+                                    })
                                     
-                                    if img_data and len(img_data) > 0:
-                                        img_base64 = base64.b64encode(img_data).decode('ascii')
-                                        
-                                        images.append({
-                                            'name': img_file.filename,
-                                            'data': img_base64,
-                                            'type': img_file.content_type or 'image/jpeg',
-                                            'size': len(img_data)
-                                        })
-                                        
-                                        total_images_processed += 1
-                                        total_size_processed += len(img_data)
-                                        logger.info(f"  ✅ Изобр {i+1}: {img_file.filename} ({len(img_data)} байт)")
-                                        
-                                        del img_data
-                            except Exception as e:
-                                logger.error(f"❌ Ошибка чтения изображения {i}: {e}")
-                                continue
-                
-                metadata_text = ''
-                if '#изъятая' in ad_text:
-                    parts = ad_text.split('#изъятая')
-                    ad_text = parts[0].strip()
-                    metadata_text = parts[1] if len(parts) > 1 else ''
-                
-                folder_payload = {
-                    'folderName': folder_name[:100],
-                    'adText': ad_text[:5000],
-                    'metadataText': metadata_text[:1000],
-                    'images': images[:max_photos]
-                }
-                
-                job = queue.enqueue(
-                    process_folder_task,
-                    user_id,
-                    folder_payload,
-                    job_id=None,
-                    result_ttl=3600,
-                    failure_ttl=3600,
-                    timeout=600
-                )
-                job_ids.append(job.id)
-                logger.info(f"  ✅ Задача {job.id}: {folder_name} ({len(images)} фото)")
-                
-            except json.JSONDecodeError as e:
-                logger.error(f"❌ Ошибка парсинга JSON папки {idx}: {e}")
-                errors.append(f"Папка {idx}: ошибка формата")
-                continue
-            except Exception as e:
-                logger.error(f"❌ Ошибка обработки папки {idx}: {e}")
-                errors.append(f"Папка {idx}: {str(e)[:50]}")
-                continue
-        
-        logger.info(f"📊 ИТОГО: {len(job_ids)} задач, {total_images_processed} фото, {total_size_processed/1024/1024:.2f} МБ")
-        
-        response = {
-            'success': True,
-            'message': f'Создано {len(job_ids)} задач',
-            'job_ids': job_ids,
-            'total_folders': len(job_ids),
-            'total_images': total_images_processed,
-            'total_size_mb': round(total_size_processed / 1024 / 1024, 2)
-        }
-        
-        if errors:
-            response['warnings'] = errors[:5]
-        
-        logger.info("=" * 60)
-        return jsonify(response)
+                                    logger.info(f"  ✅ Изобр {i+1}: {img_file.filename} ({len(img_data)} байт)")
+                                    del img_data
+                        except Exception as e:
+                            logger.error(f"❌ Ошибка чтения изображения {i}: {e}")
+                            continue
+            
+            metadata_text = ''
+            if '#изъятая' in ad_text:
+                parts = ad_text.split('#изъятая')
+                ad_text = parts[0].strip()
+                metadata_text = parts[1] if len(parts) > 1 else ''
+            
+            folder_payload = {
+                'folderName': folder_name[:100],
+                'adText': ad_text[:5000],
+                'metadataText': metadata_text[:1000],
+                'images': images[:max_photos]
+            }
+            
+            job = queue.enqueue(
+                process_folder_task,
+                user_id,
+                folder_payload,
+                job_id=None,
+                result_ttl=3600,
+                failure_ttl=3600,
+                timeout=600
+            )
+            
+            logger.info(f"  ✅ Задача {job.id}: {folder_name} ({len(images)} фото)")
+            logger.info("=" * 60)
+            
+            return jsonify({
+                'success': True,
+                'message': f'Создана задача {job.id}',
+                'job_ids': [job.id],
+                'total_folders': 1,
+                'total_images': len(images)
+            })
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Ошибка парсинга JSON: {e}")
+            return jsonify({'success': False, 'message': 'Ошибка формата данных'}), 400
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки папки: {e}")
+            return jsonify({'success': False, 'message': str(e)}), 500
         
     except Exception as e:
         logger.error(f"❌ Критическая ошибка: {e}")
@@ -430,6 +403,16 @@ def webhook():
                        f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
                        "📊 **Получить отчет:**\n"
                        f"🔗 https://maxbot.bothost.tech/report/{user_id}",
+                "format": "markdown"
+            }
+            headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
+            requests.post(url, headers=headers, json=payload, timeout=30, verify=False)
+            return jsonify({"ok": True}), 200
+        
+        if text and text.strip() == '/stop':
+            url = f"{MAX_API_URL}/messages?user_id={user_id}"
+            payload = {
+                "text": "⏹️ **Публикация остановлена!**",
                 "format": "markdown"
             }
             headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
@@ -592,13 +575,13 @@ UPLOAD_PAGE = """
             2️⃣ В каждой подпапке: info.txt и фото (макс 10)<br>
             3️⃣ Используйте разделитель #изъятая<br>
             4️⃣ Перетащите головную папку в поле ниже<br>
-            5️⃣ Изображения будут сжаты автоматически
+            5️⃣ Папки отправляются по одной с задержкой
         </div>
         
         <div class="settings-section">
             <h4>⚙️ Настройки</h4>
             <label>📸 Максимум фото: <input type="number" id="maxPhotos" value="6" min="1" max="10"></label>
-            <label>⏱️ Задержка (сек): <input type="number" id="delayBetween" value="3" min="1" max="30"></label>
+            <label>⏱️ Задержка между папками (сек): <input type="number" id="delayBetween" value="3" min="1" max="30"></label>
         </div>
         
         <div class="drop-zone" id="dropZone">
@@ -634,6 +617,7 @@ UPLOAD_PAGE = """
     </div>
 
     <script>
+        // ========== КЛИЕНТСКИЙ КОД ==========
         const userId = new URLSearchParams(window.location.search).get('user_id') || 151296248;
         let selectedFiles = [];
         let isProcessing = false;
@@ -657,6 +641,7 @@ UPLOAD_PAGE = """
         const progress = document.getElementById('progress');
         const queueStatus = document.getElementById('queueStatus');
 
+        // ========== РЕКУРСИВНЫЙ ОБХОД ПАПОК ==========
         function readDirectoryRecursive(entry, path, files, callback) {
             if (entry.isDirectory) {
                 const reader = entry.createReader();
@@ -699,6 +684,7 @@ UPLOAD_PAGE = """
             }
         }
 
+        // ========== ОБРАБОТЧИКИ DROP ==========
         dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
         dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('dragover'); });
         
@@ -740,6 +726,7 @@ UPLOAD_PAGE = """
             }
         });
 
+        // ========== СЖАТИЕ ИЗОБРАЖЕНИЙ ==========
         function compressImage(file, maxWidth = 1920, maxHeight = 1920, quality = 0.85) {
             return new Promise((resolve, reject) => {
                 if (file.size > 20 * 1024 * 1024) {
@@ -789,6 +776,7 @@ UPLOAD_PAGE = """
             });
         }
 
+        // ========== ОТОБРАЖЕНИЕ ПАПОК ==========
         function displayFiles(files) {
             fileListContent.innerHTML = '';
             const folders = new Map();
@@ -848,6 +836,7 @@ UPLOAD_PAGE = """
             showStatus('info', `📦 Найдено ${sortedFolders.length} папок с объявлениями`);
         }
 
+        // ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
         function updateQueueStatus() {
             const total = folderQueue.length;
             const done = folderQueue.filter(f => f.status === 'done').length;
@@ -891,6 +880,7 @@ UPLOAD_PAGE = """
             }).catch(e => console.error(e));
         }
 
+        // ========== МОНИТОРИНГ ЗАДАЧ ==========
         function startJobMonitoring() {
             if (jobStatusInterval) clearInterval(jobStatusInterval);
             
@@ -954,6 +944,7 @@ UPLOAD_PAGE = """
             }, 2000);
         }
 
+        // ========== ОСНОВНАЯ ФУНКЦИЯ ЗАГРУЗКИ - ПО ОДНОЙ ПАПКЕ ==========
         async function uploadFolder() {
             if (selectedFiles.length === 0) {
                 showStatus('error', '❌ Выберите папку');
@@ -967,11 +958,9 @@ UPLOAD_PAGE = """
             isProcessing = true;
             jobIds = [];
             const maxPhotos = parseInt(document.getElementById('maxPhotos').value) || 6;
+            const delayBetween = parseInt(document.getElementById('delayBetween').value) || 3;
             
-            const formData = new FormData();
-            formData.append('user_id', userId);
-            formData.append('max_photos', maxPhotos);
-            
+            // Группируем по подпапкам
             const folders = {};
             selectedFiles.forEach(f => {
                 const parts = f.webkitRelativePath.split('/');
@@ -1001,12 +990,17 @@ UPLOAD_PAGE = """
             progress.style.width = '0%';
             progress.textContent = '0%';
             logDiv.textContent = '';
-            addLog(`🚀 Загрузка ${totalFolders} папок...`);
+            addLog(`🚀 Загрузка ${totalFolders} папок по одной...`);
             
+            let processedCount = 0;
             let totalImages = 0;
             
-            for (const folderName of folderNames) {
+            // Отправляем КАЖДУЮ папку отдельным запросом
+            for (let idx = 0; idx < folderNames.length; idx++) {
+                const folderName = folderNames[idx];
                 const files = folders[folderName];
+                
+                addLog(`📂 [${idx+1}/${totalFolders}] Обработка: ${folderName}`);
                 
                 let infoFile = null;
                 let imageFiles = [];
@@ -1025,17 +1019,21 @@ UPLOAD_PAGE = """
                 }
                 
                 if (!infoFile) {
-                    addLog(`⚠️ Нет info.txt в ${folderName}`);
+                    addLog(`⚠️ Нет info.txt в ${folderName}, пропускаем`);
+                    folderQueue[idx].status = 'error';
+                    updateQueueStatus();
+                    processedCount++;
                     continue;
                 }
                 
                 const selectedImages = imageFiles.slice(0, Math.min(maxPhotos, MAX_IMAGES_PER_FOLDER));
-                addLog(`📂 ${folderName}: ${selectedImages.length} фото`);
+                addLog(`📸 ${selectedImages.length} фото`);
                 
+                // Сжимаем изображения
                 const compressed = [];
                 for (let i = 0; i < selectedImages.length; i++) {
                     try {
-                        addLog(`📸 Сжатие ${i+1}/${selectedImages.length}: ${selectedImages[i].name}`);
+                        addLog(`🔄 Сжатие ${i+1}/${selectedImages.length}: ${selectedImages[i].name}`);
                         const img = await compressImage(selectedImages[i], 1920, 1920, 0.85);
                         compressed.push(img);
                         totalImages++;
@@ -1046,6 +1044,11 @@ UPLOAD_PAGE = """
                 
                 const infoContent = await infoFile.text();
                 
+                // Создаем FormData для ОДНОЙ папки
+                const formData = new FormData();
+                formData.append('user_id', userId);
+                formData.append('max_photos', maxPhotos);
+                
                 formData.append('folders[]', JSON.stringify({
                     name: folderName,
                     adText: infoContent.substring(0, 5000),
@@ -1055,31 +1058,64 @@ UPLOAD_PAGE = """
                 for (let i = 0; i < compressed.length; i++) {
                     formData.append(`images_${folderName}_${i}`, compressed[i], compressed[i].name);
                 }
+                
+                // Отправляем ОДНУ папку
+                try {
+                    addLog(`📤 Отправка папки ${idx+1}/${totalFolders}...`);
+                    
+                    const resp = await fetch('/upload_folders', { 
+                        method: 'POST', 
+                        body: formData
+                    });
+                    
+                    if (!resp.ok) {
+                        const t = await resp.text();
+                        throw new Error(`HTTP ${resp.status}: ${t.substring(0, 100)}`);
+                    }
+                    
+                    const result = await resp.json();
+                    
+                    if (!result.success) {
+                        throw new Error(result.message || 'Ошибка');
+                    }
+                    
+                    if (result.job_ids && result.job_ids.length > 0) {
+                        jobIds.push(...result.job_ids);
+                        folderQueue[idx].status = 'done';
+                        addLog(`✅ Папка ${folderName} отправлена (задача ${result.job_ids[0]})`);
+                    } else {
+                        folderQueue[idx].status = 'error';
+                        addLog(`⚠️ Папка ${folderName} не создала задачу`);
+                    }
+                    
+                } catch(e) {
+                    folderQueue[idx].status = 'error';
+                    addLog(`❌ Ошибка отправки ${folderName}: ${e.message}`);
+                }
+                
+                processedCount++;
+                
+                // Обновляем прогресс
+                const pct = Math.round((processedCount / totalFolders) * 100);
+                progress.style.width = pct + '%';
+                progress.textContent = `${pct}%`;
+                updateQueueStatus();
+                
+                // Задержка между папками
+                if (idx < folderNames.length - 1) {
+                    addLog(`⏳ Задержка ${delayBetween} сек...`);
+                    await new Promise(r => setTimeout(r, delayBetween * 1000));
+                }
             }
             
-            addLog(`📤 Отправка ${totalImages} изображений...`);
+            addLog(`✅ Все ${totalFolders} папок обработаны!`);
+            addLog(`📊 Создано ${jobIds.length} задач, ${totalImages} фото`);
             
-            try {
-                const resp = await fetch('/upload_folders', { method: 'POST', body: formData });
-                if (!resp.ok) {
-                    const t = await resp.text();
-                    throw new Error(`HTTP ${resp.status}: ${t.substring(0, 200)}`);
-                }
-                const result = await resp.json();
-                if (!result.success) throw new Error(result.message || 'Ошибка');
-                
-                jobIds = result.job_ids || [];
-                addLog(`✅ Создано ${jobIds.length} задач (${result.total_images || 0} фото, ${result.total_size_mb || 0} МБ)`);
-                
-                if (jobIds.length > 0) {
-                    startJobMonitoring();
-                } else {
-                    isProcessing = false;
-                    showStatus('error', '❌ Не создано задач');
-                }
-            } catch(e) {
-                addLog(`❌ ${e.message}`);
-                showStatus('error', `❌ ${e.message}`);
+            if (jobIds.length > 0) {
+                showStatus('info', `📦 Создано ${jobIds.length} задач, ждем выполнения...`);
+                startJobMonitoring();
+            } else {
+                showStatus('warning', '⚠️ Не создано ни одной задачи');
                 isProcessing = false;
             }
         }
