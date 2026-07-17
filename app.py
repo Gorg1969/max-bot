@@ -1,4 +1,4 @@
-# app.py - ПОЛНАЯ ВЕРСИЯ С ПОДДЕРЖКОЙ SSL_CERT_CONTENT
+# app.py - ПОЛНАЯ ВЕРСИЯ
 
 from flask import Flask, request, jsonify, render_template_string, send_file
 import os
@@ -25,82 +25,47 @@ app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ========== КОНФИГУРАЦИЯ ==========
+# ========== ВСЕ ПЕРЕМЕННЫЕ ИЗ ОКРУЖЕНИЯ ==========
 TOKEN = os.environ.get("MAX_TOKEN") or os.environ.get("MAX_BOT_TOKEN") or os.environ.get("TOKEN")
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 MAX_API_URL = os.environ.get("MAX_API_URL", "https://platform-api2.max.ru")
-BASE_URL = os.environ.get("BASE_URL", "https://maxbot.bothost.tech")
+BASE_URL = os.environ.get("BASE_URL")
 
 if not TOKEN:
     logger.error("❌ ТОКЕН НЕ НАЙДЕН!")
+if not BASE_URL:
+    logger.error("❌ BASE_URL НЕ НАЙДЕН!")
 
-# ========== SSL НАСТРОЙКИ ==========
+# ========== SSL НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ==========
 SSL_VERIFY = os.environ.get("SSL_VERIFY", "true").lower() == "true"
-SSL_VERIFY_PATH = None
 SSL_CERT_CONTENT = os.environ.get("SSL_CERT_CONTENT")
+SSL_VERIFY_PATH = None
 
-# Загружаем сертификат из переменной
 if SSL_CERT_CONTENT:
     try:
-        # Создаем временный файл с сертификатом
         with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as f:
             f.write(SSL_CERT_CONTENT)
             SSL_VERIFY_PATH = f.name
-        
         logger.info("✅ Сертификат загружен из SSL_CERT_CONTENT")
-        logger.info(f"📁 Временный файл: {SSL_VERIFY_PATH}")
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки сертификата: {e}")
-        SSL_VERIFY_PATH = None
 
-# Проверяем другие источники сертификатов
-if not SSL_VERIFY_PATH:
-    for env_var in ["REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CA_FILE"]:
-        path = os.environ.get(env_var)
-        if path and os.path.exists(path):
-            SSL_VERIFY_PATH = path
-            logger.info(f"✅ Используем сертификаты из {env_var}: {path}")
-            break
-
-# Проверяем стандартные пути
-if not SSL_VERIFY_PATH:
-    default_paths = [
-        "/etc/ssl/certs/ca-certificates.crt",
-        "/etc/ssl/cert.pem",
-        "/usr/local/share/ca-certificates/ca-certificates.crt",
-        "/app/certs/ca-bundle.pem",
-        "/app/certs/ca.pem"
-    ]
-    for path in default_paths:
-        if os.path.exists(path):
-            SSL_VERIFY_PATH = path
-            logger.info(f"✅ Используем сертификаты: {path}")
-            break
-
-# Итоговое состояние SSL
 if SSL_VERIFY and SSL_VERIFY_PATH:
-    logger.info(f"🔒 SSL проверка ВКЛЮЧЕНА с сертификатами: {SSL_VERIFY_PATH}")
+    logger.info("🔒 SSL проверка ВКЛЮЧЕНА")
 else:
-    if SSL_VERIFY and not SSL_VERIFY_PATH:
-        logger.warning("⚠️ Сертификаты не найдены, SSL проверка ОТКЛЮЧЕНА")
-    else:
-        logger.warning("⚠️ SSL проверка ОТКЛЮЧЕНА (SSL_VERIFY=false)")
-    
+    logger.warning("⚠️ SSL проверка ОТКЛЮЧЕНА")
     SSL_VERIFY = False
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ========== ГЛОБАЛЬНАЯ ИНИЦИАЛИЗАЦИЯ ==========
+# ========== ИНИЦИАЛИЗАЦИЯ БД ==========
 db = None
 fm = None
 report_gen = None
 publisher = None
 
 def init_app():
-    """Инициализация приложения - выполняется один раз при preload_app=True"""
     global db, fm, report_gen, publisher
-    
     logger.info("🔄 Инициализация приложения...")
-    
     db = Database()
     fm = FileManager(DATA_DIR)
     report_gen = ReportGenerator(fm, db)
@@ -109,28 +74,24 @@ def init_app():
         def __init__(self):
             self.token = TOKEN
             self.base_url = MAX_API_URL
-            self.verify_ssl = SSL_VERIFY_PATH if SSL_VERIFY else False
+            self.verify = SSL_VERIFY_PATH if SSL_VERIFY else False
         
         def post(self, url, **kwargs):
-            """Выполняет POST запрос с SSL настройками"""
-            kwargs['verify'] = self.verify_ssl
+            kwargs['verify'] = self.verify
             kwargs['timeout'] = kwargs.get('timeout', 30)
             return requests.post(url, **kwargs)
         
         def get(self, url, **kwargs):
-            """Выполняет GET запрос с SSL настройками"""
-            kwargs['verify'] = self.verify_ssl
+            kwargs['verify'] = self.verify
             kwargs['timeout'] = kwargs.get('timeout', 30)
             return requests.get(url, **kwargs)
     
-    api = APIClient()
-    publisher = Publisher(api, fm, db)
-    
+    publisher = Publisher(APIClient(), fm, db)
     logger.info("✅ Приложение инициализировано")
 
 init_app()
 
-# ========== UPLOAD_PAGE ==========
+# ========== UPLOAD_PAGE HTML ==========
 UPLOAD_PAGE = '''
 <!DOCTYPE html>
 <html>
@@ -603,7 +564,6 @@ def webhook():
         user_id = None
         text = None
         
-        # Извлекаем user_id
         if 'message' in data:
             msg = data['message']
             if 'sender' in msg:
@@ -620,15 +580,13 @@ def webhook():
         if not user_id:
             if 'user' in data and 'user_id' in data['user']:
                 user_id = data['user']['user_id']
-            elif 'chat_id' in data:
-                logger.info(f"ℹ️ Получен chat_id: {data['chat_id']}")
-                return jsonify({"ok": True}), 200
         
         if not user_id:
             logger.warning("⚠️ Не найден user_id в вебхуке")
             return jsonify({"ok": True}), 200
         
-        # Обработка /start
+        logger.info(f"👤 USER_ID: {user_id}, ТЕКСТ: {text}")
+        
         if text and text.strip() == '/start':
             stats = db.get_user_stats(user_id)
             
@@ -654,7 +612,6 @@ def webhook():
                 "Content-Type": "application/json"
             }
             
-            # Используем SSL настройки
             verify_path = SSL_VERIFY_PATH if SSL_VERIFY else False
             response = requests.post(url, headers=headers, json=payload, timeout=30, verify=verify_path)
             logger.info(f"✅ Ответ отправлен пользователю {user_id}, статус: {response.status_code}")
@@ -671,6 +628,7 @@ def set_webhook():
     """Установка вебхука в MAX платформе"""
     try:
         webhook_url = f"{BASE_URL}/webhook"
+        logger.info(f"🔄 Установка вебхука: {webhook_url}")
         
         url = f"{MAX_API_URL}/webhook"
         payload = {
@@ -686,6 +644,8 @@ def set_webhook():
         verify_path = SSL_VERIFY_PATH if SSL_VERIFY else False
         response = requests.post(url, headers=headers, json=payload, timeout=30, verify=verify_path)
         
+        logger.info(f"✅ Ответ MAX API: {response.status_code}")
+        
         if response.status_code == 200:
             return jsonify({
                 "success": True,
@@ -695,7 +655,7 @@ def set_webhook():
         else:
             return jsonify({
                 "success": False,
-                "message": f"Ошибка установки вебхука: {response.status_code}",
+                "message": f"Ошибка: {response.status_code}",
                 "response": response.text
             }), 500
             
@@ -732,7 +692,6 @@ def download_report(user_id, filename):
 
 @app.route('/stats/<int:user_id>')
 def get_stats(user_id):
-    """Получение статистики пользователя"""
     try:
         stats = db.get_user_stats(user_id)
         return jsonify(stats)
@@ -742,14 +701,11 @@ def get_stats(user_id):
 
 @app.route('/test_ssl')
 def test_ssl():
-    """Тест SSL соединения"""
     try:
         url = f"{MAX_API_URL}/ping"
         headers = {"Authorization": TOKEN}
         verify_path = SSL_VERIFY_PATH if SSL_VERIFY else False
-        
         response = requests.get(url, headers=headers, timeout=10, verify=verify_path)
-        
         return jsonify({
             "status": "ok",
             "ssl_verified": SSL_VERIFY,
@@ -774,9 +730,9 @@ def status():
         "status": "running",
         "token_set": bool(TOKEN),
         "ssl_verify": SSL_VERIFY,
-        "ssl_path": SSL_VERIFY_PATH
+        "ssl_path": SSL_VERIFY_PATH,
+        "base_url": BASE_URL
     }
 
 # ========== ЗАПУСК ==========
 # НЕТ if __name__ == "__main__" - ТОЛЬКО ДЛЯ GUNICORN!
-# Gunicorn запускает приложение через app:app
