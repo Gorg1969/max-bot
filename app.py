@@ -1,4 +1,4 @@
-# app.py - КОМПАКТНАЯ ВЕРСИЯ С РАБОЧИМ HTML
+# app.py - КОМПАКТНАЯ ВЕРСИЯ С РАБОЧИМ HTML И СТАТИСТИКОЙ
 
 from flask import Flask, request, jsonify, render_template_string, send_file
 import os
@@ -53,7 +53,7 @@ UPLOAD_PAGE = '''
 <meta charset="UTF-8">
 <title>Загрузка объявлений</title>
 <style>
-body{font-family:Arial;max-width:800px;margin:50px auto;padding:20px;background:#f5f5f5}
+body{font-family:Arial;max-width:900px;margin:50px auto;padding:20px;background:#f5f5f5}
 .container{background:white;padding:30px;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}
 h1{color:#333}
 .drop-zone{border:2px dashed #007bff;padding:40px;margin:20px 0;border-radius:10px;background:#f8f9fa;text-align:center;cursor:pointer}
@@ -67,6 +67,8 @@ input[type=file]{display:none}
 .btn-danger:hover{background:#c82333}
 .btn-warning{background:#ffc107;color:#333}
 .btn-warning:hover{background:#e0a800}
+.btn-info{background:#17a2b8;color:white}
+.btn-info:hover{background:#138496}
 .status{margin-top:20px;padding:15px;border-radius:5px;display:none}
 .status.success{background:#d4edda;color:#155724;display:block;border-left:4px solid #28a745}
 .status.error{background:#f8d7da;color:#721c24;display:block;border-left:4px solid #dc3545}
@@ -91,6 +93,10 @@ input[type=file]{display:none}
 .queue-info{background:#f8f9fa;padding:10px 15px;border-radius:5px;margin:10px 0;border-left:3px solid #17a2b8}
 .footer{text-align:center;margin-top:30px;color:#999;font-size:14px}
 .report-section{margin-top:20px;padding:20px;background:#f8f9fa;border-radius:10px;border:1px solid #dee2e6;text-align:center}
+.stats-section{display:grid;grid-template-columns:repeat(3,1fr);gap:15px;margin:20px 0}
+.stat-card{background:white;padding:20px;border-radius:10px;box-shadow:0 2px 5px rgba(0,0,0,0.1);text-align:center}
+.stat-card .number{font-size:32px;font-weight:bold;color:#007bff}
+.stat-card .label{color:#666;font-size:14px;margin-top:5px}
 </style>
 </head>
 <body>
@@ -127,8 +133,14 @@ input[type=file]{display:none}
 <div class="progress-bar" id="progressBar"><div class="progress" id="progress">0%</div></div>
 <div id="status" class="status"></div>
 <div id="log"></div>
+<div class="stats-section" id="statsSection">
+<div class="stat-card"><div class="number" id="statTotal">0</div><div class="label">Всего публикаций</div></div>
+<div class="stat-card" style="border-top:3px solid #28a745;"><div class="number" id="statSuccess" style="color:#28a745;">0</div><div class="label">✅ Успешно</div></div>
+<div class="stat-card" style="border-top:3px solid #dc3545;"><div class="number" id="statErrors" style="color:#dc3545;">0</div><div class="label">❌ Ошибок</div></div>
+</div>
 <div class="report-section">
 <button class="btn btn-success" onclick="getReport()">📊 Скачать отчет</button>
+<button class="btn btn-info" onclick="loadStats()">🔄 Обновить статистику</button>
 <p style="margin-top:10px;color:#666;font-size:14px;">После публикации всех папок</p>
 </div>
 <div class="footer">⚡ MAX Bot | SQLite</div>
@@ -137,6 +149,22 @@ input[type=file]{display:none}
 <script>
 const userId = new URLSearchParams(window.location.search).get('user_id') || 151296248;
 let selectedFiles = [], isProcessing = false, folderQueue = [], totalFolders = 0;
+
+// Загрузка статистики при открытии страницы
+window.onload = function() {
+    loadStats();
+};
+
+function loadStats() {
+    fetch('/stats/' + userId)
+        .then(res => res.json())
+        .then(data => {
+            document.getElementById('statTotal').textContent = data.total || 0;
+            document.getElementById('statSuccess').textContent = data.success || 0;
+            document.getElementById('statErrors').textContent = data.errors || 0;
+        })
+        .catch(err => console.error('Ошибка загрузки статистики:', err));
+}
 
 function readDirectoryRecursive(entry, path, files, callback) {
     if (entry.isDirectory) {
@@ -382,6 +410,9 @@ async function uploadFolder() {
     if (errors === 0) { showStatus('success', '✅ Загружено ' + totalFolders + ' папок!'); }
     else { showStatus('warning', '⚠️ Загружено ' + (totalFolders - errors) + ' папок, ' + errors + ' с ошибками'); }
     if (totalFolders - errors > 0) { addLog('📊 Скачать отчет: /report/' + userId); }
+    
+    // Обновляем статистику
+    loadStats();
 }
 
 function updateProgress(processed) {
@@ -497,9 +528,18 @@ def webhook():
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/start':
+            stats = db.get_user_stats(user_id)
             url = f"{MAX_API_URL}/messages?user_id={user_id}"
             payload = {
-                "text": "🏠 **Главное меню**\n\n🌐 **Загрузить папку:**\n🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n📊 **Получить отчет:**\n🔗 https://maxbot.bothost.tech/report/{user_id}",
+                "text": f"🏠 **Главное меню**\n\n"
+                        f"📊 **Статистика:**\n"
+                        f"📝 Всего публикаций: {stats['total']}\n"
+                        f"✅ Успешно: {stats['success']}\n"
+                        f"❌ Ошибок: {stats['errors']}\n\n"
+                        f"🌐 **Загрузить папку:**\n"
+                        f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
+                        f"📊 **Получить отчет:**\n"
+                        f"🔗 https://maxbot.bothost.tech/report/{user_id}",
                 "format": "markdown"
             }
             headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
@@ -537,6 +577,16 @@ def download_report(user_id, filename):
         return send_file(file_path, as_attachment=True, download_name=filename)
     except Exception as e:
         return str(e), 500
+
+@app.route('/stats/<int:user_id>')
+def get_stats(user_id):
+    """Получение статистики пользователя"""
+    try:
+        stats = db.get_user_stats(user_id)
+        return jsonify(stats)
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения статистики: {e}")
+        return jsonify({'total': 0, 'success': 0, 'errors': 0}), 500
 
 @app.route('/health')
 def health():
