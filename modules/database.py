@@ -272,6 +272,25 @@ class Database:
             logger.error(f"❌ Ошибка получения времени публикации: {e}")
             return None
     
+    def get_published_at(self, user_id, folder_name):
+        """Получает время публикации из ad_metadata"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            c = conn.cursor()
+            c.execute('''
+                SELECT published_at FROM ad_metadata 
+                WHERE user_id = ? AND folder_name = ?
+                ORDER BY id DESC LIMIT 1
+            ''', (user_id, folder_name))
+            row = c.fetchone()
+            conn.close()
+            if row and row[0]:
+                return row[0]
+            return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения published_at: {e}")
+            return None
+    
     def clear_user_data(self, user_id):
         """Полностью очищает все данные пользователя из БД"""
         try:
