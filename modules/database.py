@@ -125,7 +125,7 @@ class Database:
             return False
     
     def save_ad_metadata(self, user_id, folder_name, chat_id, metadata, published_at):
-        """Сохраняет метаданные для отчета"""
+        """Сохраняет метаданные для отчета (включая post_link)"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
@@ -134,20 +134,40 @@ class Database:
             source_link = metadata.get('Ссылка', '')
             offer_code = metadata.get('Код предложения', '')
             price = metadata.get('Цена в лизинге', '')
+            post_link = metadata.get('post_link', '')  # <-- ВАЖНО!
             
             # Преобразуем timestamp в datetime
             if isinstance(published_at, (int, float)):
                 published_at = datetime.fromtimestamp(published_at)
             
+            # Проверяем, существует ли уже запись
             c.execute('''
-                INSERT INTO ad_metadata 
-                (user_id, folder_name, chat_id, published_at, title, source_link, offer_code, price, post_link)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (user_id, folder_name, chat_id, published_at, title, source_link, offer_code, price, ''))
+                SELECT id FROM ad_metadata 
+                WHERE user_id = ? AND folder_name = ? 
+                ORDER BY id DESC LIMIT 1
+            ''', (user_id, folder_name))
+            existing = c.fetchone()
+            
+            if existing:
+                # Обновляем существующую запись
+                c.execute('''
+                    UPDATE ad_metadata 
+                    SET chat_id = ?, published_at = ?, title = ?, source_link = ?, 
+                        offer_code = ?, price = ?, post_link = ?
+                    WHERE id = ?
+                ''', (chat_id, published_at, title, source_link, offer_code, price, post_link, existing[0]))
+                logger.info(f"📊 Обновлены метаданные для {folder_name}, post_link: {post_link}")
+            else:
+                # Создаем новую запись
+                c.execute('''
+                    INSERT INTO ad_metadata 
+                    (user_id, folder_name, chat_id, published_at, title, source_link, offer_code, price, post_link)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (user_id, folder_name, chat_id, published_at, title, source_link, offer_code, price, post_link))
+                logger.info(f"📊 Сохранены метаданные для {folder_name}, post_link: {post_link}")
             
             conn.commit()
             conn.close()
-            logger.info(f"📊 Метаданные сохранены для {folder_name}")
             return True
             
         except Exception as e:
@@ -174,7 +194,7 @@ class Database:
             return False
     
     def get_ad_metadata(self, user_id, folder_name):
-        """Получает метаданные из БД"""
+        """Получает метаданные из БД (включая post_link)"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
@@ -188,13 +208,15 @@ class Database:
             conn.close()
             
             if row:
-                return {
+                result = {
                     'Название': row[0] or '',
                     'Ссылка': row[1] or '',
                     'Код предложения': row[2] or '',
                     'Цена в лизинге': row[3] or '',
-                    'post_link': row[4] or ''
+                    'post_link': row[4] or ''  # <-- ВАЖНО!
                 }
+                logger.info(f"📖 Получены метаданные для {folder_name}: post_link='{result['post_link']}'")
+                return result
             return {}
         except Exception as e:
             logger.error(f"❌ Ошибка получения метаданных: {e}")
