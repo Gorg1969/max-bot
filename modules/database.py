@@ -1,4 +1,5 @@
-# modules/database.py
+# modules/database.py - полный файл с новыми методами
+
 import sqlite3
 import os
 import logging
@@ -92,32 +93,15 @@ class Database:
         except Exception as e:
             logger.error(f"❌ Ошибка миграции БД: {e}")
     
-    def add_publication(self, user_id, folder_name, group_id, status='success', error=None):
-        """Добавляет запись о публикации с правильным временем"""
+    def add_publication(self, user_id, folder_name, group_id, status='pending', error=None):
+        """Добавляет запись о публикации"""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         
-        # Проверяем, существует ли уже запись
         c.execute('''
-            SELECT id FROM publications 
-            WHERE user_id = ? AND folder_name = ? 
-            ORDER BY id DESC LIMIT 1
-        ''', (user_id, folder_name))
-        existing = c.fetchone()
-        
-        if existing:
-            # Обновляем существующую
-            c.execute('''
-                UPDATE publications 
-                SET status = ?, error = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-            ''', (status, error, existing[0]))
-        else:
-            # Создаем новую с CURRENT_TIMESTAMP
-            c.execute('''
-                INSERT INTO publications (user_id, folder_name, group_id, status, error, created_at)
-                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ''', (user_id, folder_name, group_id, status, error))
+            INSERT INTO publications (user_id, folder_name, group_id, status, error, created_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ''', (user_id, folder_name, group_id, status, error))
         
         conn.commit()
         conn.close()
@@ -151,35 +135,16 @@ class Database:
             source_link = metadata.get('Ссылка', '')
             offer_code = metadata.get('Код предложения', '')
             price = metadata.get('Цена в лизинге', '')
-            post_link = metadata.get('post_link', '')
             
             # Преобразуем timestamp в datetime
             if isinstance(published_at, (int, float)):
                 published_at = datetime.fromtimestamp(published_at)
             
-            # Проверяем, существует ли уже запись
             c.execute('''
-                SELECT id FROM ad_metadata 
-                WHERE user_id = ? AND folder_name = ? 
-                ORDER BY id DESC LIMIT 1
-            ''', (user_id, folder_name))
-            existing = c.fetchone()
-            
-            if existing:
-                # Обновляем существующую запись
-                c.execute('''
-                    UPDATE ad_metadata 
-                    SET chat_id = ?, published_at = ?, title = ?, source_link = ?, 
-                        offer_code = ?, price = ?, post_link = ?
-                    WHERE id = ?
-                ''', (chat_id, published_at, title, source_link, offer_code, price, post_link, existing[0]))
-            else:
-                # Создаем новую запись
-                c.execute('''
-                    INSERT INTO ad_metadata 
-                    (user_id, folder_name, chat_id, published_at, title, source_link, offer_code, price, post_link)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (user_id, folder_name, chat_id, published_at, title, source_link, offer_code, price, post_link))
+                INSERT INTO ad_metadata 
+                (user_id, folder_name, chat_id, published_at, title, source_link, offer_code, price, post_link)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (user_id, folder_name, chat_id, published_at, title, source_link, offer_code, price, ''))
             
             conn.commit()
             conn.close()
@@ -188,6 +153,25 @@ class Database:
             
         except Exception as e:
             logger.error(f"❌ Ошибка сохранения метаданных: {e}")
+            return False
+    
+    def update_post_link(self, user_id, folder_name, post_link):
+        """Обновляет ссылку на пост в ad_metadata"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            c = conn.cursor()
+            c.execute('''
+                UPDATE ad_metadata 
+                SET post_link = ?
+                WHERE user_id = ? AND folder_name = ?
+                ORDER BY id DESC LIMIT 1
+            ''', (post_link, user_id, folder_name))
+            conn.commit()
+            conn.close()
+            logger.info(f"🔗 Обновлена ссылка для {folder_name}: {post_link}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка обновления ссылки: {e}")
             return False
     
     def get_ad_metadata(self, user_id, folder_name):
@@ -249,55 +233,12 @@ class Database:
             logger.error(f"❌ Ошибка получения публикаций: {e}")
             return []
     
-    def get_publication_time(self, user_id, folder_name):
-        """Получает время публикации для папки"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            c = conn.cursor()
-            c.execute('''
-                SELECT created_at 
-                FROM publications 
-                WHERE user_id = ? AND folder_name = ? AND status = 'success'
-                ORDER BY id DESC LIMIT 1
-            ''', (user_id, folder_name))
-            row = c.fetchone()
-            conn.close()
-            
-            if row and row[0]:
-                if isinstance(row[0], str):
-                    return datetime.fromisoformat(row[0])
-                return row[0]
-            return None
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения времени публикации: {e}")
-            return None
-    
-    def get_published_at(self, user_id, folder_name):
-        """Получает время публикации из ad_metadata"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            c = conn.cursor()
-            c.execute('''
-                SELECT published_at FROM ad_metadata 
-                WHERE user_id = ? AND folder_name = ?
-                ORDER BY id DESC LIMIT 1
-            ''', (user_id, folder_name))
-            row = c.fetchone()
-            conn.close()
-            if row and row[0]:
-                return row[0]
-            return None
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения published_at: {e}")
-            return None
-    
     def clear_user_data(self, user_id):
         """Полностью очищает все данные пользователя из БД"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
             
-            # Удаляем все записи пользователя
             c.execute('DELETE FROM publications WHERE user_id = ?', (user_id,))
             c.execute('DELETE FROM ad_metadata WHERE user_id = ?', (user_id,))
             
@@ -317,15 +258,12 @@ class Database:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
             
-            # Всего публикаций
             c.execute('SELECT COUNT(*) FROM publications WHERE user_id = ?', (user_id,))
             total = c.fetchone()[0]
             
-            # Успешных
             c.execute('SELECT COUNT(*) FROM publications WHERE user_id = ? AND status = "success"', (user_id,))
             success = c.fetchone()[0]
             
-            # С ошибками
             c.execute('SELECT COUNT(*) FROM publications WHERE user_id = ? AND status != "success"', (user_id,))
             errors = c.fetchone()[0]
             
@@ -339,40 +277,3 @@ class Database:
         except Exception as e:
             logger.error(f"❌ Ошибка получения статистики: {e}")
             return {'total': 0, 'success': 0, 'errors': 0}
-    
-    def fix_publication_times(self, user_id=None):
-        """Исправляет время публикации для старых записей"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            c = conn.cursor()
-            
-            if user_id:
-                c.execute('''
-                    UPDATE publications 
-                    SET created_at = CURRENT_TIMESTAMP 
-                    WHERE user_id = ? AND created_at IS NULL
-                ''', (user_id,))
-                c.execute('''
-                    UPDATE ad_metadata 
-                    SET published_at = CURRENT_TIMESTAMP 
-                    WHERE user_id = ? AND published_at IS NULL
-                ''', (user_id,))
-            else:
-                c.execute('''
-                    UPDATE publications 
-                    SET created_at = CURRENT_TIMESTAMP 
-                    WHERE created_at IS NULL
-                ''')
-                c.execute('''
-                    UPDATE ad_metadata 
-                    SET published_at = CURRENT_TIMESTAMP 
-                    WHERE published_at IS NULL
-                ''')
-            
-            conn.commit()
-            conn.close()
-            logger.info("✅ Время публикаций исправлено")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Ошибка исправления времени: {e}")
-            return False
