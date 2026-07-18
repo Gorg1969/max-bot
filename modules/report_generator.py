@@ -1,3 +1,4 @@
+# modules/report_generator.py
 import os
 import re
 import csv
@@ -59,39 +60,41 @@ class ReportGenerator:
                 # Получаем метаданные из БД
                 metadata = self.db.get_ad_metadata(user_id, folder_name)
                 
-                # Время публикации (формат: 09.08 - без секунд, с точкой)
+                # Время публикации
                 if created_at:
                     if isinstance(created_at, str):
                         try:
-                            created_at = datetime.fromisoformat(created_at)
+                            # Пробуем разные форматы
+                            if 'T' in created_at:
+                                created_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                            else:
+                                created_at = datetime.fromisoformat(created_at)
                         except:
                             created_at = datetime.now(moscow_tz)
-                    if created_at.tzinfo is None:
+                    if hasattr(created_at, 'tzinfo') and created_at.tzinfo is None:
                         created_at = moscow_tz.localize(created_at)
-                    else:
+                    elif hasattr(created_at, 'tzinfo'):
                         created_at = created_at.astimezone(moscow_tz)
-                    date_str = created_at.strftime('%d.%m.%Y')  # <-- ФОРМАТ КАК В ШАБЛОНЕ
-                    time_str = created_at.strftime('%H.%M')     # <-- ФОРМАТ С ТОЧКОЙ
+                    date_str = created_at.strftime('%d.%m.%Y')
+                    time_str = created_at.strftime('%H.%M')
                 else:
                     now = datetime.now(moscow_tz)
                     date_str = now.strftime('%d.%m.%Y')
                     time_str = now.strftime('%H.%M')
                 
-                # Ссылка на пост - берем из метаданных (там сохраняется полная ссылка с ID поста)
+                # Ссылка на пост - берем из метаданных
                 post_link = metadata.get('post_link', '')
                 
-                # Если нет post_link, формируем из chat_id
                 if not post_link and chat_id:
                     post_link = f"https://max.ru/c/{chat_id}"
                 
                 # Данные для успешных публикаций
                 if status == 'success':
-                    # Для даты: заполняем только первую строку в группе
                     if current_date != date_str:
                         current_date = date_str
                         display_date = date_str
                     else:
-                        display_date = ''  # пусто для повторяющихся дат
+                        display_date = ''
                     
                     success_data.append({
                         '№': len(success_data) + 1,
@@ -104,7 +107,6 @@ class ReportGenerator:
                         'Цена в лизинге': metadata.get('Цена в лизинге', ''),
                     })
                 else:
-                    # Данные для ошибок (только папка и ошибка)
                     error_data.append({
                         'Папка': folder_name,
                         'Ошибка': error or 'Неизвестная ошибка'
@@ -132,14 +134,12 @@ class ReportGenerator:
             if EXCEL_AVAILABLE:
                 self._create_excel_report(report_path, success_data, error_data)
             else:
-                # Если openpyxl не установлен, создаем CSV
                 report_filename = f"Отчет_{timestamp}.csv"
                 report_path = os.path.join(user_folder, report_filename)
                 self._create_csv_report(report_path, success_data, error_data)
             
             logger.info(f"📊 Отчет создан: {report_path} (успешных: {len(success_data)}, ошибок: {len(error_data)})")
             
-            # Очищаем временные данные (но оставляем отчет)
             self.cleanup_user_data(user_id, keep_report=True)
             
             return report_path
@@ -155,29 +155,24 @@ class ReportGenerator:
         try:
             wb = Workbook()
             
-            # Удаляем стандартный лист
             if 'Sheet' in wb.sheetnames:
                 wb.remove(wb['Sheet'])
             
             # === ЛИСТ 1: УСПЕШНЫЕ ===
             ws_success = wb.create_sheet("Отчет по публикациям", 0)
             
-            # Заголовки как в шаблоне
             headers = ['№', 'Дата', 'Время публикации (МСК)', 'Ссылка на пост', 
                       'Ссылка (источник)', 'Марка/модель', 'Код предложения']
             
-            # ---------- СТИЛИ ----------
-            # Заголовок: синий фон, белый текст, жирный
+            # СТИЛИ
             header_font = Font(bold=True, size=11, color="FFFFFF", name="Calibri")
             header_fill = PatternFill(start_color="2F5597", end_color="2F5597", fill_type="solid")
             header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             
-            # Основной текст: черный, размер 10
             text_font = Font(size=10, name="Calibri")
             text_alignment_left = Alignment(horizontal="left", vertical="center", wrap_text=True)
             text_alignment_center = Alignment(horizontal="center", vertical="center")
             
-            # Границы
             thin_border = Border(
                 left=Side(style="thin", color="D0D0D0"),
                 right=Side(style="thin", color="D0D0D0"),
@@ -185,7 +180,6 @@ class ReportGenerator:
                 bottom=Side(style="thin", color="D0D0D0")
             )
             
-            # Ссылка: синяя, подчеркнутая
             link_font = Font(color="0563C1", underline="single", size=10, name="Calibri")
             
             # Заголовок листа
@@ -193,11 +187,9 @@ class ReportGenerator:
             title_cell.font = Font(bold=True, size=16, name="Calibri", color="1A1A2E")
             title_cell.alignment = Alignment(horizontal="center", vertical="center")
             ws_success.merge_cells('A1:G1')
-            
-            # Отступ перед таблицей
             ws_success.row_dimensions[1].height = 35
             
-            # Записываем заголовки (со 2 строки)
+            # Заголовки таблицы
             for col, header in enumerate(headers, 1):
                 cell = ws_success.cell(row=2, column=col, value=header)
                 cell.font = header_font
@@ -205,16 +197,14 @@ class ReportGenerator:
                 cell.alignment = header_alignment
                 cell.border = thin_border
             
-            # Высота строки заголовков
             ws_success.row_dimensions[2].height = 25
             
-            # Записываем данные
+            # Данные
             for row_idx, data in enumerate(success_data, 3):
                 for col_idx, key in enumerate(headers, 1):
                     value = data.get(key, '')
                     cell = ws_success.cell(row=row_idx, column=col_idx, value=value)
                     
-                    # Применяем стили в зависимости от колонки
                     if key == '№' or key == 'Дата' or key == 'Время публикации (МСК)':
                         cell.alignment = text_alignment_center
                     elif key == 'Ссылка на пост' and value:
@@ -230,31 +220,22 @@ class ReportGenerator:
                     cell.border = thin_border
                     ws_success.row_dimensions[row_idx].height = 22
             
-            # Цвет для строк (через одну)
+            # Чередование цветов строк
             for row_idx in range(3, len(success_data) + 3):
                 if row_idx % 2 == 1:
                     for col in range(1, 8):
                         cell = ws_success.cell(row=row_idx, column=col)
                         cell.fill = PatternFill(start_color="F8F9FA", end_color="F8F9FA", fill_type="solid")
             
-            # Настраиваем ширину колонок
+            # Ширина колонок
             column_widths = {
-                'A': 5,   # №
-                'B': 14,  # Дата
-                'C': 18,  # Время
-                'D': 50,  # Ссылка на пост
-                'E': 40,  # Ссылка (источник)
-                'F': 32,  # Марка/модель
-                'G': 18,  # Код предложения
+                'A': 5, 'B': 14, 'C': 18, 'D': 50, 'E': 40, 'F': 32, 'G': 18
             }
-            
             for col_letter, width in column_widths.items():
                 ws_success.column_dimensions[col_letter].width = width
             
-            # Фиксируем верхние строки
             ws_success.freeze_panes = 'A3'
             
-            # Настройка печати
             try:
                 ws_success.page_setup.orientation = PageSetup.ORIENTATION_LANDSCAPE
                 ws_success.page_setup.paperSize = PageSetup.PAPERSIZE_A4
@@ -267,14 +248,12 @@ class ReportGenerator:
             # === ЛИСТ 2: ОШИБКИ ===
             ws_errors = wb.create_sheet("Ошибки", 1)
             
-            # Заголовок листа ошибок
             error_title = ws_errors.cell(row=1, column=1, value="Ошибки публикации")
             error_title.font = Font(bold=True, size=16, name="Calibri", color="C00000")
             error_title.alignment = Alignment(horizontal="center", vertical="center")
             ws_errors.merge_cells('A1:B1')
             ws_errors.row_dimensions[1].height = 35
             
-            # Заголовки для ошибок
             error_headers = ['Папка', 'Ошибка']
             error_header_font = Font(bold=True, size=11, color="FFFFFF", name="Calibri")
             error_header_fill = PatternFill(start_color="C00000", end_color="C00000", fill_type="solid")
@@ -288,7 +267,6 @@ class ReportGenerator:
             
             ws_errors.row_dimensions[2].height = 25
             
-            # Если нет ошибок, пишем красивое сообщение
             if not error_data:
                 cell = ws_errors.cell(row=3, column=1, value="✅ Нет ошибок")
                 cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -297,32 +275,25 @@ class ReportGenerator:
                 ws_errors.row_dimensions[3].height = 40
             else:
                 for row_idx, data in enumerate(error_data, 3):
-                    # Папка
                     cell1 = ws_errors.cell(row=row_idx, column=1, value=data.get('Папка', ''))
                     cell1.font = text_font
                     cell1.alignment = text_alignment_left
                     cell1.border = thin_border
                     ws_errors.row_dimensions[row_idx].height = 22
                     
-                    # Ошибка
                     cell2 = ws_errors.cell(row=row_idx, column=2, value=data.get('Ошибка', ''))
                     cell2.font = Font(color="C00000", size=10, name="Calibri")
                     cell2.alignment = text_alignment_left
                     cell2.border = thin_border
                     
-                    # Чередование цвета
                     if row_idx % 2 == 1:
                         cell1.fill = PatternFill(start_color="FFF0F0", end_color="FFF0F0", fill_type="solid")
                         cell2.fill = PatternFill(start_color="FFF0F0", end_color="FFF0F0", fill_type="solid")
             
-            # Настраиваем ширину колонок для ошибок
             ws_errors.column_dimensions['A'].width = 35
             ws_errors.column_dimensions['B'].width = 65
-            
-            # Фиксируем верхнюю строку
             ws_errors.freeze_panes = 'A3'
             
-            # Настройка печати для ошибок
             try:
                 ws_errors.page_setup.orientation = PageSetup.ORIENTATION_LANDSCAPE
                 ws_errors.page_setup.paperSize = PageSetup.PAPERSIZE_A4
@@ -332,7 +303,6 @@ class ReportGenerator:
             except:
                 pass
             
-            # Сохраняем файл
             wb.save(filepath)
             logger.info(f"✅ Красивый Excel отчет создан: {filepath}")
             
@@ -346,7 +316,6 @@ class ReportGenerator:
             with open(filepath, 'w', encoding='utf-8-sig', newline='') as f:
                 writer = csv.writer(f, delimiter=';')
                 
-                # === УСПЕШНЫЕ ===
                 writer.writerow(['=== УСПЕШНЫЕ ПУБЛИКАЦИИ ==='])
                 writer.writerow(['№', 'Дата', 'Время публикации (МСК)', 'Ссылка на пост', 
                                'Ссылка (источник)', 'Марка/модель', 'Код предложения'])
@@ -362,7 +331,6 @@ class ReportGenerator:
                         data.get('Код предложения', ''),
                     ])
                 
-                # === ОШИБКИ ===
                 writer.writerow([])
                 writer.writerow(['=== ОШИБКИ ==='])
                 writer.writerow(['Папка', 'Ошибка'])
@@ -460,8 +428,14 @@ class ReportGenerator:
                 
                 if created_at:
                     if isinstance(created_at, str):
-                        created_at = datetime.fromisoformat(created_at)
-                    created_at = created_at.astimezone(moscow_tz)
+                        try:
+                            created_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                        except:
+                            created_at = datetime.now(moscow_tz)
+                    if hasattr(created_at, 'tzinfo') and created_at.tzinfo is None:
+                        created_at = moscow_tz.localize(created_at)
+                    else:
+                        created_at = created_at.astimezone(moscow_tz)
                     date_str = created_at.strftime('%d.%m.%Y')
                     time_str = created_at.strftime('%H.%M')
                 else:
