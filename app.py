@@ -17,7 +17,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB - уменьшили для безопасности
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ db = Database()
 fm = FileManager(DATA_DIR)
 
 # Глобальные переменные для управления очередью
-active_queues = {}  # user_id -> {'queue': list, 'processing': bool, 'stop_flag': bool}
+active_queues = {}
 queue_lock = threading.Lock()
 
 class APIClient:
@@ -62,36 +62,7 @@ class APIClient:
         except Exception as e:
             logger.error(f"❌ Ошибка отправки: {e}")
             return False
-    def upload_file(self, file_data, filename='image.jpg'):
-        """Загрузка файла на сервер"""
-        if not self.token:
-            return None
-        try:
-            if isinstance(file_data, bytes):
-                files = {'file': (filename, file_data, 'image/jpeg')}
-            else:
-                return None
-            
-            response = requests.post(
-                f"{self.base_url}/files",
-                headers={"Authorization": self.token},
-                files=files,
-                timeout=60,
-                verify=False
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                token = result.get('token') or result.get('data', {}).get('token')
-                logger.info(f"✅ Файл загружен: {token[:20] if token else 'None'}...")
-                return token
-            else:
-                logger.error(f"❌ Ошибка загрузки файла: {response.status_code}")
-                return None
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки файла: {e}")
-            return None
-            
+
     def send_message_to_chat(self, chat_id, text):
         if not self.token:
             return False
@@ -150,8 +121,44 @@ class APIClient:
             logger.error(f"❌ Ошибка: {e}")
             return False
 
+    def upload_file(self, file_data, filename='image.jpg'):
+        """Загрузка файла на сервер MAX"""
+        if not self.token:
+            logger.error("❌ Нет токена для загрузки файла")
+            return None
+        try:
+            if isinstance(file_data, bytes):
+                files = {'file': (filename, file_data, 'image/jpeg')}
+            else:
+                logger.error(f"❌ Неподдерживаемый формат данных: {type(file_data)}")
+                return None
+            
+            response = requests.post(
+                f"{self.base_url}/files/upload",
+                headers={"Authorization": self.token},
+                files=files,
+                timeout=60,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                token = result.get('token') or result.get('data', {}).get('token') or result.get('id')
+                if token:
+                    logger.info(f"✅ Файл загружен: {token[:20] if token else 'None'}...")
+                    return token
+                else:
+                    logger.error(f"❌ Не удалось получить токен: {result}")
+                    return None
+            else:
+                logger.error(f"❌ Ошибка загрузки файла: {response.status_code} - {response.text}")
+                return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки файла: {e}")
+            return None
+
 api = APIClient()
-publisher = Publisher(db, TOKEN, TOKEN, api)
+publisher = Publisher(db, TOKEN, TOKEN, api)  # db, bot_token, max_token, api
 report_gen = ReportGenerator(fm, db)
 
 # ========== HTML СТРАНИЦА С CHUNKED UPLOAD ==========
@@ -308,7 +315,7 @@ UPLOAD_PAGE = """
     <script>
         const urlParams = new URLSearchParams(window.location.search);
         const userId = urlParams.get('user_id') || 151296248;
-        const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB чанки для безопасности
+        const CHUNK_SIZE = 2 * 1024 * 1024;
         
         let selectedFiles = [];
         let isProcessing = false;
@@ -462,7 +469,6 @@ UPLOAD_PAGE = """
             }
         }
 
-        // ===== СИЛЬНОЕ СЖАТИЕ ИЗОБРАЖЕНИЙ =====
         function compressImage(file, maxWidth = 500, maxHeight = 500, quality = 0.5) {
             return new Promise((resolve, reject) => {
                 const reader = new FileReader();
@@ -475,7 +481,6 @@ UPLOAD_PAGE = """
                         let width = img.width;
                         let height = img.height;
                         
-                        // Сильное уменьшение
                         if (width > height) {
                             if (width > maxWidth) {
                                 height = height * (maxWidth / width);
@@ -493,7 +498,6 @@ UPLOAD_PAGE = """
                         const ctx = canvas.getContext('2d');
                         ctx.drawImage(img, 0, 0, width, height);
                         
-                        // Всегда конвертируем в JPEG для лучшего сжатия
                         const mimeType = 'image/jpeg';
                         
                         canvas.toBlob((blob) => {
@@ -514,7 +518,6 @@ UPLOAD_PAGE = """
             });
         }
 
-        // ===== ЗАГРУЗКА ФАЙЛА ПО ЧАСТЯМ =====
         async function uploadFileInChunks(file, folderName, fileName) {
             const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
             
@@ -544,10 +547,6 @@ UPLOAD_PAGE = """
                 if (!result.success) {
                     throw new Error(result.message || 'Ошибка загрузки чанка');
                 }
-                
-                // Показываем прогресс загрузки
-                const chunkPercent = Math.round(((i + 1) / totalChunks) * 100);
-                addLog(`📦 Чанк ${i+1}/${totalChunks} (${chunkPercent}%) файла ${fileName}`);
             }
             
             return true;
@@ -609,17 +608,10 @@ UPLOAD_PAGE = """
             const images = [];
             for (const img of imageFiles) {
                 try {
-                    // СИЛЬНОЕ СЖАТИЕ
                     const compressed = await compressImage(img, 500, 500, 0.5);
                     
-                    // Загружаем сжатое изображение по частям
-                    const uploadSuccess = await uploadFileInChunks(compressed, folderName, compressed.name);
+                    await uploadFileInChunks(compressed, folderName, compressed.name);
                     
-                    if (!uploadSuccess) {
-                        throw new Error('Не удалось загрузить файл по частям');
-                    }
-                    
-                    // Читаем сжатое изображение для отправки на сервер
                     const reader = new FileReader();
                     const dataUrl = await new Promise((resolve) => {
                         reader.onload = (e) => resolve(e.target.result);
@@ -637,7 +629,6 @@ UPLOAD_PAGE = """
                     addLog(`✅ Фото ${img.name} сжато: ${(img.size/1024).toFixed(0)}KB -> ${(compressed.size/1024).toFixed(0)}KB (${Math.round((compressed.size/img.size)*100)}%)`);
                 } catch (e) {
                     addLog(`⚠️ Ошибка обработки ${img.name}: ${e.message}`);
-                    // Пробуем загрузить оригинал с сильным сжатием
                     try {
                         const compressed = await compressImage(img, 400, 400, 0.4);
                         const reader = new FileReader();
@@ -857,18 +848,14 @@ def upload_chunk():
         if not user_id:
             return jsonify({'success': False, 'message': 'Нет user_id'}), 400
         
-        # Создаем временную папку для пользователя
         temp_dir = os.path.join(DATA_DIR, 'temp', str(user_id), folder_name)
         os.makedirs(temp_dir, exist_ok=True)
         
-        # Сохраняем чанк
         chunk_filename = f"{file_name}.part_{chunk_index}"
         chunk_path = os.path.join(temp_dir, chunk_filename)
         chunk.save(chunk_path)
         
-        # Если это последний чанк - собираем файл
         if int(chunk_index) == int(total_chunks) - 1:
-            # Собираем все чанки в один файл
             final_path = os.path.join(temp_dir, file_name)
             with open(final_path, 'wb') as outfile:
                 for i in range(int(total_chunks)):
@@ -878,7 +865,6 @@ def upload_chunk():
                             outfile.write(infile.read())
                         os.remove(part_file)
             
-            # Проверяем размер собранного файла
             file_size = os.path.getsize(final_path)
             logger.info(f"📦 Собран файл {file_name} размером {file_size} байт")
             
@@ -919,7 +905,6 @@ def publish_folder():
         logger.info(f"📦 Получена папка: {folder_name} от пользователя {user_id}")
         logger.info(f"📝 Текст: {len(ad_text)} символов, 🖼️ Фото: {len(images)}")
         
-        # Обработка изображений из base64
         processed_images = []
         for img in images:
             try:
@@ -944,7 +929,6 @@ def publish_folder():
             user_id, folder_name, ad_text, metadata_text, processed_images
         )
         
-        # Очищаем временные файлы после публикации
         try:
             temp_dir = os.path.join(DATA_DIR, 'temp', str(user_id), folder_name)
             if os.path.exists(temp_dir):
@@ -964,7 +948,6 @@ def publish_folder():
 
 @app.route('/stop_processing', methods=['POST'])
 def stop_processing():
-    """Останавливает все процессы и очищает очередь"""
     try:
         data = request.get_json()
         user_id = data.get('user_id')
@@ -974,16 +957,8 @@ def stop_processing():
         
         logger.info(f"⏹ ПОЛУЧЕНА КОМАНДА ОСТАНОВКИ для пользователя {user_id}")
         
-        # 1. Останавливаем publisher
         publisher.stop(user_id)
         
-        # 2. Очищаем временные файлы пользователя
-        try:
-            fm.clear_temp_files(user_id)
-        except Exception as e:
-            logger.error(f"⚠️ Ошибка очистки временных файлов: {e}")
-        
-        # 3. Очищаем временные папки загрузки
         try:
             temp_dir = os.path.join(DATA_DIR, 'temp', str(user_id))
             if os.path.exists(temp_dir):
@@ -992,7 +967,6 @@ def stop_processing():
         except Exception as e:
             logger.error(f"⚠️ Ошибка удаления временных файлов: {e}")
         
-        # 4. Очищаем очередь
         with queue_lock:
             if user_id in active_queues:
                 queue_size = len(active_queues[user_id].get('queue', []))
@@ -1009,7 +983,6 @@ def stop_processing():
                     'stop_flag': True
                 }
         
-        # 5. Отправляем подтверждение
         api.send_message(
             user_id, 
             "⏹️ **Публикация остановлена!**\n\n"
@@ -1071,9 +1044,7 @@ def webhook():
         
         if text and text.strip() == '/stop':
             publisher.stop(user_id)
-            fm.clear_temp_files(user_id)
             
-            # Очищаем временные папки загрузки
             try:
                 temp_dir = os.path.join(DATA_DIR, 'temp', str(user_id))
                 if os.path.exists(temp_dir):
@@ -1127,7 +1098,6 @@ def webhook():
 
 @app.route('/report/<int:user_id>')
 def report_page(user_id):
-    """Страница со ссылкой на скачивание отчета"""
     report_path = report_gen.generate_report(user_id)
     if not report_path:
         return "❌ Нет данных для отчета", 404
@@ -1164,7 +1134,6 @@ def report_page(user_id):
 
 @app.route('/report_errors/<int:user_id>')
 def report_errors_page(user_id):
-    """Страница со ссылкой на скачивание отчета об ошибках"""
     report_path = report_gen.generate_error_report(user_id)
     if not report_path:
         return "❌ Нет ошибок для отчета", 404
@@ -1201,7 +1170,6 @@ def report_errors_page(user_id):
 
 @app.route('/stats/<int:user_id>')
 def stats_page(user_id):
-    """Возвращает статистику публикаций пользователя"""
     try:
         stats = db.get_stats(user_id)
         return jsonify({
@@ -1216,7 +1184,6 @@ def stats_page(user_id):
 
 @app.route('/download_report/<int:user_id>/<path:filename>')
 def download_report(user_id, filename):
-    """Скачивание отчета"""
     try:
         user_folder = fm.get_user_folder(user_id)
         file_path = os.path.join(user_folder, filename)
@@ -1262,7 +1229,6 @@ def setup_webhook():
 
 @app.route('/cleanup_temp', methods=['POST'])
 def cleanup_temp():
-    """Очистка всех временных файлов"""
     try:
         temp_dir = os.path.join(DATA_DIR, 'temp')
         if os.path.exists(temp_dir):
