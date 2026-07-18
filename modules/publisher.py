@@ -23,25 +23,40 @@ class Publisher:
         self.STOP_FLAG = {}
         self.moscow_tz = pytz.timezone('Europe/Moscow')
 
-    def extract_chat_id(self, folder_name):
-        """Извлекает chat_id из названия папки с минусом"""
+    def extract_chat_id_from_folder(self, folder_name):
+        """
+        Извлекает chat_id из названия папки.
+        Поддерживает форматы:
+        - "-1001234567890"
+        - "1 -1001234567890"
+        - "1-1001234567890"
+        - "Канал 1 -1001234567890"
+        - "1001234567890" (без минуса, добавит автоматически)
+        """
         if not folder_name:
             return None
         
-        match = re.search(r'-\s*(\d+)', folder_name)
+        # Ищем chat_id в формате -1001234567890 (с минусом)
+        match = re.search(r'(-?\d{10,})', folder_name)
         if match:
             chat_id = match.group(1)
-            if len(chat_id) >= 10:
-                return f"-{chat_id}"
+            # Если chat_id без минуса, добавляем
+            if not chat_id.startswith('-') and len(chat_id) >= 10:
+                chat_id = f"-{chat_id}"
+            return chat_id
         
+        # Если не нашли, пробуем найти просто число
         match = re.search(r'(\d{10,})', folder_name)
         if match:
-            return match.group(1)
+            return f"-{match.group(1)}"
         
         return None
 
-    def _send_to_chat(self, chat_id, text, image_tokens):
-        """Отправляет сообщение в чат и возвращает ID сообщения"""
+    def _send_and_get_id(self, chat_id, text, image_tokens):
+        """
+        Отправляет сообщение в чат и пытается получить ID.
+        Если ID не получен, генерирует временный.
+        """
         try:
             if not self.api.token:
                 return False, None
@@ -52,9 +67,6 @@ class Publisher:
                     "type": "image",
                     "payload": {"token": token}
                 })
-            
-            # Генерируем уникальный ID для сообщения
-            message_id = str(uuid.uuid4())[:12]
             
             payload = {
                 "text": text,
@@ -67,7 +79,6 @@ class Publisher:
             chat_id_with_dash = chat_id if str(chat_id).startswith('-') else f"-{chat_id}"
             
             logger.info(f"📤 Отправка в чат {chat_id_with_dash} с {len(attachments)} фото")
-            logger.info(f"🆔 Сгенерирован ID сообщения: {message_id}")
             
             response = requests.post(
                 f"{self.api.base_url}/messages?chat_id={chat_id_with_dash}",
@@ -80,37 +91,33 @@ class Publisher:
                 verify=False
             )
             
-            # Логируем ответ API
-            logger.info(f"📨 Ответ API: status={response.status_code}")
             if response.status_code == 200:
+                # Пытаемся получить ID из ответа
+                message_id = None
                 try:
                     result = response.json()
-                    logger.info(f"📨 Тело ответа: {json.dumps(result, indent=2)}")
+                    logger.info(f"📨 Ответ API: {json.dumps(result, indent=2)}")
                     
-                    # Пытаемся получить ID из ответа
-                    api_message_id = None
-                    if 'mid' in result:
-                        api_message_id = result['mid']
-                    elif 'data' in result and 'mid' in result['data']:
-                        api_message_id = result['data']['mid']
+                    # Ищем ID в разных местах
+                    if 'data' in result and 'id' in result['data']:
+                        message_id = result['data']['id']
                     elif 'id' in result:
-                        api_message_id = result['id']
-                    
-                    if api_message_id:
-                        logger.info(f"✅ Получен ID от API: {api_message_id}")
-                        message_id = api_message_id
-                    else:
-                        logger.info(f"⚠️ API не вернул ID, используем сгенерированный: {message_id}")
-                    
-                    # Формируем ссылку
-                    post_link = f"https://max.ru/c/{chat_id_with_dash}/{message_id}"
-                    logger.info(f"🔗 Ссылка на пост: {post_link}")
-                    return True, post_link
-                    
+                        message_id = result['id']
+                    elif 'message_id' in result:
+                        message_id = result['message_id']
                 except Exception as e:
-                    logger.warning(f"⚠️ Не удалось распарсить ответ: {e}")
+                    logger.warning(f"⚠️ Не удалось распарсить ответ API: {e}")
+                
+                # Формируем ссылку
+                if message_id:
                     post_link = f"https://max.ru/c/{chat_id_with_dash}/{message_id}"
-                    logger.info(f"🔗 Ссылка на пост (без ответа API): {post_link}")
+                    logger.info(f"🔗 Получен ID из API: {message_id}")
+                    return True, post_link
+                else:
+                    # Генерируем временный ID
+                    temp_id = str(uuid.uuid4())[:8]
+                    post_link = f"https://max.ru/c/{chat_id_with_dash}/{temp_id}?temp=1"
+                    logger.warning(f"⚠️ API не вернул ID, используем сгенерированный: {temp_id}")
                     return True, post_link
             else:
                 logger.error(f"❌ Ошибка: {response.status_code} - {response.text}")
@@ -135,8 +142,6 @@ class Publisher:
                     "payload": {"token": token}
                 })
             
-            message_id = str(uuid.uuid4())[:12]
-            
             payload = {
                 "user_id": user_id,
                 "text": text,
@@ -147,7 +152,6 @@ class Publisher:
                 payload["attachments"] = attachments
             
             logger.info(f"📤 Отправка пользователю {user_id} с {len(attachments)} фото")
-            logger.info(f"🆔 Сгенерирован ID: {message_id}")
             
             response = requests.post(
                 f"{self.api.base_url}/messages",
@@ -161,9 +165,24 @@ class Publisher:
             )
             
             if response.status_code == 200:
-                post_link = f"https://max.ru/c/{user_id}/{message_id}"
+                # Пробуем получить ID
+                message_id = None
+                post_link = None
+                try:
+                    result = response.json()
+                    if 'data' in result and 'id' in result['data']:
+                        message_id = result['data']['id']
+                    elif 'id' in result:
+                        message_id = result['id']
+                    
+                    if message_id:
+                        post_link = f"https://max.ru/c/{user_id}/{message_id}"
+                    else:
+                        post_link = f"https://max.ru/c/{user_id}"
+                except:
+                    post_link = f"https://max.ru/c/{user_id}"
+                
                 logger.info(f"✅ Сообщение отправлено пользователю {user_id}")
-                logger.info(f"🔗 Ссылка: {post_link}")
                 return True, post_link
             else:
                 logger.error(f"❌ Ошибка: {response.status_code} - {response.text}")
@@ -200,16 +219,18 @@ class Publisher:
                 logger.info(f"⏹️ Пропускаем папку {folder_name} - остановка")
                 return False, "Остановка пользователем"
             
-            chat_id = self.extract_chat_id(folder_name)
+            # ===== ИЗВЛЕКАЕМ CHAT_ID ИЗ НАЗВАНИЯ ПАПКИ =====
+            chat_id = self.extract_chat_id_from_folder(folder_name)
+            
             if not chat_id:
                 logger.error(f"❌ Не удалось извлечь chat_id из: {folder_name}")
                 return False, f"Не удалось извлечь chat_id из {folder_name}"
             
-            logger.info(f"📤 Извлечен chat_id: {chat_id}")
+            logger.info(f"📤 Извлечен chat_id из имени папки: {chat_id}")
             logger.info(f"📸 Получено {len(image_tokens)} токенов фото")
             
             # Отправляем сообщение
-            success, post_link = self._send_to_chat(chat_id, ad_text, image_tokens)
+            success, post_link = self._send_and_get_id(chat_id, ad_text, image_tokens)
             
             if not success:
                 logger.warning("⚠️ Отправка в чат не удалась, пробуем в личные сообщения...")
@@ -221,12 +242,12 @@ class Publisher:
             # Сохраняем метаданные
             metadata = self._parse_metadata(metadata_text)
             
-            # ВАЖНО: добавляем post_link в metadata
             if post_link:
                 metadata['post_link'] = post_link
-                logger.info(f"🔗 Сохранена ссылка в metadata: {post_link}")
-            else:
-                logger.warning("⚠️ post_link не получен, сохраняем без ссылки")
+                logger.info(f"🔗 Сохранена ссылка: {post_link}")
+            
+            # Сохраняем chat_id в метаданных
+            metadata['chat_id'] = chat_id
             
             # Время публикации
             now = datetime.now(self.moscow_tz)
@@ -236,8 +257,8 @@ class Publisher:
             self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, timestamp)
             self.db.add_publication(user_id, folder_name, chat_id, status='success')
             
-            logger.info(f"✅ Папка {folder_name} опубликована, ссылка: {post_link}")
-            return True, f"✅ Папка {folder_name} опубликована с {len(image_tokens)} фото"
+            logger.info(f"✅ Папка {folder_name} опубликована в чат {chat_id}")
+            return True, f"✅ Папка {folder_name} опубликована в чат {chat_id}"
             
         except Exception as e:
             logger.error(f"❌ Ошибка публикации {folder_name}: {e}")
