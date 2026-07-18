@@ -1,6 +1,5 @@
 # modules/report_generator.py
 import os
-import re
 import csv
 import shutil
 from datetime import datetime
@@ -9,12 +8,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Пытаемся импортировать openpyxl для Excel
 try:
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-    from openpyxl.utils import get_column_letter
-    from openpyxl.worksheet.page import PageSetup
     EXCEL_AVAILABLE = True
 except ImportError:
     EXCEL_AVAILABLE = False
@@ -22,18 +18,14 @@ except ImportError:
 
 
 class ReportGenerator:
-    """Генератор отчетов для публикаций"""
-    
     def __init__(self, file_manager, db):
         self.fm = file_manager
         self.db = db
     
     def generate_report(self, user_id):
-        """Генерирует Excel отчет с двумя листами: Успешные и Ошибки"""
+        """Генерирует Excel отчет с двумя листами"""
         try:
             user_folder = self.fm.get_user_folder(user_id)
-            
-            # Получаем все публикации пользователя
             publications = self.db.get_publications(user_id)
             
             if not publications:
@@ -44,10 +36,7 @@ class ReportGenerator:
             success_data = []
             error_data = []
             
-            # Сортируем по времени создания (по порядку публикации) - старые сверху
             publications_sorted = sorted(publications, key=lambda x: x.get('created_at', ''))
-            
-            # Группируем по дате для заполнения
             current_date = None
             index = 1
             
@@ -57,13 +46,10 @@ class ReportGenerator:
                 status = pub.get('status', '')
                 error = pub.get('error', '')
                 
-                # Получаем метаданные из БД
                 metadata = self.db.get_ad_metadata(user_id, folder_name)
                 
-                # Время публикации - берем из created_at в publications (оно сохраняется правильно)
+                # Время публикации
                 created_at = pub.get('created_at')
-                
-                # Форматируем время
                 if created_at:
                     if isinstance(created_at, str):
                         try:
@@ -71,7 +57,6 @@ class ReportGenerator:
                         except:
                             created_at = datetime.now(moscow_tz)
                     
-                    # Если created_at без timezone, добавляем
                     if hasattr(created_at, 'tzinfo') and created_at.tzinfo is None:
                         created_at = moscow_tz.localize(created_at)
                     elif hasattr(created_at, 'tzinfo'):
@@ -80,15 +65,18 @@ class ReportGenerator:
                     date_str = created_at.strftime('%d.%m.%Y')
                     time_str = created_at.strftime('%H.%M')
                 else:
-                    # Если нет created_at, используем текущее время
                     now = datetime.now(moscow_tz)
                     date_str = now.strftime('%d.%m.%Y')
                     time_str = now.strftime('%H.%M')
                 
-                # Ссылка на пост - формируем из chat_id (без post_id, т.к. сервер не возвращает)
-                post_link = f"https://max.ru/c/{chat_id}" if chat_id else ""
+                # Ссылка на пост - берем из метаданных (обновляется через вебхук)
+                post_link = metadata.get('post_link', '')
                 
-                # Данные для успешных публикаций
+                # Если ссылка еще не получена, используем fallback
+                if not post_link and chat_id:
+                    post_link = f"https://max.ru/c/{chat_id}"
+                    logger.warning(f"⚠️ Ссылка для {folder_name} еще не получена, используем fallback")
+                
                 if status == 'success':
                     if current_date != date_str:
                         current_date = date_str
@@ -113,25 +101,14 @@ class ReportGenerator:
                         'Ошибка': error or 'Неизвестная ошибка'
                     })
             
-            # Если нет успешных публикаций
             if not success_data:
                 logger.warning(f"⚠️ Нет успешных публикаций для пользователя {user_id}")
-                success_data = [{
-                    '№': '',
-                    'Дата': '',
-                    'Время публикации (МСК)': '',
-                    'Ссылка на пост': '',
-                    'Ссылка (источник)': '',
-                    'Название': '',
-                    'Код предложения': '',
-                    'Цена в лизинге': '',
-                }]
+                return None
             
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             report_filename = f"Отчет_{timestamp}.xlsx"
             report_path = os.path.join(user_folder, report_filename)
             
-            # Создаем Excel отчет
             if EXCEL_AVAILABLE:
                 self._create_excel_report(report_path, success_data, error_data)
             else:
@@ -139,10 +116,8 @@ class ReportGenerator:
                 report_path = os.path.join(user_folder, report_filename)
                 self._create_csv_report(report_path, success_data, error_data)
             
-            logger.info(f"📊 Отчет создан: {report_path} (успешных: {len(success_data)}, ошибок: {len(error_data)})")
-            
+            logger.info(f"📊 Отчет создан: {report_path}")
             self.cleanup_user_data(user_id, keep_report=True)
-            
             return report_path
             
         except Exception as e:
@@ -152,38 +127,31 @@ class ReportGenerator:
             return None
     
     def _create_excel_report(self, filepath, success_data, error_data):
-        """Создает красивый Excel файл с двумя листами"""
+        """Создает Excel файл"""
         try:
             wb = Workbook()
-            
             if 'Sheet' in wb.sheetnames:
                 wb.remove(wb['Sheet'])
             
-            # === ЛИСТ 1: УСПЕШНЫЕ ===
             ws_success = wb.create_sheet("Отчет по публикациям", 0)
-            
             headers = ['№', 'Дата', 'Время публикации (МСК)', 'Ссылка на пост', 
                       'Ссылка (источник)', 'Название', 'Код предложения', 'Цена в лизинге']
             
-            # СТИЛИ
             header_font = Font(bold=True, size=11, color="FFFFFF", name="Calibri")
             header_fill = PatternFill(start_color="2F5597", end_color="2F5597", fill_type="solid")
             header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            
             text_font = Font(size=10, name="Calibri")
             text_alignment_left = Alignment(horizontal="left", vertical="center", wrap_text=True)
             text_alignment_center = Alignment(horizontal="center", vertical="center")
-            
             thin_border = Border(
                 left=Side(style="thin", color="D0D0D0"),
                 right=Side(style="thin", color="D0D0D0"),
                 top=Side(style="thin", color="D0D0D0"),
                 bottom=Side(style="thin", color="D0D0D0")
             )
-            
             link_font = Font(color="0563C1", underline="single", size=10, name="Calibri")
             
-            # Заголовок листа
+            # Заголовок
             title_cell = ws_success.cell(row=1, column=1, value="Отчет по публикациям")
             title_cell.font = Font(bold=True, size=16, name="Calibri", color="1A1A2E")
             title_cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -197,7 +165,6 @@ class ReportGenerator:
                 cell.fill = header_fill
                 cell.alignment = header_alignment
                 cell.border = thin_border
-            
             ws_success.row_dimensions[2].height = 25
             
             # Данные
@@ -206,12 +173,9 @@ class ReportGenerator:
                     value = data.get(key, '')
                     cell = ws_success.cell(row=row_idx, column=col_idx, value=value)
                     
-                    if key == '№' or key == 'Дата' or key == 'Время публикации (МСК)':
+                    if key in ['№', 'Дата', 'Время публикации (МСК)']:
                         cell.alignment = text_alignment_center
-                    elif key == 'Ссылка на пост' and value:
-                        cell.font = link_font
-                        cell.alignment = text_alignment_left
-                    elif key == 'Ссылка (источник)' and value:
+                    elif key in ['Ссылка на пост', 'Ссылка (источник)'] and value:
                         cell.font = link_font
                         cell.alignment = text_alignment_left
                     else:
@@ -221,7 +185,7 @@ class ReportGenerator:
                     cell.border = thin_border
                     ws_success.row_dimensions[row_idx].height = 22
             
-            # Чередование цветов строк
+            # Чередование цветов
             for row_idx in range(3, len(success_data) + 3):
                 if row_idx % 2 == 1:
                     for col in range(1, 9):
@@ -229,26 +193,13 @@ class ReportGenerator:
                         cell.fill = PatternFill(start_color="F8F9FA", end_color="F8F9FA", fill_type="solid")
             
             # Ширина колонок
-            column_widths = {
-                'A': 5, 'B': 14, 'C': 18, 'D': 50, 'E': 40, 'F': 32, 'G': 18, 'H': 18
-            }
+            column_widths = {'A': 5, 'B': 14, 'C': 18, 'D': 50, 'E': 40, 'F': 32, 'G': 18, 'H': 18}
             for col_letter, width in column_widths.items():
                 ws_success.column_dimensions[col_letter].width = width
-            
             ws_success.freeze_panes = 'A3'
             
-            try:
-                ws_success.page_setup.orientation = PageSetup.ORIENTATION_LANDSCAPE
-                ws_success.page_setup.paperSize = PageSetup.PAPERSIZE_A4
-                ws_success.page_setup.fitToPage = True
-                ws_success.page_setup.fitToWidth = 1
-                ws_success.page_setup.fitToHeight = 0
-            except:
-                pass
-            
-            # === ЛИСТ 2: ОШИБКИ ===
+            # Лист с ошибками
             ws_errors = wb.create_sheet("Ошибки", 1)
-            
             error_title = ws_errors.cell(row=1, column=1, value="Ошибки публикации")
             error_title.font = Font(bold=True, size=16, name="Calibri", color="C00000")
             error_title.alignment = Alignment(horizontal="center", vertical="center")
@@ -265,7 +216,6 @@ class ReportGenerator:
                 cell.fill = error_header_fill
                 cell.alignment = header_alignment
                 cell.border = thin_border
-            
             ws_errors.row_dimensions[2].height = 25
             
             if not error_data:
@@ -295,24 +245,15 @@ class ReportGenerator:
             ws_errors.column_dimensions['B'].width = 65
             ws_errors.freeze_panes = 'A3'
             
-            try:
-                ws_errors.page_setup.orientation = PageSetup.ORIENTATION_LANDSCAPE
-                ws_errors.page_setup.paperSize = PageSetup.PAPERSIZE_A4
-                ws_errors.page_setup.fitToPage = True
-                ws_errors.page_setup.fitToWidth = 1
-                ws_errors.page_setup.fitToHeight = 0
-            except:
-                pass
-            
             wb.save(filepath)
-            logger.info(f"✅ Красивый Excel отчет создан: {filepath}")
+            logger.info(f"✅ Excel отчет создан: {filepath}")
             
         except Exception as e:
             logger.error(f"❌ Ошибка создания Excel отчета: {e}")
             raise
     
     def _create_csv_report(self, filepath, success_data, error_data):
-        """Создает CSV отчет с двумя секциями"""
+        """Создает CSV отчет"""
         try:
             with open(filepath, 'w', encoding='utf-8-sig', newline='') as f:
                 writer = csv.writer(f, delimiter=';')
@@ -352,42 +293,8 @@ class ReportGenerator:
             logger.error(f"❌ Ошибка создания CSV отчета: {e}")
             raise
     
-    def generate_error_report(self, user_id):
-        """Генерирует отдельный отчет только с ошибками"""
-        try:
-            user_folder = self.fm.get_user_folder(user_id)
-            
-            publications = self.db.get_publications(user_id)
-            
-            error_data = []
-            for pub in publications:
-                if pub.get('status') != 'success':
-                    error_data.append({
-                        'Папка': pub.get('folder_name', ''),
-                        'Ошибка': pub.get('error', 'Неизвестная ошибка')
-                    })
-            
-            if not error_data:
-                return None
-            
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            report_filename = f"Ошибки_{timestamp}.csv"
-            report_path = os.path.join(user_folder, report_filename)
-            
-            with open(report_path, 'w', encoding='utf-8-sig', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=['Папка', 'Ошибка'], delimiter=';')
-                writer.writeheader()
-                writer.writerows(error_data)
-            
-            logger.info(f"⚠️ Отчет об ошибках создан: {report_path}")
-            return report_path
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания отчета об ошибках: {e}")
-            return None
-    
     def cleanup_user_data(self, user_id, keep_report=True):
-        """Удаляет временные данные пользователя"""
+        """Удаляет временные данные"""
         try:
             user_folder = self.fm.get_user_folder(user_id)
             if not os.path.exists(user_folder):
@@ -409,71 +316,3 @@ class ReportGenerator:
                 
         except Exception as e:
             logger.error(f"❌ Ошибка очистки: {e}")
-    
-    def get_report_data(self, user_id):
-        """Возвращает данные для отчета в виде списка словарей"""
-        try:
-            publications = self.db.get_publications(user_id)
-            if not publications:
-                return []
-            
-            moscow_tz = pytz.timezone('Europe/Moscow')
-            report_data = []
-            current_date = None
-            index = 1
-            
-            for pub in publications:
-                folder_name = pub.get('folder_name')
-                chat_id = pub.get('group_id')
-                
-                metadata = self.db.get_ad_metadata(user_id, folder_name)
-                
-                # Время публикации - берем из created_at в publications
-                created_at = pub.get('created_at')
-                
-                if created_at:
-                    if isinstance(created_at, str):
-                        try:
-                            created_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-                        except:
-                            created_at = datetime.now(moscow_tz)
-                    
-                    if hasattr(created_at, 'tzinfo') and created_at.tzinfo is None:
-                        created_at = moscow_tz.localize(created_at)
-                    elif hasattr(created_at, 'tzinfo'):
-                        created_at = created_at.astimezone(moscow_tz)
-                    
-                    date_str = created_at.strftime('%d.%m.%Y')
-                    time_str = created_at.strftime('%H.%M')
-                else:
-                    now = datetime.now(moscow_tz)
-                    date_str = now.strftime('%d.%m.%Y')
-                    time_str = now.strftime('%H.%M')
-                
-                # Ссылка на пост - из chat_id
-                post_link = f"https://max.ru/c/{chat_id}" if chat_id else ""
-                
-                if pub.get('status') == 'success':
-                    if current_date != date_str:
-                        current_date = date_str
-                        display_date = date_str
-                    else:
-                        display_date = ''
-                    
-                    report_data.append({
-                        '№': index,
-                        'Дата': display_date,
-                        'Время публикации (МСК)': time_str,
-                        'Ссылка на пост': post_link,
-                        'Ссылка (источник)': metadata.get('Ссылка', ''),
-                        'Название': metadata.get('Название', ''),
-                        'Код предложения': metadata.get('Код предложения', ''),
-                        'Цена в лизинге': metadata.get('Цена в лизинге', ''),
-                    })
-                    index += 1
-            
-            return report_data
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения данных для отчета: {e}")
-            return []
