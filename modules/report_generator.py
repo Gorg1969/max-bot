@@ -49,13 +49,13 @@ class ReportGenerator:
                 # Получаем метаданные из БД
                 metadata = self.db.get_ad_metadata(user_id, folder_name)
                 
-                # ===== ВАЖНО: читаем post_link из metadata =====
+                # ===== ЧИТАЕМ post_link ИЗ МЕТАДАННЫХ =====
                 post_link = metadata.get('post_link', '')
                 
                 # Логируем для отладки
                 logger.info(f"🔗 Для папки {folder_name} post_link из БД: '{post_link}'")
                 
-                # Если ссылки нет, используем fallback (но это не должно происходить)
+                # Если ссылки нет, используем fallback
                 if not post_link and chat_id:
                     post_link = f"https://max.ru/c/{chat_id}"
                     logger.warning(f"⚠️ Ссылка для {folder_name} не найдена в БД, используем fallback")
@@ -92,7 +92,7 @@ class ReportGenerator:
                         '№': index,
                         'Дата': display_date,
                         'Время публикации (МСК)': time_str,
-                        'Ссылка на пост': post_link,  # <-- ИСПОЛЬЗУЕМ post_link из БД
+                        'Ссылка на пост': post_link,
                         'Ссылка (источник)': metadata.get('Ссылка', ''),
                         'Название': metadata.get('Название', ''),
                         'Код предложения': metadata.get('Код предложения', ''),
