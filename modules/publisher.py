@@ -22,7 +22,7 @@ class Publisher:
         self.STOP_FLAG = {}
         self.moscow_tz = pytz.timezone('Europe/Moscow')
         # Словарь для хранения временных данных до получения вебхука
-        self.pending_messages = {}  # key: (chat_id, message_id) -> {user_id, folder_name, metadata}
+        self.pending_messages = {}  # key: chat_id -> {user_id, folder_name, metadata}
 
     def extract_chat_id(self, folder_name):
         """Извлекает chat_id из названия папки с минусом"""
@@ -79,7 +79,6 @@ class Publisher:
             
             if response.status_code == 200:
                 logger.info(f"✅ Сообщение отправлено в чат {chat_id_with_dash}")
-                # Возвращаем True, но без post_link - его получим из вебхука
                 return True, None
             else:
                 logger.error(f"❌ Ошибка: {response.status_code} - {response.text}")
@@ -181,7 +180,7 @@ class Publisher:
             # Сохраняем метаданные без post_link (он придет из вебхука)
             metadata = self._parse_metadata(metadata_text)
             
-            # ВАЖНО: сохраняем текущее время
+            # Сохраняем время
             now = datetime.now(self.moscow_tz)
             timestamp = now.timestamp()
             
@@ -190,8 +189,8 @@ class Publisher:
             self.db.add_publication(user_id, folder_name, chat_id, status='pending')
             
             # Сохраняем в pending_messages для связывания с вебхуком
-            # Используем chat_id как ключ, т.к. message_id пока неизвестен
-            pending_key = f"{chat_id}_{folder_name}"
+            # Используем chat_id как ключ
+            pending_key = f"{chat_id}"
             self.pending_messages[pending_key] = {
                 'user_id': user_id,
                 'folder_name': folder_name,
@@ -210,36 +209,28 @@ class Publisher:
             traceback.print_exc()
             return False, str(e)
 
-    def handle_message_created(self, event_data):
+    def handle_message_created(self, chat_id, message_id, user_id=None):
         """Обрабатывает событие message_created из вебхука"""
         try:
-            # Извлекаем данные из события
-            message = event_data.get('message', {})
-            chat_id = message.get('chat_id')
-            message_id = message.get('id')
-            text = message.get('body', {}).get('text', '')
-            
             if not chat_id or not message_id:
-                logger.warning(f"⚠️ Неполные данные в вебхуке: {event_data}")
+                logger.warning(f"⚠️ Неполные данные: chat_id={chat_id}, message_id={message_id}")
                 return False
             
+            logger.info(f"📨 Обработка message_created: chat_id={chat_id}, message_id={message_id}")
+            
             # Ищем соответствующую запись в pending_messages
-            # Пробуем найти по chat_id и тексту
             found = False
             for key, data in list(self.pending_messages.items()):
                 if data['chat_id'] == chat_id:
-                    # Проверяем, что текст сообщения соответствует
-                    # Для надежности можно проверить по времени (в пределах 5 минут)
                     folder_name = data['folder_name']
-                    user_id = data['user_id']
-                    metadata = data['metadata']
+                    user_id_from_pending = data['user_id']
                     
                     # Формируем полную ссылку
                     post_link = f"https://max.ru/c/{chat_id}/{message_id}"
                     
                     # Обновляем метаданные в БД
-                    self.db.update_post_link(user_id, folder_name, post_link)
-                    self.db.update_publication_status(user_id, folder_name, 'success')
+                    self.db.update_post_link(user_id_from_pending, folder_name, post_link)
+                    self.db.update_publication_status(user_id_from_pending, folder_name, 'success')
                     
                     # Удаляем из pending
                     del self.pending_messages[key]
@@ -249,9 +240,7 @@ class Publisher:
                     break
             
             if not found:
-                # Если не нашли в pending, возможно это сообщение от другого бота
-                # Можно сохранить для истории или просто проигнорировать
-                logger.info(f"ℹ️ Получен вебхук для сообщения {message_id} в чате {chat_id}, но нет pending записи")
+                logger.info(f"ℹ️ Нет pending записи для chat_id {chat_id}, message_id {message_id}")
             
             return True
             
