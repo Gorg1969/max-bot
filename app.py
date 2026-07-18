@@ -158,7 +158,7 @@ class APIClient:
             return None
 
 api = APIClient()
-publisher = Publisher(db, TOKEN, TOKEN, api)  # db, bot_token, max_token, api
+publisher = Publisher(api, fm, db)
 report_gen = ReportGenerator(fm, db)
 
 # ========== HTML СТРАНИЦА С CHUNKED UPLOAD ==========
