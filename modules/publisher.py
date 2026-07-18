@@ -34,7 +34,7 @@ class Publisher:
 
             start_time = time.time()
             
-            # 1. Извлекаем chat_id
+            # 1. Извлекаем chat_id (С МИНУСОМ для групп)
             chat_id = self.extract_chat_id(folder_name)
             if not chat_id:
                 error_msg = f"Не удалось извлечь chat_id из {folder_name}"
@@ -52,12 +52,12 @@ class Publisher:
 
             for i in range(max_images):
                 if self.STOP_FLAG.get(user_id, False):
-                    self.db.add_publication(user_id, folder_name, f"-{chat_id}", status='error', error='Остановка пользователем')
+                    self.db.add_publication(user_id, folder_name, chat_id, status='error', error='Остановка пользователем')
                     return False, "Остановка пользователем"
                 
                 if time.time() - start_time > self.FOLDER_TIMEOUT:
                     error_msg = f"Таймаут обработки папки {folder_name}"
-                    self.db.add_publication(user_id, folder_name, f"-{chat_id}", status='error', error=error_msg)
+                    self.db.add_publication(user_id, folder_name, chat_id, status='error', error=error_msg)
                     return False, error_msg
 
                 img_data = images_data[i]
@@ -73,7 +73,7 @@ class Publisher:
 
             logger.info(f"📦 Загружено {len(image_tokens)} из {max_images} изображений")
 
-            # 3. Отправляем сообщение в чат
+            # 3. Отправляем сообщение в чат (chat_id уже с минусом)
             post_link = None
             if image_tokens:
                 success, post_link = self._send_to_chat(chat_id, ad_text, image_tokens)
@@ -91,7 +91,7 @@ class Publisher:
 
             if not success:
                 error_msg = "Не удалось отправить сообщение"
-                self.db.add_publication(user_id, folder_name, f"-{chat_id}", status='error', error=error_msg)
+                self.db.add_publication(user_id, folder_name, chat_id, status='error', error=error_msg)
                 return False, error_msg
 
             # 4. Сохраняем метаданные
@@ -100,11 +100,11 @@ class Publisher:
             if post_link:
                 metadata['post_link'] = post_link
             else:
-                chat_id_with_dash = f"-{chat_id}" if not str(chat_id).startswith('-') else chat_id
-                metadata['post_link'] = f"https://max.ru/c/{chat_id_with_dash}"
+                # chat_id уже с минусом
+                metadata['post_link'] = f"https://max.ru/c/{chat_id}"
 
-            self.db.save_ad_metadata(user_id, folder_name, f"-{chat_id}", metadata, time.time())
-            self.db.add_publication(user_id, folder_name, f"-{chat_id}", status='success')
+            self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, time.time())
+            self.db.add_publication(user_id, folder_name, chat_id, status='success')
 
             return True, f"✅ Папка {folder_name} опубликована с {len(image_tokens)} фото"
 
@@ -115,23 +115,34 @@ class Publisher:
             traceback.print_exc()
             
             chat_id = self.extract_chat_id(folder_name) or 'unknown'
-            self.db.add_publication(user_id, folder_name, f"-{chat_id}", status='error', error=error_msg)
+            self.db.add_publication(user_id, folder_name, chat_id, status='error', error=error_msg)
             
             return False, error_msg
 
     def extract_chat_id(self, folder_name: str) -> Optional[str]:
-        """Извлекает chat_id из имени папки"""
+        """
+        Извлекает chat_id из имени папки с сохранением минуса для групп
+        
+        Примеры:
+        - "1/7 -76868172202744" -> "-76868172202744"
+        - "1 -123456789" -> "-123456789"
+        - "folder_123" -> "123"
+        """
         if not folder_name:
             return None
         
-        # Ищем формат с дефисом: "1 -123456789"
-        match = re.search(r'(\d+)\s*-\s*(\d+)', folder_name)
+        # Ищем формат с дефисом и пробелом: "1/7 -76868172202744" -> "-76868172202744"
+        # или "1 -123456789" -> "-123456789"
+        match = re.search(r'-\s*(\d+)', folder_name)
         if match:
-            return match.group(2)
+            return f"-{match.group(1)}"
         
-        # Ищем любое число
+        # Ищем просто число без минуса (личный чат)
         match = re.search(r'(\d+)', folder_name)
-        return match.group(1) if match else None
+        if match:
+            return match.group(1)
+        
+        return None
 
     def _upload_file_to_max(self, image_data, user_id: int) -> Optional[str]:
         """Загружает файл в Max и возвращает токен"""
@@ -183,15 +194,23 @@ class Publisher:
                 logger.error("❌ Нет chat_id для отправки")
                 return False, None
 
-            if image_tokens:
-                success = self.api.send_message_with_attachments(chat_id, text, image_tokens)
+            # Убеждаемся что chat_id с минусом для групп
+            # Если chat_id начинается с минуса - это группа, иначе личный чат
+            if not chat_id.startswith('-'):
+                # Если это не группа, пробуем добавить минус
+                # (на случай если извлекли без минуса)
+                chat_id_with_dash = f"-{chat_id}"
             else:
-                success = self.api.send_message_to_chat(chat_id, text)
+                chat_id_with_dash = chat_id
+
+            if image_tokens:
+                success = self.api.send_message_with_attachments(chat_id_with_dash, text, image_tokens)
+            else:
+                success = self.api.send_message_to_chat(chat_id_with_dash, text)
 
             if success:
-                chat_id_with_dash = f"-{chat_id}" if not str(chat_id).startswith('-') else chat_id
                 post_link = f"https://max.ru/c/{chat_id_with_dash}"
-                logger.info(f"✅ Сообщение отправлено в чат {chat_id}")
+                logger.info(f"✅ Сообщение отправлено в чат {chat_id_with_dash}")
                 return True, post_link
 
             return False, None
@@ -201,13 +220,12 @@ class Publisher:
             return False, None
 
     def _send_to_user(self, user_id: int, text: str, image_tokens: List[str]) -> Tuple[bool, Optional[str]]:
-        """Отправляет сообщение пользователю"""
+        """Отправляет сообщение пользователю (резервный вариант)"""
         try:
             if not self.api:
                 logger.error("❌ API клиент не установлен")
                 return False, None
 
-            # Если есть фото, отправляем с вложениями
             if image_tokens:
                 attachments = [{"type": "image", "payload": {"token": t}} for t in image_tokens[:3]]
                 success = self.api.send_message(user_id, text, attachments)
