@@ -6,6 +6,7 @@ import requests
 import threading
 import json
 from datetime import datetime
+import pytz
 
 logger = logging.getLogger(__name__)
 
@@ -16,26 +17,21 @@ class Publisher:
         self.db = db
         self.active_publishes = {}
         self.publish_threads = {}
-        self.FOLDER_TIMEOUT = 120  # Увеличен таймаут
+        self.FOLDER_TIMEOUT = 120
         self.STOP_FLAG = {}
+        self.moscow_tz = pytz.timezone('Europe/Moscow')
 
     def extract_chat_id(self, folder_name):
-        """
-        Извлекает chat_id из названия папки.
-        ВОЗВРАЩАЕТ С МИНУСОМ для групп!
-        Пример: "1/7 -76868172202744" -> "-76868172202744"
-        """
+        """Извлекает chat_id из названия папки с минусом"""
         if not folder_name:
             return None
         
-        # Ищем формат с дефисом: "1/7 -76868172202744" -> "-76868172202744"
         match = re.search(r'-\s*(\d+)', folder_name)
         if match:
             chat_id = match.group(1)
             if len(chat_id) >= 10:
                 return f"-{chat_id}"
         
-        # Ищем любое число
         match = re.search(r'(\d{10,})', folder_name)
         if match:
             return match.group(1)
@@ -43,15 +39,11 @@ class Publisher:
         return None
 
     def _send_to_chat(self, chat_id, text, image_tokens):
-        """
-        Отправляет сообщение в чат с прикрепленными фото.
-        chat_id уже приходит С МИНУСОМ из extract_chat_id.
-        """
+        """Отправляет сообщение в чат и возвращает полную ссылку с ID поста"""
         try:
             if not self.api.token:
                 return False, None
             
-            # Формируем вложения (максимум 10 фото)
             attachments = []
             for token in image_tokens[:10]:
                 attachments.append({
@@ -59,7 +51,6 @@ class Publisher:
                     "payload": {"token": token}
                 })
             
-            # Формируем payload
             payload = {
                 "text": text,
                 "format": "markdown"
@@ -68,7 +59,6 @@ class Publisher:
             if attachments:
                 payload["attachments"] = attachments
             
-            # chat_id уже с минусом
             chat_id_with_dash = chat_id if str(chat_id).startswith('-') else f"-{chat_id}"
             
             logger.info(f"📤 Отправка в чат {chat_id_with_dash} с {len(attachments)} фото")
@@ -86,17 +76,35 @@ class Publisher:
             
             if response.status_code == 200:
                 result = response.json()
-                # Получаем ссылку на пост
-                post_link = None
+                logger.info(f"📨 Ответ сервера: {result}")
+                
+                # Пытаемся получить ID сообщения
+                message_id = None
                 if 'data' in result and 'id' in result['data']:
                     message_id = result['data']['id']
-                    post_link = f"https://max.ru/c/{chat_id_with_dash}/{message_id}"
-                elif 'post' in result:
-                    post_link = result['post']
-                else:
-                    post_link = f"https://max.ru/c/{chat_id_with_dash}"
+                elif 'id' in result:
+                    message_id = result['id']
+                elif 'message_id' in result:
+                    message_id = result['message_id']
+                elif 'post_id' in result:
+                    message_id = result['post_id']
                 
-                logger.info(f"✅ Сообщение отправлено в чат {chat_id_with_dash}")
+                # Формируем полную ссылку
+                if message_id:
+                    post_link = f"https://max.ru/c/{chat_id_with_dash}/{message_id}"
+                else:
+                    # Если ID не получен, пробуем другие поля
+                    if 'post' in result:
+                        post_link = result['post']
+                    elif 'link' in result:
+                        post_link = result['link']
+                    elif 'url' in result:
+                        post_link = result['url']
+                    else:
+                        post_link = f"https://max.ru/c/{chat_id_with_dash}"
+                        logger.warning(f"⚠️ Не удалось получить ID поста")
+                
+                logger.info(f"✅ Ссылка на пост: {post_link}")
                 return True, post_link
             else:
                 logger.error(f"❌ Ошибка: {response.status_code} - {response.text}")
@@ -107,7 +115,7 @@ class Publisher:
             return False, None
 
     def _send_to_user(self, user_id, text, image_tokens):
-        """Отправляет сообщение в личные сообщения пользователя (резерв)"""
+        """Отправляет сообщение пользователю (резерв)"""
         try:
             if not self.api.token:
                 return False, None
@@ -128,8 +136,6 @@ class Publisher:
             if attachments:
                 payload["attachments"] = attachments
             
-            logger.info(f"📤 Отправка пользователю {user_id} с {len(attachments)} фото")
-            
             response = requests.post(
                 f"{self.api.base_url}/messages",
                 headers={
@@ -142,8 +148,16 @@ class Publisher:
             )
             
             if response.status_code == 200:
+                result = response.json()
+                message_id = None
+                if 'data' in result and 'id' in result['data']:
+                    message_id = result['data']['id']
+                elif 'id' in result:
+                    message_id = result['id']
+                
+                post_link = f"https://max.ru/c/{user_id}/{message_id}" if message_id else None
                 logger.info(f"✅ Сообщение отправлено пользователю {user_id}")
-                return True, None
+                return True, post_link
             else:
                 logger.error(f"❌ Ошибка: {response.status_code} - {response.text}")
                 return False, None
@@ -173,15 +187,12 @@ class Publisher:
         return metadata
 
     def publish_folder_with_tokens(self, user_id, folder_name, ad_text, metadata_text, image_tokens):
-        """
-        Публикует папку с уже загруженными токенами фото
-        """
+        """Публикует папку с уже загруженными токенами фото"""
         try:
             if self.STOP_FLAG.get(user_id, False):
                 logger.info(f"⏹️ Пропускаем папку {folder_name} - остановка")
                 return False, "Остановка пользователем"
             
-            # 1. Извлекаем chat_id (С МИНУСОМ)
             chat_id = self.extract_chat_id(folder_name)
             if not chat_id:
                 logger.error(f"❌ Не удалось извлечь chat_id из: {folder_name}")
@@ -190,25 +201,34 @@ class Publisher:
             logger.info(f"📤 Извлечен chat_id: {chat_id}")
             logger.info(f"📸 Получено {len(image_tokens)} токенов фото")
             
-            # 2. Отправляем сообщение в чат с фото
+            # Отправляем сообщение
             success, post_link = self._send_to_chat(chat_id, ad_text, image_tokens)
             
-            # Если не удалось отправить в чат, пробуем в личные сообщения
             if not success:
                 logger.warning("⚠️ Отправка в чат не удалась, пробуем в личные сообщения...")
-                success, _ = self._send_to_user(user_id, ad_text, image_tokens)
+                success, post_link = self._send_to_user(user_id, ad_text, image_tokens)
             
             if not success:
                 return False, "Не удалось отправить сообщение"
             
-            # 3. Сохраняем метаданные для отчета
+            # Сохраняем метаданные
             metadata = self._parse_metadata(metadata_text)
+            
             if post_link:
                 metadata['post_link'] = post_link
+                logger.info(f"🔗 Сохранена ссылка: {post_link}")
             else:
-                metadata['post_link'] = f"https://max.ru/c/{chat_id}"
+                fallback_link = f"https://max.ru/c/{chat_id}"
+                metadata['post_link'] = fallback_link
+                logger.warning(f"⚠️ Использована ссылка без ID: {fallback_link}")
             
-            self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, time.time())
+            # ВАЖНО: сохраняем текущее время в правильном формате
+            now = datetime.now(self.moscow_tz)
+            timestamp = now.timestamp()
+            
+            logger.info(f"🕐 Время публикации: {now.strftime('%d.%m.%Y %H:%M:%S')}")
+            
+            self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, timestamp)
             self.db.add_publication(user_id, folder_name, chat_id)
             
             return True, f"✅ Папка {folder_name} опубликована с {len(image_tokens)} фото"
@@ -219,17 +239,12 @@ class Publisher:
             traceback.print_exc()
             return False, str(e)
 
-    # Оставляем старый метод для обратной совместимости
     def publish_single_folder(self, user_id, folder_name, ad_text, metadata_text, images_data):
-        """
-        Старый метод - загружает фото и публикует.
-        Теперь использует publish_folder_with_tokens
-        """
+        """Старый метод - загружает фото и публикует"""
         try:
             if self.STOP_FLAG.get(user_id, False):
                 return False, "Остановка пользователем"
             
-            # Загружаем фото через API
             image_tokens = []
             max_images = min(len(images_data), 10) if isinstance(images_data, list) else 0
             
@@ -241,7 +256,6 @@ class Publisher:
                 if not img_data:
                     continue
                 
-                # Извлекаем байты
                 if isinstance(img_data, dict):
                     data = img_data.get('data')
                     if isinstance(data, list):
@@ -258,7 +272,6 @@ class Publisher:
                     image_tokens.append(token)
                     time.sleep(0.3)
             
-            # Публикуем с токенами
             return self.publish_folder_with_tokens(
                 user_id, folder_name, ad_text, metadata_text, image_tokens
             )
@@ -268,7 +281,7 @@ class Publisher:
             return False, str(e)
 
     def stop(self, user_id):
-        """Останавливает публикацию и удаляет все файлы пользователя"""
+        """Останавливает публикацию"""
         logger.info(f"⏹️ Остановка публикации для пользователя {user_id}")
         self.STOP_FLAG[user_id] = True
         
