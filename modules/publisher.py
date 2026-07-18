@@ -1,3 +1,4 @@
+# modules/publisher.py
 import logging
 import os
 import time
@@ -80,19 +81,41 @@ class Publisher:
                 
                 # Пытаемся получить ID сообщения
                 message_id = None
-                if 'data' in result and 'id' in result['data']:
-                    message_id = result['data']['id']
-                elif 'id' in result:
-                    message_id = result['id']
-                elif 'message_id' in result:
-                    message_id = result['message_id']
-                elif 'post_id' in result:
-                    message_id = result['post_id']
+                post_link = None
                 
-                # Формируем полную ссылку
+                # 1. Пробуем извлечь id из data
+                if 'data' in result and isinstance(result['data'], dict):
+                    if 'id' in result['data']:
+                        message_id = result['data']['id']
+                    elif 'message_id' in result['data']:
+                        message_id = result['data']['message_id']
+                    elif 'post_id' in result['data']:
+                        message_id = result['data']['post_id']
+                
+                # 2. Пробуем извлечь id из корня
+                if not message_id:
+                    if 'id' in result:
+                        message_id = result['id']
+                    elif 'message_id' in result:
+                        message_id = result['message_id']
+                    elif 'post_id' in result:
+                        message_id = result['post_id']
+                
+                # 3. Пробуем извлечь id из вложенных полей
+                if not message_id:
+                    for key in ['post', 'link', 'url', 'permalink']:
+                        if key in result and isinstance(result[key], str):
+                            # Пробуем извлечь id из ссылки
+                            match = re.search(r'/([a-zA-Z0-9_-]{10,})$', result[key])
+                            if match:
+                                message_id = match.group(1)
+                                post_link = result[key]
+                                break
+                
+                # 4. Формируем полную ссылку
                 if message_id:
                     post_link = f"https://max.ru/c/{chat_id_with_dash}/{message_id}"
-                else:
+                elif not post_link:
                     # Если ID не получен, пробуем другие поля
                     if 'post' in result:
                         post_link = result['post']
@@ -150,12 +173,33 @@ class Publisher:
             if response.status_code == 200:
                 result = response.json()
                 message_id = None
-                if 'data' in result and 'id' in result['data']:
-                    message_id = result['data']['id']
-                elif 'id' in result:
-                    message_id = result['id']
+                post_link = None
                 
-                post_link = f"https://max.ru/c/{user_id}/{message_id}" if message_id else None
+                # 1. Пробуем извлечь id из data
+                if 'data' in result and isinstance(result['data'], dict):
+                    if 'id' in result['data']:
+                        message_id = result['data']['id']
+                    elif 'message_id' in result['data']:
+                        message_id = result['data']['message_id']
+                    elif 'post_id' in result['data']:
+                        message_id = result['data']['post_id']
+                
+                # 2. Пробуем извлечь id из корня
+                if not message_id:
+                    if 'id' in result:
+                        message_id = result['id']
+                    elif 'message_id' in result:
+                        message_id = result['message_id']
+                    elif 'post_id' in result:
+                        message_id = result['post_id']
+                
+                # 3. Формируем ссылку
+                if message_id:
+                    post_link = f"https://max.ru/c/{user_id}/{message_id}"
+                else:
+                    post_link = f"https://max.ru/c/{user_id}"
+                    logger.warning(f"⚠️ Не удалось получить ID поста для пользователя")
+                
                 logger.info(f"✅ Сообщение отправлено пользователю {user_id}")
                 return True, post_link
             else:
