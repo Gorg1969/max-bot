@@ -8,7 +8,6 @@ import urllib3
 import json
 import threading
 import time
-import base64
 from werkzeug.exceptions import ClientDisconnected
 from modules import Database, FileManager, Publisher, WebInterface
 from modules.report_generator import ReportGenerator
@@ -17,7 +16,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
+app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -31,10 +30,6 @@ if not TOKEN:
 
 db = Database()
 fm = FileManager(DATA_DIR)
-
-# Глобальные переменные для управления очередью
-active_queues = {}
-queue_lock = threading.Lock()
 
 class APIClient:
     def __init__(self):
@@ -90,7 +85,7 @@ class APIClient:
             return False
         try:
             attachments = []
-            for token in tokens[:3]:
+            for token in tokens[:10]:  # ИЗМЕНЕНО: 3 -> 10
                 attachments.append({
                     "type": "image",
                     "payload": {"token": token}
@@ -121,47 +116,11 @@ class APIClient:
             logger.error(f"❌ Ошибка: {e}")
             return False
 
-    def upload_file(self, file_data, filename='image.jpg'):
-        """Загрузка файла на сервер MAX"""
-        if not self.token:
-            logger.error("❌ Нет токена для загрузки файла")
-            return None
-        try:
-            if isinstance(file_data, bytes):
-                files = {'file': (filename, file_data, 'image/jpeg')}
-            else:
-                logger.error(f"❌ Неподдерживаемый формат данных: {type(file_data)}")
-                return None
-            
-            response = requests.post(
-                f"{self.base_url}/files/upload",
-                headers={"Authorization": self.token},
-                files=files,
-                timeout=60,
-                verify=False
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                token = result.get('token') or result.get('data', {}).get('token') or result.get('id')
-                if token:
-                    logger.info(f"✅ Файл загружен: {token[:20] if token else 'None'}...")
-                    return token
-                else:
-                    logger.error(f"❌ Не удалось получить токен: {result}")
-                    return None
-            else:
-                logger.error(f"❌ Ошибка загрузки файла: {response.status_code} - {response.text}")
-                return None
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки файла: {e}")
-            return None
-
 api = APIClient()
 publisher = Publisher(api, fm, db)
 report_gen = ReportGenerator(fm, db)
 
-# ========== HTML СТРАНИЦА С CHUNKED UPLOAD ==========
+# ========== HTML СТРАНИЦА ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -169,76 +128,46 @@ UPLOAD_PAGE = """
     <meta charset="UTF-8">
     <title>Загрузка объявлений</title>
     <style>
-        * { box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; max-width: 900px; margin: 30px auto; padding: 20px; background: #f0f2f5; }
-        .container { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h1 { color: #1a1a2e; margin-top: 0; display: flex; align-items: center; gap: 10px; }
-        .drop-zone { border: 2px dashed #4a6fa5; padding: 50px 20px; margin: 20px 0; border-radius: 12px; background: #f8faff; text-align: center; cursor: pointer; transition: all 0.3s; }
-        .drop-zone:hover { background: #eef4ff; border-color: #2d4a7a; }
+        body { font-family: Arial; max-width: 800px; margin: 50px auto; padding: 20px; background: #f5f5f5; }
+        .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #333; margin-top: 0; }
+        .drop-zone { border: 2px dashed #007bff; padding: 40px; margin: 20px 0; border-radius: 10px; background: #f8f9fa; text-align: center; cursor: pointer; transition: all 0.3s; }
+        .drop-zone:hover { background: #e3f2fd; }
         .drop-zone.dragover { background: #d4edda; border-color: #28a745; }
-        .drop-zone .icon { font-size: 56px; display: block; margin-bottom: 10px; }
-        .drop-zone p { margin: 5px 0; color: #555; }
+        .drop-zone p { margin: 0; color: #666; }
+        .drop-zone .icon { font-size: 48px; display: block; margin-bottom: 10px; }
         input[type="file"] { display: none; }
-        .btn { padding: 12px 28px; border: none; border-radius: 8px; cursor: pointer; font-size: 15px; font-weight: 600; transition: all 0.3s; }
-        .btn-primary { background: #4a6fa5; color: white; }
-        .btn-primary:hover { background: #2d4a7a; transform: translateY(-1px); }
+        .btn { padding: 12px 30px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; font-weight: bold; transition: all 0.3s; }
+        .btn-primary { background: #007bff; color: white; }
+        .btn-primary:hover { background: #0056b3; }
         .btn-success { background: #28a745; color: white; }
-        .btn-success:hover { background: #1e7e34; transform: translateY(-1px); }
+        .btn-success:hover { background: #218838; }
         .btn-danger { background: #dc3545; color: white; }
-        .btn-danger:hover { background: #b02a37; transform: translateY(-1px); }
-        .btn-stop { background: #fd7e14; color: white; }
-        .btn-stop:hover { background: #e06b0a; transform: translateY(-1px); }
-        .btn-warning { background: #ffc107; color: #333; }
-        .btn-warning:hover { background: #e0a800; transform: translateY(-1px); }
-        .btn-outline { background: transparent; color: #4a6fa5; border: 2px solid #4a6fa5; }
-        .btn-outline:hover { background: #4a6fa5; color: white; }
-        .status { margin-top: 20px; padding: 15px 20px; border-radius: 8px; display: none; }
+        .btn-danger:hover { background: #c82333; }
+        .status { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
         .status.success { background: #d4edda; color: #155724; display: block; border-left: 4px solid #28a745; }
         .status.error { background: #f8d7da; color: #721c24; display: block; border-left: 4px solid #dc3545; }
         .status.info { background: #d1ecf1; color: #0c5460; display: block; border-left: 4px solid #17a2b8; }
         .status.warning { background: #fff3cd; color: #856404; display: block; border-left: 4px solid #ffc107; }
-        .status.stop { background: #f8d7da; color: #721c24; display: block; border-left: 4px solid #dc3545; }
-        .file-list { text-align: left; margin: 15px 0; padding: 0; list-style: none; max-height: 300px; overflow-y: auto; }
-        .file-list li { background: #f8f9fa; padding: 10px 15px; margin: 4px 0; border-radius: 6px; border-left: 3px solid #4a6fa5; display: flex; justify-content: space-between; align-items: center; }
-        .file-list li .count { background: #4a6fa5; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
-        .file-list li .status-badge { padding: 2px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
-        .file-list li .status-badge.pending { background: #ffc107; color: #333; }
-        .file-list li .status-badge.error { background: #dc3545; color: white; }
-        .file-list li .status-badge.done { background: #28a745; color: white; }
-        .file-list li .status-badge.stopped { background: #dc3545; color: white; }
-        .progress-bar { width: 100%; height: 28px; background: #e9ecef; border-radius: 14px; overflow: hidden; margin: 15px 0; display: none; }
-        .progress-bar .progress { height: 100%; background: linear-gradient(90deg, #28a745, #20c997); transition: width 0.4s; width: 0%; display: flex; align-items: center; justify-content: center; color: white; font-size: 13px; font-weight: 600; }
-        .progress-bar .progress.stopped { background: linear-gradient(90deg, #dc3545, #c82333); }
-        .instructions { background: #fff8e1; padding: 15px 20px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #ffc107; font-size: 14px; line-height: 1.6; }
-        .instructions code { background: #f8f9fa; padding: 2px 8px; border-radius: 4px; font-size: 13px; color: #d63384; }
-        #log { background: #1e1e2e; color: #cdd6f4; padding: 15px; border-radius: 8px; font-family: 'Courier New', monospace; font-size: 12px; max-height: 350px; overflow-y: auto; margin: 15px 0; display: none; white-space: pre-wrap; line-height: 1.6; }
+        .file-list { text-align: left; margin: 20px 0; padding: 0; list-style: none; }
+        .file-list li { background: #f8f9fa; padding: 10px 15px; margin: 5px 0; border-radius: 5px; border-left: 3px solid #007bff; display: flex; justify-content: space-between; align-items: center; }
+        .file-list li .count { background: #007bff; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
+        .progress-bar { width: 100%; height: 25px; background: #e9ecef; border-radius: 10px; overflow: hidden; margin: 10px 0; display: none; }
+        .progress-bar .progress { height: 100%; background: linear-gradient(90deg, #28a745, #20c997); transition: width 0.3s; width: 0%; display: flex; align-items: center; justify-content: center; color: white; font-size: 12px; font-weight: bold; }
+        .instructions { background: #fff3cd; padding: 15px 20px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107; }
+        .instructions code { background: #f8f9fa; padding: 2px 8px; border-radius: 3px; font-size: 14px; color: #d63384; }
+        #log { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; font-family: 'Courier New', monospace; font-size: 12px; max-height: 300px; overflow-y: auto; margin: 20px 0; display: none; white-space: pre-wrap; line-height: 1.5; }
         .button-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px; }
-        .selected-info { background: #e7f5ff; padding: 12px 18px; border-radius: 8px; margin: 10px 0; border-left: 3px solid #4a6fa5; }
-        .footer { text-align: center; margin-top: 30px; color: #999; font-size: 13px; border-top: 1px solid #eee; padding-top: 20px; }
+        .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
+        .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; }
         .report-section { margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 10px; border: 1px solid #dee2e6; text-align: center; }
-        .report-section h3 { margin-top: 0; color: #1a1a2e; }
-        .report-section .btn-group { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
-        .queue-info { background: #e7f5ff; padding: 12px 18px; border-radius: 8px; margin: 10px 0; border-left: 3px solid #4a6fa5; display: none; font-weight: 500; }
-        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 15px 0; }
-        .stats .stat { background: #f8f9fa; padding: 12px; border-radius: 8px; text-align: center; }
-        .stats .stat .num { font-size: 24px; font-weight: 700; }
-        .stats .stat .label { font-size: 12px; color: #666; }
-        .stats .stat.success-stat .num { color: #28a745; }
-        .stats .stat.error-stat .num { color: #dc3545; }
-        .stats .stat.total-stat .num { color: #4a6fa5; }
-        .chunk-info { font-size: 12px; color: #666; margin-top: 5px; }
-        @media (max-width: 600px) {
-            body { padding: 10px; margin: 10px; }
-            .container { padding: 15px; }
-            .stats { grid-template-columns: 1fr; }
-            .button-group { flex-direction: column; }
-            .btn { width: 100%; }
-        }
+        .stop-btn { background: #dc3545; color: white; }
+        .stop-btn:hover { background: #c82333; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>📤 Загрузка объявлений в MAX</h1>
+        <h1>📤 Загрузка объявлений</h1>
         
         <div class="instructions">
             <strong>📌 Как подготовить папку:</strong><br>
@@ -255,10 +184,8 @@ UPLOAD_PAGE = """
         <div class="drop-zone" id="dropZone">
             <span class="icon">📂</span>
             <p><strong>Перетащите головную папку сюда</strong></p>
-            <p style="font-size: 14px; color: #888;">или</p>
             <button class="btn btn-primary" onclick="document.getElementById('folderInput').click()">Выбрать папку</button>
             <input type="file" id="folderInput" webkitdirectory multiple>
-            <div class="chunk-info">📦 Загрузка по частям (макс. 50MB за раз)</div>
         </div>
         
         <div id="fileList" style="display:none;">
@@ -266,25 +193,8 @@ UPLOAD_PAGE = """
             <ul class="file-list" id="fileListContent"></ul>
             <div class="button-group">
                 <button class="btn btn-success" onclick="uploadFolder()">🚀 Загрузить</button>
-                <button class="btn btn-stop" onclick="stopProcessing()">⏹ Остановить</button>
+                <button class="btn btn-danger stop-btn" onclick="stopProcessing()">⏹ Остановить</button>
                 <button class="btn btn-danger" onclick="clearFiles()">🗑️ Очистить</button>
-            </div>
-        </div>
-        
-        <div class="queue-info" id="queueInfo"></div>
-        
-        <div class="stats" id="stats" style="display:none;">
-            <div class="stat total-stat">
-                <div class="num" id="totalCount">0</div>
-                <div class="label">Всего папок</div>
-            </div>
-            <div class="stat success-stat">
-                <div class="num" id="successCount">0</div>
-                <div class="label">✅ Успешно</div>
-            </div>
-            <div class="stat error-stat">
-                <div class="num" id="errorCount">0</div>
-                <div class="label">❌ Ошибок</div>
             </div>
         </div>
         
@@ -296,35 +206,20 @@ UPLOAD_PAGE = """
         <div id="log"></div>
         
         <div class="report-section">
-            <h3>📊 Отчеты</h3>
-            <p style="color: #666; font-size: 14px; margin-bottom: 15px;">
-                После завершения публикации скачайте отчеты. Данные будут автоматически очищены.
-            </p>
-            <div class="btn-group">
-                <button class="btn btn-success" onclick="getReport()">📥 Отчет (успешные)</button>
-                <button class="btn btn-warning" onclick="getErrorReport()">⚠️ Отчет (ошибки)</button>
-            </div>
-            <div style="margin-top: 15px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;">
-                <button class="btn btn-outline" onclick="getStats()" style="font-size: 13px;">📊 Статистика</button>
-            </div>
+            <button class="btn btn-primary" onclick="getReport()">📊 Скачать отчет</button>
+            <p style="margin-top: 10px; color: #666; font-size: 14px;">После публикации всех папок</p>
         </div>
         
-        <div class="footer">⚡ MAX Bot | Загрузка объявлений v2.0</div>
+        <div class="footer">⚡ MAX Bot | Загрузка объявлений</div>
     </div>
 
     <script>
         const urlParams = new URLSearchParams(window.location.search);
         const userId = urlParams.get('user_id') || 151296248;
-        const CHUNK_SIZE = 2 * 1024 * 1024;
         
         let selectedFiles = [];
         let isProcessing = false;
         let isStopped = false;
-        let processedCount = 0;
-        let totalFolders = 0;
-        let folderResults = [];
-        let successCount = 0;
-        let errorCount = 0;
         
         const dropZone = document.getElementById('dropZone');
         const folderInput = document.getElementById('folderInput');
@@ -335,8 +230,6 @@ UPLOAD_PAGE = """
         const logDiv = document.getElementById('log');
         const progressBar = document.getElementById('progressBar');
         const progress = document.getElementById('progress');
-        const queueInfo = document.getElementById('queueInfo');
-        const statsDiv = document.getElementById('stats');
 
         dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
         dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('dragover'); });
@@ -405,14 +298,12 @@ UPLOAD_PAGE = """
                 const count = fileCount[folder] || 0;
                 const displayName = folder.includes('/') ? folder.split('/')[1] : folder;
                 li.innerHTML = `<span>📁 <strong>${displayName}</strong></span><span class="count">${count} файлов</span>`;
-                li.id = `folder-${folder.replace(/[^a-zA-Z0-9]/g, '_')}`;
                 fileListContent.appendChild(li);
             });
             
             selectedInfo.textContent = `✅ Выбрано ${sortedFolders.length} папок, всего ${files.length} файлов`;
             fileList.style.display = 'block';
             showStatus('info', '📦 Нажмите "Загрузить" для отправки');
-            statsDiv.style.display = 'none';
         }
 
         function clearFiles() {
@@ -420,19 +311,11 @@ UPLOAD_PAGE = """
             fileList.style.display = 'none';
             statusDiv.style.display = 'none';
             progressBar.style.display = 'none';
-            queueInfo.style.display = 'none';
-            statsDiv.style.display = 'none';
             logDiv.style.display = 'none';
             progress.style.width = '0%';
             progress.textContent = '0%';
-            progress.className = 'progress';
             folderInput.value = '';
             isStopped = false;
-            processedCount = 0;
-            totalFolders = 0;
-            folderResults = [];
-            successCount = 0;
-            errorCount = 0;
         }
 
         function addLog(message) {
@@ -449,107 +332,6 @@ UPLOAD_PAGE = """
 
         function getReport() {
             window.open(`/report/${userId}`, '_blank');
-        }
-
-        function getErrorReport() {
-            window.open(`/report_errors/${userId}`, '_blank');
-        }
-
-        async function getStats() {
-            try {
-                const response = await fetch(`/stats/${userId}`);
-                const data = await response.json();
-                if (data.success) {
-                    showStatus('info', `📊 Всего: ${data.total}, ✅ Успешно: ${data.success}, ❌ Ошибок: ${data.errors}`);
-                } else {
-                    showStatus('error', '❌ ' + data.message);
-                }
-            } catch (e) {
-                showStatus('error', '❌ Ошибка получения статистики');
-            }
-        }
-
-        function compressImage(file, maxWidth = 500, maxHeight = 500, quality = 0.5) {
-            return new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.readAsDataURL(file);
-                reader.onload = (event) => {
-                    const img = new Image();
-                    img.src = event.target.result;
-                    img.onload = () => {
-                        const canvas = document.createElement('canvas');
-                        let width = img.width;
-                        let height = img.height;
-                        
-                        if (width > height) {
-                            if (width > maxWidth) {
-                                height = height * (maxWidth / width);
-                                width = maxWidth;
-                            }
-                        } else {
-                            if (height > maxHeight) {
-                                width = width * (maxHeight / height);
-                                height = maxHeight;
-                            }
-                        }
-                        
-                        canvas.width = width;
-                        canvas.height = height;
-                        const ctx = canvas.getContext('2d');
-                        ctx.drawImage(img, 0, 0, width, height);
-                        
-                        const mimeType = 'image/jpeg';
-                        
-                        canvas.toBlob((blob) => {
-                            if (blob) {
-                                const compressedFile = new File([blob], file.name.replace(/\\.[^.]+$/, '.jpg'), {
-                                    type: mimeType,
-                                    lastModified: Date.now()
-                                });
-                                resolve(compressedFile);
-                            } else {
-                                reject(new Error('Не удалось сжать изображение'));
-                            }
-                        }, mimeType, quality);
-                    };
-                    img.onerror = reject;
-                };
-                reader.onerror = reject;
-            });
-        }
-
-        async function uploadFileInChunks(file, folderName, fileName) {
-            const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-            
-            for (let i = 0; i < totalChunks; i++) {
-                if (isStopped) {
-                    throw new Error('Остановка пользователем');
-                }
-                
-                const start = i * CHUNK_SIZE;
-                const end = Math.min(start + CHUNK_SIZE, file.size);
-                const chunk = file.slice(start, end);
-                
-                const formData = new FormData();
-                formData.append('chunk', chunk);
-                formData.append('chunk_index', i);
-                formData.append('total_chunks', totalChunks);
-                formData.append('user_id', userId);
-                formData.append('folder_name', folderName);
-                formData.append('file_name', fileName);
-                
-                const response = await fetch('/upload_chunk', {
-                    method: 'POST',
-                    body: formData
-                });
-                
-                const result = await response.json();
-                if (!result.success) {
-                    throw new Error(result.message || 'Ошибка загрузки чанка');
-                }
-            }
-            
-            return true;
         }
 
         async function stopProcessing() {
@@ -573,7 +355,6 @@ UPLOAD_PAGE = """
                 if (result.success) {
                     showStatus('stop', '⏹ Процесс остановлен!');
                     addLog(`✅ ${result.message}`);
-                    progress.className = 'progress stopped';
                 } else {
                     showStatus('error', `❌ Ошибка остановки: ${result.message}`);
                 }
@@ -585,7 +366,7 @@ UPLOAD_PAGE = """
         }
 
         async function prepareFolderData(folderName, files) {
-            const txtFile = files.find(f => f.name === 'info.txt' || f.name.endsWith('.txt'));
+            const txtFile = files.find(f => f.name === 'info' || f.name.endsWith('.txt'));
             if (!txtFile) {
                 return null;
             }
@@ -603,48 +384,20 @@ UPLOAD_PAGE = """
             
             const imageFiles = files
                 .filter(f => f.type && f.type.startsWith('image/'))
-                .slice(0, 3);
+                .slice(0, 10);  // ИЗМЕНЕНО: 3 -> 10
             
             const images = [];
             for (const img of imageFiles) {
                 try {
-                    const compressed = await compressImage(img, 500, 500, 0.5);
-                    
-                    await uploadFileInChunks(compressed, folderName, compressed.name);
-                    
-                    const reader = new FileReader();
-                    const dataUrl = await new Promise((resolve) => {
-                        reader.onload = (e) => resolve(e.target.result);
-                        reader.readAsDataURL(compressed);
-                    });
-                    
+                    const arrayBuffer = await img.arrayBuffer();
                     images.push({
-                        name: compressed.name,
-                        data: dataUrl,
-                        type: compressed.type || 'image/jpeg',
-                        originalSize: img.size,
-                        compressedSize: compressed.size
+                        name: img.name,
+                        data: Array.from(new Uint8Array(arrayBuffer)),
+                        type: img.type || 'image/jpeg'
                     });
-                    
-                    addLog(`✅ Фото ${img.name} сжато: ${(img.size/1024).toFixed(0)}KB -> ${(compressed.size/1024).toFixed(0)}KB (${Math.round((compressed.size/img.size)*100)}%)`);
+                    addLog(`✅ Фото ${img.name} преобразовано`);
                 } catch (e) {
-                    addLog(`⚠️ Ошибка обработки ${img.name}: ${e.message}`);
-                    try {
-                        const compressed = await compressImage(img, 400, 400, 0.4);
-                        const reader = new FileReader();
-                        const dataUrl = await new Promise((resolve) => {
-                            reader.onload = (e) => resolve(e.target.result);
-                            reader.readAsDataURL(compressed);
-                        });
-                        images.push({
-                            name: compressed.name,
-                            data: dataUrl,
-                            type: compressed.type || 'image/jpeg'
-                        });
-                        addLog(`✅ Фото ${img.name} сжато (повторно): ${(compressed.size/1024).toFixed(0)}KB`);
-                    } catch (e2) {
-                        addLog(`⚠️ Не удалось обработать ${img.name}: ${e2.message}`);
-                    }
+                    addLog(`⚠️ Ошибка чтения ${img.name}: ${e.message}`);
                 }
             }
             
@@ -670,22 +423,12 @@ UPLOAD_PAGE = """
             
             isProcessing = true;
             isStopped = false;
-            processedCount = 0;
-            folderResults = [];
-            successCount = 0;
-            errorCount = 0;
             
             showStatus('info', '⏳ Подготовка данных...');
             progressBar.style.display = 'block';
             progress.style.width = '0%';
             progress.textContent = '0%';
-            progress.className = 'progress';
             logDiv.textContent = '';
-            statsDiv.style.display = 'grid';
-            document.getElementById('totalCount').textContent = '0';
-            document.getElementById('successCount').textContent = '0';
-            document.getElementById('errorCount').textContent = '0';
-            queueInfo.style.display = 'block';
             addLog('🚀 Начинаем обработку...');
             
             const folders = {};
@@ -701,12 +444,14 @@ UPLOAD_PAGE = """
             });
             
             const folderNames = Object.keys(folders);
-            totalFolders = folderNames.length;
+            const totalFolders = folderNames.length;
             
             addLog(`📁 Найдено ${totalFolders} папок`);
-            document.getElementById('totalCount').textContent = totalFolders;
-            queueInfo.textContent = `📋 В очереди: ${totalFolders} папок | Обработано: 0/${totalFolders}`;
             showStatus('info', `⏳ Подготовка 0/${totalFolders} папок...`);
+            
+            let uploadedFolders = 0;
+            let failedFolders = 0;
+            const results = [];
             
             for (let i = 0; i < folderNames.length; i++) {
                 if (isStopped) {
@@ -720,7 +465,6 @@ UPLOAD_PAGE = """
                 const percent = Math.round((i / totalFolders) * 100);
                 progress.style.width = percent + '%';
                 progress.textContent = `${i}/${totalFolders}`;
-                queueInfo.textContent = `📋 В очереди: ${totalFolders - i} папок | Обработано: ${i}/${totalFolders}`;
                 showStatus('info', `⏳ Подготовка ${i+1}/${totalFolders}: ${folderName}`);
                 
                 try {
@@ -729,9 +473,8 @@ UPLOAD_PAGE = """
                     
                     if (!folderData) {
                         addLog(`⚠️ Пропускаем ${folderName}: нет текстового файла`);
-                        errorCount++;
-                        folderResults.push(`❌ ${folderName}: нет текстового файла`);
-                        document.getElementById('errorCount').textContent = errorCount;
+                        failedFolders++;
+                        results.push(`❌ ${folderName}: нет текстового файла`);
                         continue;
                     }
                     
@@ -754,63 +497,46 @@ UPLOAD_PAGE = """
                     const result = await response.json();
                     
                     if (result.success) {
-                        successCount++;
+                        uploadedFolders++;
                         addLog(`✅ ${folderName}: опубликовано`);
-                        folderResults.push(`✅ ${folderName}: успешно`);
+                        results.push(`✅ ${folderName}: успешно`);
                     } else {
-                        errorCount++;
+                        failedFolders++;
                         addLog(`❌ ${folderName}: ${result.message}`);
-                        folderResults.push(`❌ ${folderName}: ${result.message}`);
+                        results.push(`❌ ${folderName}: ${result.message}`);
                     }
                     
-                    document.getElementById('successCount').textContent = successCount;
-                    document.getElementById('errorCount').textContent = errorCount;
-                    
                 } catch (error) {
-                    errorCount++;
+                    failedFolders++;
                     addLog(`❌ ${folderName}: ошибка - ${error.message}`);
-                    folderResults.push(`❌ ${folderName}: ${error.message}`);
-                    document.getElementById('errorCount').textContent = errorCount;
+                    results.push(`❌ ${folderName}: ${error.message}`);
                 }
                 
-                processedCount = i + 1;
-                await new Promise(r => setTimeout(r, 300));
-            }
-            
-            if (isStopped) {
-                progress.style.width = '100%';
-                progress.textContent = `${processedCount}/${totalFolders} (Остановлено)`;
-                progress.className = 'progress stopped';
-                showStatus('stop', `⏹ Остановлено! Обработано ${processedCount}/${totalFolders} папок`);
-                addLog(`⏹ ПРОЦЕСС ОСТАНОВЛЕН`);
-                addLog(`📊 Обработано: ${successCount} успешно, ${errorCount} с ошибками`);
-                isProcessing = false;
-                return;
+                // ИЗМЕНЕНО: задержка 5 секунд между папками
+                await new Promise(r => setTimeout(r, 5000));
             }
             
             progress.style.width = '100%';
             progress.textContent = `${totalFolders}/${totalFolders}`;
-            queueInfo.textContent = `✅ Завершено! Обработано ${totalFolders} папок`;
             
-            if (errorCount === 0) {
-                showStatus('success', `✅ Загружено ${successCount} папок!`);
-                addLog(`✅ ВСЕ ${successCount} папок загружены!`);
+            if (failedFolders === 0) {
+                showStatus('success', `✅ Загружено ${uploadedFolders} папок!`);
+                addLog(`✅ ВСЕ ${uploadedFolders} папок загружены!`);
             } else {
-                showStatus('warning', `⚠️ Загружено ${successCount} папок, ${errorCount} с ошибками`);
-                addLog(`⚠️ Загружено ${successCount} папок, ${errorCount} с ошибками`);
+                showStatus('warning', `⚠️ Загружено ${uploadedFolders} папок, ${failedFolders} с ошибками`);
+                addLog(`⚠️ Загружено ${uploadedFolders} папок, ${failedFolders} с ошибками`);
             }
             
-            if (folderResults.length > 0) {
+            if (results.length > 0) {
                 addLog('\\n📋 Детали:');
-                folderResults.slice(0, 20).forEach(r => addLog(r));
-                if (folderResults.length > 20) {
-                    addLog(`... и еще ${folderResults.length - 20} папок`);
+                results.slice(0, 20).forEach(r => addLog(r));
+                if (results.length > 20) {
+                    addLog(`... и еще ${results.length - 20} папок`);
                 }
             }
             
-            if (successCount > 0) {
+            if (uploadedFolders > 0) {
                 addLog(`\\n📊 Скачать отчет: /report/${userId}`);
-                addLog(`⚠️ Скачать ошибки: /report_errors/${userId}`);
             }
             
             isProcessing = false;
@@ -830,71 +556,47 @@ def index():
 def upload_page():
     return render_template_string(UPLOAD_PAGE)
 
-# ===== ЗАГРУЗКА ПО ЧАСТЯМ =====
-@app.route('/upload_chunk', methods=['POST'])
-def upload_chunk():
-    """Загрузка файла по частям"""
+@app.route('/stop_processing', methods=['POST'])
+def stop_processing():
+    """Останавливает процесс публикации"""
     try:
-        chunk = request.files.get('chunk')
-        chunk_index = request.form.get('chunk_index', 0)
-        total_chunks = request.form.get('total_chunks', 1)
-        user_id = request.form.get('user_id')
-        folder_name = request.form.get('folder_name')
-        file_name = request.form.get('file_name', 'image.jpg')
-        
-        if not chunk:
-            return jsonify({'success': False, 'message': 'Нет данных'}), 400
+        data = request.get_json()
+        user_id = data.get('user_id')
         
         if not user_id:
             return jsonify({'success': False, 'message': 'Нет user_id'}), 400
         
-        temp_dir = os.path.join(DATA_DIR, 'temp', str(user_id), folder_name)
-        os.makedirs(temp_dir, exist_ok=True)
+        logger.info(f"⏹ ПОЛУЧЕНА КОМАНДА ОСТАНОВКИ для пользователя {user_id}")
         
-        chunk_filename = f"{file_name}.part_{chunk_index}"
-        chunk_path = os.path.join(temp_dir, chunk_filename)
-        chunk.save(chunk_path)
+        # Останавливаем publisher
+        publisher.stop(user_id)
         
-        if int(chunk_index) == int(total_chunks) - 1:
-            final_path = os.path.join(temp_dir, file_name)
-            with open(final_path, 'wb') as outfile:
-                for i in range(int(total_chunks)):
-                    part_file = os.path.join(temp_dir, f"{file_name}.part_{i}")
-                    if os.path.exists(part_file):
-                        with open(part_file, 'rb') as infile:
-                            outfile.write(infile.read())
-                        os.remove(part_file)
-            
-            file_size = os.path.getsize(final_path)
-            logger.info(f"📦 Собран файл {file_name} размером {file_size} байт")
-            
-            return jsonify({
-                'success': True,
-                'message': 'Файл собран',
-                'path': final_path,
-                'size': file_size
-            })
+        # Очищаем временные файлы
+        try:
+            temp_dir = os.path.join(DATA_DIR, 'temp', str(user_id))
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+                logger.info(f"🗑️ Удалена временная папка: {temp_dir}")
+        except Exception as e:
+            logger.error(f"⚠️ Ошибка удаления временных файлов: {e}")
         
-        return jsonify({'success': True, 'message': f'Чанк {chunk_index} загружен'})
+        return jsonify({
+            'success': True,
+            'message': 'Процесс остановлен'
+        })
         
     except Exception as e:
-        logger.error(f"❌ Ошибка загрузки чанка: {e}")
+        logger.error(f"❌ Ошибка остановки: {e}")
         return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/publish_folder', methods=['POST'])
 def publish_folder():
     try:
         data = request.get_json()
-        
-        if not data:
-            logger.error("❌ Нет данных в запросе")
-            return jsonify({'success': False, 'message': 'Нет данных'}), 400
-        
         user_id = data.get('user_id')
         folder_data = data.get('folder')
         
         if not user_id or not folder_data:
-            logger.error(f"❌ Нет user_id или folder_data: user_id={user_id}")
             return jsonify({'success': False, 'message': 'Нет данных'}), 400
         
         folder_name = folder_data.get('folderName')
@@ -905,30 +607,11 @@ def publish_folder():
         logger.info(f"📦 Получена папка: {folder_name} от пользователя {user_id}")
         logger.info(f"📝 Текст: {len(ad_text)} символов, 🖼️ Фото: {len(images)}")
         
-        processed_images = []
-        for img in images:
-            try:
-                if img.get('data') and img['data'].startswith('data:image'):
-                    data_parts = img['data'].split(',')
-                    if len(data_parts) > 1:
-                        image_data = base64.b64decode(data_parts[1])
-                        processed_images.append({
-                            'name': img.get('name', 'image.jpg'),
-                            'data': list(image_data),
-                            'type': img.get('type', 'image/jpeg')
-                        })
-                    else:
-                        processed_images.append(img)
-                else:
-                    processed_images.append(img)
-            except Exception as e:
-                logger.error(f"❌ Ошибка обработки изображения: {e}")
-                processed_images.append(img)
-        
         success, message = publisher.publish_single_folder(
-            user_id, folder_name, ad_text, metadata_text, processed_images
+            user_id, folder_name, ad_text, metadata_text, images
         )
         
+        # Очищаем временные файлы после публикации
         try:
             temp_dir = os.path.join(DATA_DIR, 'temp', str(user_id), folder_name)
             if os.path.exists(temp_dir):
@@ -944,61 +627,6 @@ def publish_folder():
         
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-@app.route('/stop_processing', methods=['POST'])
-def stop_processing():
-    try:
-        data = request.get_json()
-        user_id = data.get('user_id')
-        
-        if not user_id:
-            return jsonify({'success': False, 'message': 'Нет user_id'}), 400
-        
-        logger.info(f"⏹ ПОЛУЧЕНА КОМАНДА ОСТАНОВКИ для пользователя {user_id}")
-        
-        publisher.stop(user_id)
-        
-        try:
-            temp_dir = os.path.join(DATA_DIR, 'temp', str(user_id))
-            if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
-                logger.info(f"🗑️ Удалена временная папка загрузки: {temp_dir}")
-        except Exception as e:
-            logger.error(f"⚠️ Ошибка удаления временных файлов: {e}")
-        
-        with queue_lock:
-            if user_id in active_queues:
-                queue_size = len(active_queues[user_id].get('queue', []))
-                active_queues[user_id] = {
-                    'queue': [],
-                    'processing': False,
-                    'stop_flag': True
-                }
-                logger.info(f"🗑️ Очищена очередь для {user_id} ({queue_size} элементов)")
-            else:
-                active_queues[user_id] = {
-                    'queue': [],
-                    'processing': False,
-                    'stop_flag': True
-                }
-        
-        api.send_message(
-            user_id, 
-            "⏹️ **Публикация остановлена!**\n\n"
-            "✅ Все процессы остановлены\n"
-            "🗑️ Временные файлы удалены\n"
-            "🗑️ Очередь очищена"
-        )
-        
-        return jsonify({
-            'success': True, 
-            'message': 'Процесс остановлен и очередь очищена',
-            'cleaned': 'Временные файлы и очередь удалены'
-        })
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка остановки: {e}")
         return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/webhook', methods=['POST'])
@@ -1032,48 +660,17 @@ def webhook():
                 f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
                 "📊 **Получить отчет:**\n"
                 f"🔗 https://maxbot.bothost.tech/report/{user_id}\n\n"
-                "⚠️ **Отчет с ошибками:**\n"
-                f"🔗 https://maxbot.bothost.tech/report_errors/{user_id}\n\n"
                 "⏹ **Остановить публикацию:** `/stop`\n\n"
                 "📋 **Инструкция:**\n"
                 "1. Подготовьте папки с объявлениями\n"
                 "2. Используйте разделитель #изъятая\n"
-                "3. Фото до 3 шт на объявление"
+                "3. Фото до 10 шт на объявление"
             )
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/stop':
             publisher.stop(user_id)
-            
-            try:
-                temp_dir = os.path.join(DATA_DIR, 'temp', str(user_id))
-                if os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir)
-            except:
-                pass
-            
-            with queue_lock:
-                if user_id in active_queues:
-                    queue_size = len(active_queues[user_id].get('queue', []))
-                    active_queues[user_id] = {
-                        'queue': [],
-                        'processing': False,
-                        'stop_flag': True
-                    }
-                else:
-                    active_queues[user_id] = {
-                        'queue': [],
-                        'processing': False,
-                        'stop_flag': True
-                    }
-            
-            api.send_message(
-                user_id, 
-                "⏹️ **Публикация остановлена!**\n\n"
-                "✅ Все процессы остановлены\n"
-                "🗑️ Временные файлы удалены\n"
-                "🗑️ Очередь очищена"
-            )
+            api.send_message(user_id, "⏹️ **Публикация остановлена!**\n\n✅ Все процессы остановлены\n🗑️ Временные файлы удалены")
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/report':
@@ -1107,80 +704,14 @@ def report_page(user_id):
     
     return f"""
     <html>
-    <head>
-        <title>Отчет</title>
-        <style>
-            body {{ font-family: Arial; max-width: 600px; margin: 50px auto; text-align: center; padding: 20px; }}
-            h1 {{ color: #1a1a2e; }}
-            .btn {{ display: inline-block; padding: 14px 35px; background: #28a745; color: white; text-decoration: none; border-radius: 8px; font-weight: 600; }}
-            .btn:hover {{ background: #1e7e34; }}
-            .links {{ margin-top: 30px; display: flex; gap: 15px; justify-content: center; flex-wrap: wrap; }}
-            .links a {{ color: #4a6fa5; text-decoration: none; }}
-            .links a:hover {{ text-decoration: underline; }}
-        </style>
-    </head>
-    <body>
+    <head><title>Отчет</title></head>
+    <body style="font-family: Arial; max-width: 600px; margin: 50px auto; text-align: center;">
         <h1>📊 Отчет готов!</h1>
-        <p style="color: #666;">Все данные будут автоматически очищены после скачивания</p>
-        <br>
-        <a href="{download_url}" class="btn">📥 Скачать отчет</a>
-        <div class="links">
-            <a href="/report_errors/{user_id}">⚠️ Отчет с ошибками</a>
-            <a href="/upload">⬅️ Вернуться к загрузке</a>
-        </div>
+        <p><a href="{download_url}" style="display: inline-block; padding: 12px 30px; background: #28a745; color: white; text-decoration: none; border-radius: 5px;">📥 Скачать отчет</a></p>
+        <p><a href="/upload">⬅️ Вернуться к загрузке</a></p>
     </body>
     </html>
     """
-
-@app.route('/report_errors/<int:user_id>')
-def report_errors_page(user_id):
-    report_path = report_gen.generate_error_report(user_id)
-    if not report_path:
-        return "❌ Нет ошибок для отчета", 404
-    
-    filename = os.path.basename(report_path)
-    download_url = f"/download_report/{user_id}/{filename}"
-    
-    return f"""
-    <html>
-    <head>
-        <title>Отчет об ошибках</title>
-        <style>
-            body {{ font-family: Arial; max-width: 600px; margin: 50px auto; text-align: center; padding: 20px; }}
-            h1 {{ color: #1a1a2e; }}
-            .btn {{ display: inline-block; padding: 14px 35px; background: #ffc107; color: #333; text-decoration: none; border-radius: 8px; font-weight: 600; }}
-            .btn:hover {{ background: #e0a800; }}
-            .links {{ margin-top: 30px; display: flex; gap: 15px; justify-content: center; flex-wrap: wrap; }}
-            .links a {{ color: #4a6fa5; text-decoration: none; }}
-            .links a:hover {{ text-decoration: underline; }}
-        </style>
-    </head>
-    <body>
-        <h1>⚠️ Отчет об ошибках</h1>
-        <p style="color: #666;">Список папок, которые не удалось опубликовать</p>
-        <br>
-        <a href="{download_url}" class="btn">📥 Скачать отчет об ошибках</a>
-        <div class="links">
-            <a href="/report/{user_id}">📊 Основной отчет</a>
-            <a href="/upload">⬅️ Вернуться к загрузке</a>
-        </div>
-    </body>
-    </html>
-    """
-
-@app.route('/stats/<int:user_id>')
-def stats_page(user_id):
-    try:
-        stats = db.get_stats(user_id)
-        return jsonify({
-            'success': True,
-            'total': stats['total'],
-            'success': stats['success'],
-            'errors': stats['errors']
-        })
-    except Exception as e:
-        logger.error(f"❌ Ошибка получения статистики: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/download_report/<int:user_id>/<path:filename>')
 def download_report(user_id, filename):
@@ -1191,7 +722,8 @@ def download_report(user_id, filename):
         if not os.path.exists(file_path):
             return "❌ Файл не найден", 404
         
-        return send_file(file_path, as_attachment=True, download_name=filename)
+        response = send_file(file_path, as_attachment=True, download_name=filename)
+        return response
         
     except Exception as e:
         logger.error(f"❌ Ошибка скачивания: {e}")
@@ -1227,29 +759,8 @@ def setup_webhook():
     except Exception as e:
         return f"❌ Ошибка: {e}"
 
-@app.route('/cleanup_temp', methods=['POST'])
-def cleanup_temp():
-    try:
-        temp_dir = os.path.join(DATA_DIR, 'temp')
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-            os.makedirs(temp_dir, exist_ok=True)
-            return jsonify({'success': True, 'message': 'Временные файлы очищены'})
-        return jsonify({'success': True, 'message': 'Нет временных файлов'})
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-@app.errorhandler(Exception)
-def handle_all_exceptions(error):
-    logger.error(f"Критическая ошибка обработки запроса: {error}", exc_info=True)
-    return jsonify({
-        'success': False,
-        'message': 'Внутренняя ошибка сервера',
-        'details': str(error)
-    }), 500
-
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 3000))
     if TOKEN:
         logger.info(f"✅ Токен найден (первые 10): {TOKEN[:10]}...")
-    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+    app.run(host='0.0.0.0', port=port, threaded=True)
