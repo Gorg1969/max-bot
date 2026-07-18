@@ -15,7 +15,7 @@ from modules.report_generator import ReportGenerator
 
 # В Python консоли или в app.py добавьте:
 db = Database()
-db.fix_publication_times()  # исправит старые записи
+# db.fix_publication_times()  # временно отключено, если метод отсутствуе
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
