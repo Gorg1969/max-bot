@@ -1,4 +1,3 @@
-# modules/report_generator.py
 import os
 import re
 import csv
@@ -6,9 +5,19 @@ import shutil
 from datetime import datetime
 import pytz
 import logging
-import sqlite3
 
 logger = logging.getLogger(__name__)
+
+# Пытаемся импортировать openpyxl для Excel
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.page import PageSetup
+    EXCEL_AVAILABLE = True
+except ImportError:
+    EXCEL_AVAILABLE = False
+    logger.warning("⚠️ openpyxl не установлен, отчеты будут в CSV формате")
 
 class ReportGenerator:
     def __init__(self, file_manager, db):
@@ -16,10 +25,9 @@ class ReportGenerator:
         self.db = db
     
     def generate_report(self, user_id):
-        """Генерирует отчет с двумя листами: успешные и ошибки"""
+        """Генерирует Excel отчет с двумя листами: Успешные и Ошибки"""
         try:
             user_folder = self.fm.get_user_folder(user_id)
-            moscow_tz = pytz.timezone('Europe/Moscow')
             
             # Получаем все публикации пользователя
             publications = self.db.get_publications(user_id)
@@ -28,48 +36,108 @@ class ReportGenerator:
                 logger.warning(f"⚠️ Нет публикаций для пользователя {user_id}")
                 return None
             
-            # Разделяем на успешные и ошибки
-            success_publications = []
-            error_publications = []
+            moscow_tz = pytz.timezone('Europe/Moscow')
+            success_data = []
+            error_data = []
             
-            for pub in publications:
-                if pub.get('status') == 'success':
-                    success_publications.append(pub)
+            # Сортируем по времени создания (по порядку публикации) - старые сверху
+            publications_sorted = sorted(publications, key=lambda x: x.get('created_at', ''))
+            
+            # Группируем по дате для заполнения
+            current_date = None
+            
+            for pub in publications_sorted:
+                folder_name = pub.get('folder_name', '')
+                chat_id = pub.get('group_id', '')
+                created_at = pub.get('created_at')
+                status = pub.get('status', '')
+                error = pub.get('error', '')
+                
+                # Получаем метаданные из БД
+                metadata = self.db.get_ad_metadata(user_id, folder_name)
+                
+                # Время публикации (формат: 09.08 - без секунд, с точкой)
+                if created_at:
+                    if isinstance(created_at, str):
+                        try:
+                            created_at = datetime.fromisoformat(created_at)
+                        except:
+                            created_at = datetime.now(moscow_tz)
+                    if created_at.tzinfo is None:
+                        created_at = moscow_tz.localize(created_at)
+                    else:
+                        created_at = created_at.astimezone(moscow_tz)
+                    date_str = created_at.strftime('%Y-%m-%d')
+                    time_str = created_at.strftime('%H.%M')
                 else:
-                    error_publications.append(pub)
+                    now = datetime.now(moscow_tz)
+                    date_str = now.strftime('%Y-%m-%d')
+                    time_str = now.strftime('%H.%M')
+                
+                # Ссылка на пост - берем из метаданных
+                post_link = metadata.get('post_link', '')
+                if not post_link and chat_id:
+                    post_link = f"https://max.ru/c/{chat_id}"
+                
+                # Данные для успешных публикаций
+                if status == 'success':
+                    # Для даты: заполняем только первую строку в группе
+                    if current_date != date_str:
+                        current_date = date_str
+                        display_date = date_str
+                    else:
+                        display_date = ''  # пусто для повторяющихся дат
+                    
+                    success_data.append({
+                        '№': len(success_data) + 1,
+                        'Дата': display_date,
+                        'Время публикации (МСК)': time_str,
+                        'Ссылка на пост': post_link,
+                        'Ссылка (источник)': metadata.get('Ссылка', ''),
+                        'Марка/модель': metadata.get('Название', ''),
+                        'Код предложения': metadata.get('Код предложения', ''),
+                        'Цена в лизинге': metadata.get('Цена в лизинге', ''),
+                    })
+                else:
+                    # Данные для ошибок (только папка и ошибка)
+                    error_data.append({
+                        'Папка': folder_name,
+                        'Ошибка': error or 'Неизвестная ошибка'
+                    })
             
-            # Если нет успешных публикаций, но есть ошибки - создаем отчет только с ошибками
-            if not success_publications and not error_publications:
-                logger.warning(f"⚠️ Нет данных для отчета пользователя {user_id}")
-                return None
+            # Если нет успешных публикаций
+            if not success_data:
+                logger.warning(f"⚠️ Нет успешных публикаций для пользователя {user_id}")
+                success_data = [{
+                    '№': '',
+                    'Дата': '',
+                    'Время публикации (МСК)': '',
+                    'Ссылка на пост': '',
+                    'Ссылка (источник)': '',
+                    'Марка/модель': '',
+                    'Код предложения': '',
+                    'Цена в лизинге': '',
+                }]
             
-            timestamp = datetime.now(moscow_tz).strftime('%Y%m%d_%H%M%S')
-            report_filename = f"Отчет_{timestamp}.csv"
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            report_filename = f"Отчет_{timestamp}.xlsx"
             report_path = os.path.join(user_folder, report_filename)
             
-            # Создаем два файла: основной и ошибки
-            success_path = report_path
-            error_path = os.path.join(user_folder, f"Ошибки_{timestamp}.csv")
+            # Создаем Excel отчет
+            if EXCEL_AVAILABLE:
+                self._create_excel_report(report_path, success_data, error_data)
+            else:
+                # Если openpyxl не установлен, создаем CSV
+                report_filename = f"Отчет_{timestamp}.csv"
+                report_path = os.path.join(user_folder, report_filename)
+                self._create_csv_report(report_path, success_data, error_data)
             
-            # Записываем успешные публикации
-            if success_publications:
-                self._write_success_report(success_publications, success_path, user_id, moscow_tz)
-                logger.info(f"📊 Отчет создан: {success_path} ({len(success_publications)} записей)")
+            logger.info(f"📊 Отчет создан: {report_path} (успешных: {len(success_data)}, ошибок: {len(error_data)})")
             
-            # Записываем ошибки
-            if error_publications:
-                self._write_error_report(error_publications, error_path, user_id, moscow_tz)
-                logger.info(f"📊 Отчет с ошибками создан: {error_path} ({len(error_publications)} записей)")
-            
-            # Очищаем данные пользователя из БД после создания отчета
-            self.db.clear_user_data(user_id)
-            logger.info(f"🗑️ Данные пользователя {user_id} удалены из БД")
-            
-            # Очищаем временные файлы
+            # Очищаем временные данные (но оставляем отчет)
             self.cleanup_user_data(user_id, keep_report=True)
             
-            # Возвращаем путь к основному отчету
-            return success_path if success_publications else error_path
+            return report_path
             
         except Exception as e:
             logger.error(f"❌ Ошибка создания отчета: {e}")
@@ -77,129 +145,265 @@ class ReportGenerator:
             traceback.print_exc()
             return None
     
-    def _write_success_report(self, publications, filepath, user_id, tz):
-        """Записывает успешные публикации в формате шаблона"""
-        with open(filepath, 'w', encoding='utf-8-sig', newline='') as f:
-            writer = csv.writer(f)
+    def _create_excel_report(self, filepath, success_data, error_data):
+        """Создает красивый Excel файл с двумя листами"""
+        try:
+            wb = Workbook()
+            
+            # Удаляем стандартный лист
+            if 'Sheet' in wb.sheetnames:
+                wb.remove(wb['Sheet'])
+            
+            # === ЛИСТ 1: УСПЕШНЫЕ ===
+            ws_success = wb.create_sheet("Отчет по публикациям", 0)
             
             # Заголовки как в шаблоне
-            writer.writerow(['№', 'Дата', 'Время публикации (МСК)', 'Ссылка на пост', 'Ссылка (источник)', 'Марка/модель', 'Код предложения'])
+            headers = ['№', 'Дата', 'Время публикации (МСК)', 'Ссылка на пост', 
+                      'Ссылка (источник)', 'Марка/модель', 'Код предложения']
             
-            row_num = 1
+            # ---------- СТИЛИ ----------
+            # Заголовок: синий фон, белый текст, жирный
+            header_font = Font(bold=True, size=11, color="FFFFFF", name="Calibri")
+            header_fill = PatternFill(start_color="2F5597", end_color="2F5597", fill_type="solid")
+            header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             
-            # Группируем по дате
-            date_groups = {}
-            for pub in publications:
-                folder_name = pub.get('folder_name')
-                chat_id = pub.get('group_id')
-                created_at = pub.get('created_at')
-                
-                # Получаем метаданные из БД
-                metadata = self.db.get_ad_metadata(user_id, folder_name)
-                
-                # Полная ссылка на пост
-                post_link = metadata.get('post_link', '')
-                if not post_link and chat_id:
-                    clean_chat_id = chat_id.replace('-', '') if chat_id.startswith('-') else chat_id
-                    post_link = f"https://max.ru/c/-{clean_chat_id}"
-                
-                # Время публикации (МСК, без секунд)
-                if created_at:
-                    if isinstance(created_at, str):
-                        try:
-                            created_at = datetime.fromisoformat(created_at)
-                        except:
-                            created_at = datetime.now(tz)
-                    if hasattr(created_at, 'astimezone'):
-                        created_at = created_at.astimezone(tz)
-                    date_str = created_at.strftime('%Y-%m-%d')
-                    time_str = created_at.strftime('%H:%M')
-                else:
-                    now = datetime.now(tz)
-                    date_str = now.strftime('%Y-%m-%d')
-                    time_str = now.strftime('%H:%M')
-                
-                if date_str not in date_groups:
-                    date_groups[date_str] = []
-                
-                date_groups[date_str].append({
-                    'time': time_str,
-                    'post_link': post_link,
-                    'source_link': metadata.get('Ссылка', ''),
-                    'model': metadata.get('Название', ''),
-                    'offer_code': metadata.get('Код предложения', ''),
-                })
+            # Основной текст: черный, размер 10
+            text_font = Font(size=10, name="Calibri")
+            text_alignment_left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+            text_alignment_center = Alignment(horizontal="center", vertical="center")
             
-            # Сортируем по дате (сначала новые)
-            for date_str in sorted(date_groups.keys(), reverse=True):
-                entries = date_groups[date_str]
-                
-                # Первая запись с датой
-                first = True
-                for entry in entries:
-                    if first:
-                        writer.writerow([
-                            row_num,
-                            date_str,
-                            entry['time'],
-                            entry['post_link'],
-                            entry['source_link'],
-                            entry['model'],
-                            entry['offer_code']
-                        ])
-                        first = False
+            # Границы
+            thin_border = Border(
+                left=Side(style="thin", color="D0D0D0"),
+                right=Side(style="thin", color="D0D0D0"),
+                top=Side(style="thin", color="D0D0D0"),
+                bottom=Side(style="thin", color="D0D0D0")
+            )
+            
+            # Ссылка: синяя, подчеркнутая
+            link_font = Font(color="0563C1", underline="single", size=10, name="Calibri")
+            
+            # Заголовок листа
+            title_cell = ws_success.cell(row=1, column=1, value="Отчет по публикациям")
+            title_cell.font = Font(bold=True, size=16, name="Calibri", color="1A1A2E")
+            title_cell.alignment = Alignment(horizontal="center", vertical="center")
+            ws_success.merge_cells('A1:G1')
+            
+            # Отступ перед таблицей
+            ws_success.row_dimensions[1].height = 35
+            
+            # Записываем заголовки (со 2 строки)
+            for col, header in enumerate(headers, 1):
+                cell = ws_success.cell(row=2, column=col, value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_alignment
+                cell.border = thin_border
+            
+            # Высота строки заголовков
+            ws_success.row_dimensions[2].height = 25
+            
+            # Записываем данные
+            for row_idx, data in enumerate(success_data, 3):
+                for col_idx, key in enumerate(headers, 1):
+                    value = data.get(key, '')
+                    cell = ws_success.cell(row=row_idx, column=col_idx, value=value)
+                    
+                    # Применяем стили в зависимости от колонки
+                    if key == '№' or key == 'Дата' or key == 'Время публикации (МСК)':
+                        cell.alignment = text_alignment_center
+                    elif key == 'Ссылка на пост' and value:
+                        cell.font = link_font
+                        cell.alignment = text_alignment_left
+                    elif key == 'Ссылка (источник)' and value:
+                        cell.font = link_font
+                        cell.alignment = text_alignment_left
                     else:
-                        writer.writerow([
-                            row_num,
-                            '',  # Дата пустая для последующих записей того же дня
-                            entry['time'],
-                            entry['post_link'],
-                            entry['source_link'],
-                            entry['model'],
-                            entry['offer_code']
-                        ])
-                    row_num += 1
+                        cell.font = text_font
+                        cell.alignment = text_alignment_left
+                    
+                    cell.border = thin_border
+                    ws_success.row_dimensions[row_idx].height = 22
+            
+            # Цвет для строк (через одну)
+            for row_idx in range(3, len(success_data) + 3):
+                if row_idx % 2 == 1:
+                    for col in range(1, 8):
+                        cell = ws_success.cell(row=row_idx, column=col)
+                        cell.fill = PatternFill(start_color="F8F9FA", end_color="F8F9FA", fill_type="solid")
+            
+            # Настраиваем ширину колонок
+            column_widths = {
+                'A': 5,   # №
+                'B': 14,  # Дата
+                'C': 18,  # Время
+                'D': 50,  # Ссылка на пост
+                'E': 40,  # Ссылка (источник)
+                'F': 32,  # Марка/модель
+                'G': 18,  # Код предложения
+            }
+            
+            for col_letter, width in column_widths.items():
+                ws_success.column_dimensions[col_letter].width = width
+            
+            # Фиксируем верхние строки
+            ws_success.freeze_panes = 'A3'
+            
+            # Настройка печати
+            ws_success.page_setup.orientation = PageSetup.ORIENTATION_LANDSCAPE
+            ws_success.page_setup.paperSize = PageSetup.PAPERSIZE_A4
+            ws_success.page_setup.fitToPage = True
+            ws_success.page_setup.fitToWidth = 1
+            ws_success.page_setup.fitToHeight = 0
+            
+            # === ЛИСТ 2: ОШИБКИ ===
+            ws_errors = wb.create_sheet("Ошибки", 1)
+            
+            # Заголовок листа ошибок
+            error_title = ws_errors.cell(row=1, column=1, value="Ошибки публикации")
+            error_title.font = Font(bold=True, size=16, name="Calibri", color="C00000")
+            error_title.alignment = Alignment(horizontal="center", vertical="center")
+            ws_errors.merge_cells('A1:B1')
+            ws_errors.row_dimensions[1].height = 35
+            
+            # Заголовки для ошибок
+            error_headers = ['Папка', 'Ошибка']
+            error_header_font = Font(bold=True, size=11, color="FFFFFF", name="Calibri")
+            error_header_fill = PatternFill(start_color="C00000", end_color="C00000", fill_type="solid")
+            
+            for col, header in enumerate(error_headers, 1):
+                cell = ws_errors.cell(row=2, column=col, value=header)
+                cell.font = error_header_font
+                cell.fill = error_header_fill
+                cell.alignment = header_alignment
+                cell.border = thin_border
+            
+            ws_errors.row_dimensions[2].height = 25
+            
+            # Если нет ошибок, пишем красивое сообщение
+            if not error_data:
+                cell = ws_errors.cell(row=3, column=1, value="✅ Нет ошибок")
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.font = Font(color="28A745", size=14, bold=True, name="Calibri")
+                ws_errors.merge_cells('A3:B3')
+                ws_errors.row_dimensions[3].height = 40
+            else:
+                for row_idx, data in enumerate(error_data, 3):
+                    # Папка
+                    cell1 = ws_errors.cell(row=row_idx, column=1, value=data.get('Папка', ''))
+                    cell1.font = text_font
+                    cell1.alignment = text_alignment_left
+                    cell1.border = thin_border
+                    ws_errors.row_dimensions[row_idx].height = 22
+                    
+                    # Ошибка
+                    cell2 = ws_errors.cell(row=row_idx, column=2, value=data.get('Ошибка', ''))
+                    cell2.font = Font(color="C00000", size=10, name="Calibri")
+                    cell2.alignment = text_alignment_left
+                    cell2.border = thin_border
+                    
+                    # Чередование цвета
+                    if row_idx % 2 == 1:
+                        cell1.fill = PatternFill(start_color="FFF0F0", end_color="FFF0F0", fill_type="solid")
+                        cell2.fill = PatternFill(start_color="FFF0F0", end_color="FFF0F0", fill_type="solid")
+            
+            # Настраиваем ширину колонок для ошибок
+            ws_errors.column_dimensions['A'].width = 35
+            ws_errors.column_dimensions['B'].width = 65
+            
+            # Фиксируем верхнюю строку
+            ws_errors.freeze_panes = 'A3'
+            
+            # Настройка печати для ошибок
+            ws_errors.page_setup.orientation = PageSetup.ORIENTATION_LANDSCAPE
+            ws_errors.page_setup.paperSize = PageSetup.PAPERSIZE_A4
+            ws_errors.page_setup.fitToPage = True
+            ws_errors.page_setup.fitToWidth = 1
+            ws_errors.page_setup.fitToHeight = 0
+            
+            # Сохраняем файл
+            wb.save(filepath)
+            logger.info(f"✅ Красивый Excel отчет создан: {filepath}")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания Excel отчета: {e}")
+            raise
     
-    def _write_error_report(self, publications, filepath, user_id, tz):
-        """Записывает ошибки публикации"""
-        with open(filepath, 'w', encoding='utf-8-sig', newline='') as f:
-            writer = csv.writer(f)
-            
-            # Заголовки для ошибок (без ссылок)
-            writer.writerow(['№', 'Дата', 'Время', 'Папка', 'Статус', 'Ошибка'])
-            
-            row_num = 1
-            for pub in publications:
-                folder_name = pub.get('folder_name')
-                created_at = pub.get('created_at')
-                error = pub.get('error', 'Неизвестная ошибка')
-                status = pub.get('status', 'error')
+    def _create_csv_report(self, filepath, success_data, error_data):
+        """Создает CSV отчет с двумя секциями"""
+        try:
+            with open(filepath, 'w', encoding='utf-8-sig', newline='') as f:
+                writer = csv.writer(f, delimiter=';')
                 
-                # Время
-                if created_at:
-                    if isinstance(created_at, str):
-                        try:
-                            created_at = datetime.fromisoformat(created_at)
-                        except:
-                            created_at = datetime.now(tz)
-                    if hasattr(created_at, 'astimezone'):
-                        created_at = created_at.astimezone(tz)
-                    date_str = created_at.strftime('%Y-%m-%d')
-                    time_str = created_at.strftime('%H:%M')
+                # === УСПЕШНЫЕ ===
+                writer.writerow(['=== УСПЕШНЫЕ ПУБЛИКАЦИИ ==='])
+                writer.writerow(['№', 'Дата', 'Время публикации (МСК)', 'Ссылка на пост', 
+                               'Ссылка (источник)', 'Марка/модель', 'Код предложения'])
+                
+                for data in success_data:
+                    writer.writerow([
+                        data.get('№', ''),
+                        data.get('Дата', ''),
+                        data.get('Время публикации (МСК)', ''),
+                        data.get('Ссылка на пост', ''),
+                        data.get('Ссылка (источник)', ''),
+                        data.get('Марка/модель', ''),
+                        data.get('Код предложения', ''),
+                    ])
+                
+                # === ОШИБКИ ===
+                writer.writerow([])
+                writer.writerow(['=== ОШИБКИ ==='])
+                writer.writerow(['Папка', 'Ошибка'])
+                
+                if error_data:
+                    for data in error_data:
+                        writer.writerow([
+                            data.get('Папка', ''),
+                            data.get('Ошибка', ''),
+                        ])
                 else:
-                    now = datetime.now(tz)
-                    date_str = now.strftime('%Y-%m-%d')
-                    time_str = now.strftime('%H:%M')
-                
-                writer.writerow([
-                    row_num,
-                    date_str,
-                    time_str,
-                    folder_name,
-                    status,
-                    error
-                ])
-                row_num += 1
+                    writer.writerow(['✅ Нет ошибок', ''])
+            
+            logger.info(f"✅ CSV отчет создан: {filepath}")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания CSV отчета: {e}")
+            raise
+    
+    def generate_error_report(self, user_id):
+        """Генерирует отдельный отчет только с ошибками"""
+        try:
+            user_folder = self.fm.get_user_folder(user_id)
+            
+            publications = self.db.get_publications(user_id)
+            
+            error_data = []
+            for pub in publications:
+                if pub.get('status') != 'success':
+                    error_data.append({
+                        'Папка': pub.get('folder_name', ''),
+                        'Ошибка': pub.get('error', 'Неизвестная ошибка')
+                    })
+            
+            if not error_data:
+                return None
+            
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            report_filename = f"Ошибки_{timestamp}.csv"
+            report_path = os.path.join(user_folder, report_filename)
+            
+            with open(report_path, 'w', encoding='utf-8-sig', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=['Папка', 'Ошибка'], delimiter=';')
+                writer.writeheader()
+                writer.writerows(error_data)
+            
+            logger.info(f"⚠️ Отчет об ошибках создан: {report_path}")
+            return report_path
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания отчета об ошибках: {e}")
+            return None
     
     def cleanup_user_data(self, user_id, keep_report=True):
         """Удаляет временные данные пользователя"""
@@ -209,17 +413,14 @@ class ReportGenerator:
                 return
             
             if keep_report:
-                # Удаляем все папки, кроме файлов отчетов
                 for item in os.listdir(user_folder):
                     item_path = os.path.join(user_folder, item)
                     if os.path.isdir(item_path):
                         shutil.rmtree(item_path)
                         logger.info(f"🗑️ Удалена папка: {item}")
-                    elif not (item.startswith('Отчет_') or item.startswith('Ошибки_')):
+                    elif not item.startswith('Отчет_') and not item.startswith('Ошибки_'):
                         os.remove(item_path)
                         logger.info(f"🗑️ Удален файл: {item}")
-                    else:
-                        logger.info(f"ℹ️ Отчет сохранен: {item}")
             else:
                 shutil.rmtree(user_folder)
                 os.makedirs(user_folder, exist_ok=True)
@@ -227,3 +428,58 @@ class ReportGenerator:
                 
         except Exception as e:
             logger.error(f"❌ Ошибка очистки: {e}")
+    
+    def get_report_data(self, user_id):
+        """Возвращает данные для отчета в виде списка словарей"""
+        try:
+            publications = self.db.get_publications(user_id)
+            if not publications:
+                return []
+            
+            moscow_tz = pytz.timezone('Europe/Moscow')
+            report_data = []
+            current_date = None
+            
+            for pub in publications:
+                folder_name = pub.get('folder_name')
+                chat_id = pub.get('group_id')
+                created_at = pub.get('created_at')
+                
+                metadata = self.db.get_ad_metadata(user_id, folder_name)
+                
+                if created_at:
+                    if isinstance(created_at, str):
+                        created_at = datetime.fromisoformat(created_at)
+                    created_at = created_at.astimezone(moscow_tz)
+                    date_str = created_at.strftime('%Y-%m-%d')
+                    time_str = created_at.strftime('%H.%M')
+                else:
+                    now = datetime.now(moscow_tz)
+                    date_str = now.strftime('%Y-%m-%d')
+                    time_str = now.strftime('%H.%M')
+                
+                post_link = metadata.get('post_link', '')
+                if not post_link and chat_id:
+                    post_link = f"https://max.ru/c/{chat_id}"
+                
+                if current_date != date_str:
+                    current_date = date_str
+                    display_date = date_str
+                else:
+                    display_date = ''
+                
+                report_data.append({
+                    '№': len(report_data) + 1,
+                    'Дата': display_date,
+                    'Время публикации (МСК)': time_str,
+                    'Ссылка на пост': post_link,
+                    'Ссылка (источник)': metadata.get('Ссылка', ''),
+                    'Марка/модель': metadata.get('Название', ''),
+                    'Код предложения': metadata.get('Код предложения', ''),
+                })
+            
+            return report_data
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения данных для отчета: {e}")
+            return []
