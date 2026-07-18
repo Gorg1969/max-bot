@@ -98,7 +98,6 @@ class Publisher:
                     
                     if api_message_id:
                         logger.info(f"✅ Получен ID от API: {api_message_id}")
-                        # Используем ID от API (он более надежный)
                         message_id = api_message_id
                     else:
                         logger.info(f"⚠️ API не вернул ID, используем сгенерированный: {message_id}")
@@ -110,7 +109,6 @@ class Publisher:
                     
                 except Exception as e:
                     logger.warning(f"⚠️ Не удалось распарсить ответ: {e}")
-                    # Используем сгенерированный ID
                     post_link = f"https://max.ru/c/{chat_id_with_dash}/{message_id}"
                     logger.info(f"🔗 Ссылка на пост (без ответа API): {post_link}")
                     return True, post_link
@@ -137,7 +135,6 @@ class Publisher:
                     "payload": {"token": token}
                 })
             
-            # Генерируем уникальный ID
             message_id = str(uuid.uuid4())[:12]
             
             payload = {
@@ -224,9 +221,12 @@ class Publisher:
             # Сохраняем метаданные
             metadata = self._parse_metadata(metadata_text)
             
+            # ВАЖНО: добавляем post_link в metadata
             if post_link:
                 metadata['post_link'] = post_link
-                logger.info(f"🔗 Сохранена ссылка: {post_link}")
+                logger.info(f"🔗 Сохранена ссылка в metadata: {post_link}")
+            else:
+                logger.warning("⚠️ post_link не получен, сохраняем без ссылки")
             
             # Время публикации
             now = datetime.now(self.moscow_tz)
@@ -236,6 +236,7 @@ class Publisher:
             self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, timestamp)
             self.db.add_publication(user_id, folder_name, chat_id, status='success')
             
+            logger.info(f"✅ Папка {folder_name} опубликована, ссылка: {post_link}")
             return True, f"✅ Папка {folder_name} опубликована с {len(image_tokens)} фото"
             
         except Exception as e:
