@@ -13,10 +13,6 @@ from werkzeug.exceptions import ClientDisconnected
 from modules import Database, FileManager, Publisher, WebInterface
 from modules.report_generator import ReportGenerator
 
-# В Python консоли или в app.py добавьте:
-db = Database()
-# db.fix_publication_times()  # временно отключено, если метод отсутствуе
-
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
@@ -34,6 +30,8 @@ if not TOKEN:
     logger.error("❌ ТОКЕН НЕ НАЙДЕН!")
 
 db = Database()
+db.fix_publication_times()
+
 fm = FileManager(DATA_DIR)
 
 
@@ -539,7 +537,6 @@ UPLOAD_PAGE = """
 
         async function uploadSinglePhoto(file, folderName) {
             try {
-                // Сжимаем фото
                 let compressed;
                 try {
                     compressed = await compressImage(file, 600, 600, 0.5);
@@ -560,7 +557,6 @@ UPLOAD_PAGE = """
                     body: formData
                 });
                 
-                // Проверяем Content-Type
                 const contentType = response.headers.get('content-type');
                 if (!contentType || !contentType.includes('application/json')) {
                     const text = await response.text();
@@ -604,7 +600,6 @@ UPLOAD_PAGE = """
                 .filter(f => f.type && f.type.startsWith('image/'))
                 .slice(0, 10);
             
-            // Загружаем каждое фото по отдельности
             const imageTokens = [];
             for (const img of imageFiles) {
                 if (isStopped) {
@@ -614,7 +609,6 @@ UPLOAD_PAGE = """
                 if (token) {
                     imageTokens.push(token);
                 }
-                // Задержка между загрузкой фото
                 await new Promise(r => setTimeout(r, 300));
             }
             
@@ -737,7 +731,6 @@ UPLOAD_PAGE = """
                 }
                 
                 processedCount = i + 1;
-                // ЗАДЕРЖКА 5 СЕКУНД МЕЖДУ ПАПКАМИ
                 await new Promise(r => setTimeout(r, 5000));
             }
             
@@ -809,11 +802,9 @@ def upload_photo():
         if not user_id:
             return jsonify({'success': False, 'message': 'Нет user_id'}), 400
         
-        # Читаем байты фото
         image_bytes = photo.read()
         logger.info(f"📸 Загрузка фото {photo.filename}, размер: {len(image_bytes)} байт")
         
-        # Загружаем в MAX
         token = api.upload_file(image_bytes, photo.filename)
         
         if token:
@@ -905,105 +896,86 @@ def webhook():
             return jsonify({"ok": True}), 200
         
         # ===== ОБРАБОТКА СОБЫТИЯ message_created =====
-        # Проверяем различные варианты структуры события
-        event_type = data.get('event_type') or data.get('type')
+        update_type = data.get('update_type')
         
-        if event_type == 'message_created' or 'message_created' in str(data):
+        if update_type == 'message_created':
             logger.info("📨 Получено событие message_created")
             
-            # Извлекаем данные из разных возможных структур
             message = data.get('message', {})
-            if not message:
-                # Пробуем альтернативную структуру
-                message = data.get('data', {}).get('message', {})
+            recipient = message.get('recipient', {})
+            sender = message.get('sender', {})
+            body = message.get('body', {})
             
-            if message:
-                chat_id = message.get('chat_id')
-                message_id = message.get('id')
-                
-                logger.info(f"📨 chat_id: {chat_id}, message_id: {message_id}")
-                
-                if chat_id and message_id:
-                    # Обрабатываем событие через publisher
-                    publisher.handle_message_created(data)
-                else:
-                    logger.warning(f"⚠️ Неполные данные в вебхуке: {data}")
-            else:
-                logger.warning(f"⚠️ Нет message в вебхуке: {data}")
+            # Извлекаем данные
+            chat_id = recipient.get('chat_id')
+            user_id = sender.get('user_id')
+            text = body.get('text', '')
+            message_id = body.get('mid')  # ID сообщения
             
-            return jsonify({"ok": True}), 200
-        
-        # ===== ОБРАБОТКА ОБЫЧНОГО СООБЩЕНИЯ ОТ ПОЛЬЗОВАТЕЛЯ =====
-        user_id = None
-        text = None
-        
-        # Извлекаем данные из разных возможных структур
-        if 'message' in data:
-            msg = data['message']
-            if 'sender' in msg:
-                user_id = msg['sender'].get('user_id')
-            if 'body' in msg:
-                text = msg['body'].get('text')
-        elif 'payload' in data:
-            # Альтернативная структура
-            payload = data.get('payload', {})
-            if 'sender' in payload:
-                user_id = payload['sender'].get('user_id')
-            if 'body' in payload:
-                text = payload['body'].get('text')
-        
-        if not user_id:
-            # Если не удалось определить user_id, пробуем другие варианты
-            user_id = data.get('user_id') or data.get('sender_id')
-            if not user_id:
-                logger.info(f"ℹ️ Не удалось определить user_id, пропускаем")
+            logger.info(f"📨 chat_id: {chat_id}, user_id: {user_id}, text: {text}, mid: {message_id}")
+            
+            # Если есть user_id и text - это сообщение от пользователя
+            if user_id and text:
+                # Обрабатываем команды пользователя
+                if text.strip() == '/start':
+                    api.send_message(
+                        user_id,
+                        "🏠 **Главное меню**\n\n"
+                        "🌐 **Загрузить папку:**\n"
+                        f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
+                        "📊 **Получить отчет:**\n"
+                        f"🔗 https://maxbot.bothost.tech/report/{user_id}\n\n"
+                        "⏹ **Остановить публикацию:** `/stop`\n\n"
+                        "📋 **Инструкция:**\n"
+                        "1. Подготовьте папки с объявлениями\n"
+                        "2. Используйте разделитель #изъятая\n"
+                        "3. Фото до 10 шт на объявление"
+                    )
+                    return jsonify({"ok": True}), 200
+                
+                if text.strip() == '/stop':
+                    publisher.stop(user_id)
+                    api.send_message(
+                        user_id, 
+                        "⏹️ **Публикация остановлена!**\n\n"
+                        "✅ Все процессы остановлены\n"
+                        "🗑️ Временные файлы удалены"
+                    )
+                    return jsonify({"ok": True}), 200
+                
+                if text.strip() == '/report':
+                    api.send_message(user_id, "📊 Создаю отчет...")
+                    report_path = report_gen.generate_report(user_id)
+                    if report_path:
+                        filename = os.path.basename(report_path)
+                        download_url = f"https://maxbot.bothost.tech/download_report/{user_id}/{filename}"
+                        api.send_message(
+                            user_id,
+                            f"📊 **Отчет создан!**\n\n"
+                            f"🔗 [Скачать отчет]({download_url})"
+                        )
+                    else:
+                        api.send_message(user_id, "❌ Нет данных для отчета.")
+                    return jsonify({"ok": True}), 200
+            
+            # Если есть chat_id и message_id - это ответ от бота (получаем post_id)
+            if chat_id and message_id:
+                logger.info(f"📨 Получен ID сообщения: {message_id} для чата {chat_id}")
+                # Обрабатываем через publisher
+                publisher.handle_message_created(chat_id, message_id)
                 return jsonify({"ok": True}), 200
-        
-        logger.info(f"💬 user_id={user_id}, text={text}")
-        
-        if text and text.strip() == '/start':
-            api.send_message(
-                user_id,
-                "🏠 **Главное меню**\n\n"
-                "🌐 **Загрузить папку:**\n"
-                f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
-                "📊 **Получить отчет:**\n"
-                f"🔗 https://maxbot.bothost.tech/report/{user_id}\n\n"
-                "⏹ **Остановить публикацию:** `/stop`\n\n"
-                "📋 **Инструкция:**\n"
-                "1. Подготовьте папки с объявлениями\n"
-                "2. Используйте разделитель #изъятая\n"
-                "3. Фото до 10 шт на объявление"
-            )
+            
             return jsonify({"ok": True}), 200
         
-        if text and text.strip() == '/stop':
-            publisher.stop(user_id)
-            api.send_message(
-                user_id, 
-                "⏹️ **Публикация остановлена!**\n\n"
-                "✅ Все процессы остановлены\n"
-                "🗑️ Временные файлы удалены"
-            )
+        # ===== ОБРАБОТКА СОБЫТИЯ bot_stopped =====
+        if update_type == 'bot_stopped':
+            logger.info("📨 Получено событие bot_stopped")
             return jsonify({"ok": True}), 200
         
-        if text and text.strip() == '/report':
-            api.send_message(user_id, "📊 Создаю отчет...")
-            report_path = report_gen.generate_report(user_id)
-            if report_path:
-                filename = os.path.basename(report_path)
-                download_url = f"https://maxbot.bothost.tech/download_report/{user_id}/{filename}"
-                api.send_message(
-                    user_id,
-                    f"📊 **Отчет создан!**\n\n"
-                    f"🔗 [Скачать отчет]({download_url})"
-                )
-            else:
-                api.send_message(user_id, "❌ Нет данных для отчета.")
-            return jsonify({"ok": True}), 200
-        
-        # Если ничего не подошло, но это вебхук - просто возвращаем ok
+        # ===== ОБРАБОТКА ДРУГИХ СОБЫТИЙ =====
+        logger.info(f"ℹ️ Получен вебхук с update_type: {update_type}")
         return jsonify({"ok": True}), 200
+        
     except Exception as e:
         logger.error(f"❌ ОШИБКА В ВЕБХУКЕ: {e}")
         import traceback
@@ -1060,7 +1032,7 @@ def status():
 
 @app.route('/setup_webhook')
 def setup_webhook():
-    """Настраивает подписку на вебхук с поддержкой message_created"""
+    """Настраивает подписку на вебхук"""
     token = request.args.get('token') or TOKEN
     if not token:
         return "❌ Токен не найден", 400
@@ -1069,10 +1041,9 @@ def setup_webhook():
     headers = {"Authorization": token, "Content-Type": "application/json"}
     
     try:
-        # Пробуем настроить подписку с поддержкой message_created
         payload = {
             "url": webhook_url,
-            "update_types": ["message_created", "message_updated", "bot_started", "bot_stopped", "message_callback"]
+            "update_types": ["message_created", "bot_started", "bot_stopped"]
         }
         
         r = requests.post(
@@ -1122,15 +1093,14 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
     if TOKEN:
         logger.info(f"✅ Токен найден (первые 10): {TOKEN[:10]}...")
-    
-    # Попытка настроить вебхук при запуске
-    if TOKEN:
+        
+        # Настройка вебхука при запуске
         try:
             webhook_url = "https://maxbot.bothost.tech/webhook"
             headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
             payload = {
                 "url": webhook_url,
-                "update_types": ["message_created", "message_updated", "bot_started", "bot_stopped", "message_callback"]
+                "update_types": ["message_created", "bot_started", "bot_stopped"]
             }
             r = requests.post(
                 "https://platform-api2.max.ru/subscriptions",
