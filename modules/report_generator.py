@@ -46,7 +46,19 @@ class ReportGenerator:
                 status = pub.get('status', '')
                 error = pub.get('error', '')
                 
+                # Получаем метаданные из БД
                 metadata = self.db.get_ad_metadata(user_id, folder_name)
+                
+                # ===== ВАЖНО: читаем post_link из metadata =====
+                post_link = metadata.get('post_link', '')
+                
+                # Логируем для отладки
+                logger.info(f"🔗 Для папки {folder_name} post_link из БД: '{post_link}'")
+                
+                # Если ссылки нет, используем fallback (но это не должно происходить)
+                if not post_link and chat_id:
+                    post_link = f"https://max.ru/c/{chat_id}"
+                    logger.warning(f"⚠️ Ссылка для {folder_name} не найдена в БД, используем fallback")
                 
                 # Время публикации
                 created_at = pub.get('created_at')
@@ -69,14 +81,6 @@ class ReportGenerator:
                     date_str = now.strftime('%d.%m.%Y')
                     time_str = now.strftime('%H.%M')
                 
-                # Ссылка на пост - берем из метаданных (обновляется через вебхук)
-                post_link = metadata.get('post_link', '')
-                
-                # Если ссылка еще не получена, используем fallback
-                if not post_link and chat_id:
-                    post_link = f"https://max.ru/c/{chat_id}"
-                    logger.warning(f"⚠️ Ссылка для {folder_name} еще не получена, используем fallback")
-                
                 if status == 'success':
                     if current_date != date_str:
                         current_date = date_str
@@ -88,7 +92,7 @@ class ReportGenerator:
                         '№': index,
                         'Дата': display_date,
                         'Время публикации (МСК)': time_str,
-                        'Ссылка на пост': post_link,
+                        'Ссылка на пост': post_link,  # <-- ИСПОЛЬЗУЕМ post_link из БД
                         'Ссылка (источник)': metadata.get('Ссылка', ''),
                         'Название': metadata.get('Название', ''),
                         'Код предложения': metadata.get('Код предложения', ''),
