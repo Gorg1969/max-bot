@@ -8,6 +8,7 @@ import urllib3
 import json
 import threading
 import time
+import base64
 from werkzeug.exceptions import ClientDisconnected
 from modules import Database, FileManager, Publisher, WebInterface
 from modules.report_generator import ReportGenerator
@@ -16,7 +17,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")
-app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -85,7 +86,7 @@ class APIClient:
             return False
         try:
             attachments = []
-            for token in tokens[:10]:  # ИЗМЕНЕНО: 3 -> 10
+            for token in tokens[:10]:
                 attachments.append({
                     "type": "image",
                     "payload": {"token": token}
@@ -116,6 +117,74 @@ class APIClient:
             logger.error(f"❌ Ошибка: {e}")
             return False
 
+    def upload_file(self, image_bytes, filename='image.jpg'):
+        """
+        Загружает ОДНО изображение в MAX через /uploads
+        Возвращает токен или None
+        """
+        if not self.token:
+            logger.error("❌ Нет токена для загрузки")
+            return None
+        
+        try:
+            # 1. Получаем URL для загрузки
+            response = requests.post(
+                f"{self.base_url}/uploads",
+                headers={"Authorization": self.token},
+                params={"type": "image"},
+                timeout=30,
+                verify=False
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"❌ Ошибка получения URL: {response.status_code} - {response.text}")
+                return None
+            
+            upload_data = response.json()
+            upload_url = upload_data.get('url')
+            
+            if not upload_url:
+                logger.error(f"❌ Не получен URL: {upload_data}")
+                return None
+            
+            # 2. Загружаем файл
+            files = {'data': (filename, image_bytes, 'image/jpeg')}
+            
+            upload_response = requests.post(
+                upload_url,
+                files=files,
+                timeout=60,
+                verify=False
+            )
+            
+            if upload_response.status_code != 200:
+                logger.error(f"❌ Ошибка загрузки: {upload_response.status_code} - {upload_response.text}")
+                return None
+            
+            upload_result = upload_response.json()
+            
+            # 3. Извлекаем токен
+            token = None
+            if 'photos' in upload_result and isinstance(upload_result['photos'], dict):
+                for photo_data in upload_result['photos'].values():
+                    if isinstance(photo_data, dict) and 'token' in photo_data:
+                        token = photo_data['token']
+                        break
+            
+            if not token and 'token' in upload_result:
+                token = upload_result['token']
+            
+            if not token:
+                logger.error(f"❌ Не получен токен: {upload_result}")
+                return None
+            
+            logger.info(f"✅ Файл загружен, токен: {token[:20]}...")
+            return token
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки: {e}")
+            return None
+
 api = APIClient()
 publisher = Publisher(api, fm, db)
 report_gen = ReportGenerator(fm, db)
@@ -128,9 +197,9 @@ UPLOAD_PAGE = """
     <meta charset="UTF-8">
     <title>Загрузка объявлений</title>
     <style>
-        body { font-family: Arial; max-width: 800px; margin: 50px auto; padding: 20px; background: #f5f5f5; }
+        body { font-family: Arial; max-width: 900px; margin: 50px auto; padding: 20px; background: #f5f5f5; }
         .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h1 { color: #333; margin-top: 0; }
+        h1 { color: #333; margin-top: 0; display: flex; align-items: center; gap: 10px; }
         .drop-zone { border: 2px dashed #007bff; padding: 40px; margin: 20px 0; border-radius: 10px; background: #f8f9fa; text-align: center; cursor: pointer; transition: all 0.3s; }
         .drop-zone:hover { background: #e3f2fd; }
         .drop-zone.dragover { background: #d4edda; border-color: #28a745; }
@@ -144,30 +213,40 @@ UPLOAD_PAGE = """
         .btn-success:hover { background: #218838; }
         .btn-danger { background: #dc3545; color: white; }
         .btn-danger:hover { background: #c82333; }
+        .btn-stop { background: #fd7e14; color: white; }
+        .btn-stop:hover { background: #e06b0a; }
         .status { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
         .status.success { background: #d4edda; color: #155724; display: block; border-left: 4px solid #28a745; }
         .status.error { background: #f8d7da; color: #721c24; display: block; border-left: 4px solid #dc3545; }
         .status.info { background: #d1ecf1; color: #0c5460; display: block; border-left: 4px solid #17a2b8; }
         .status.warning { background: #fff3cd; color: #856404; display: block; border-left: 4px solid #ffc107; }
-        .file-list { text-align: left; margin: 20px 0; padding: 0; list-style: none; }
+        .status.stop { background: #f8d7da; color: #721c24; display: block; border-left: 4px solid #dc3545; }
+        .file-list { text-align: left; margin: 20px 0; padding: 0; list-style: none; max-height: 300px; overflow-y: auto; }
         .file-list li { background: #f8f9fa; padding: 10px 15px; margin: 5px 0; border-radius: 5px; border-left: 3px solid #007bff; display: flex; justify-content: space-between; align-items: center; }
         .file-list li .count { background: #007bff; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
         .progress-bar { width: 100%; height: 25px; background: #e9ecef; border-radius: 10px; overflow: hidden; margin: 10px 0; display: none; }
         .progress-bar .progress { height: 100%; background: linear-gradient(90deg, #28a745, #20c997); transition: width 0.3s; width: 0%; display: flex; align-items: center; justify-content: center; color: white; font-size: 12px; font-weight: bold; }
-        .instructions { background: #fff3cd; padding: 15px 20px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107; }
-        .instructions code { background: #f8f9fa; padding: 2px 8px; border-radius: 3px; font-size: 14px; color: #d63384; }
-        #log { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; font-family: 'Courier New', monospace; font-size: 12px; max-height: 300px; overflow-y: auto; margin: 20px 0; display: none; white-space: pre-wrap; line-height: 1.5; }
+        .progress-bar .progress.stopped { background: linear-gradient(90deg, #dc3545, #c82333); }
+        .instructions { background: #fff3cd; padding: 15px 20px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107; font-size: 14px; line-height: 1.6; }
+        .instructions code { background: #f8f9fa; padding: 2px 8px; border-radius: 3px; font-size: 13px; color: #d63384; }
+        #log { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; font-family: 'Courier New', monospace; font-size: 12px; max-height: 350px; overflow-y: auto; margin: 20px 0; display: none; white-space: pre-wrap; line-height: 1.5; }
         .button-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px; }
         .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
-        .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; }
+        .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; border-top: 1px solid #eee; padding-top: 20px; }
         .report-section { margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 10px; border: 1px solid #dee2e6; text-align: center; }
-        .stop-btn { background: #dc3545; color: white; }
-        .stop-btn:hover { background: #c82333; }
+        .queue-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; display: none; font-weight: 500; }
+        .photo-progress { margin: 5px 0; font-size: 13px; color: #666; }
+        @media (max-width: 600px) {
+            body { padding: 10px; margin: 10px; }
+            .container { padding: 15px; }
+            .button-group { flex-direction: column; }
+            .btn { width: 100%; }
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>📤 Загрузка объявлений</h1>
+        <h1>📤 Загрузка объявлений в MAX</h1>
         
         <div class="instructions">
             <strong>📌 Как подготовить папку:</strong><br>
@@ -178,12 +257,14 @@ UPLOAD_PAGE = """
             &nbsp;&nbsp;• Текст ДО разделителя — публикуется в чат<br>
             &nbsp;&nbsp;• Текст ПОСЛЕ разделителя — идет в отчет<br>
             5️⃣ Перетащите головную папку в поле ниже<br>
-            6️⃣ Каждая папка отправляется отдельным запросом
+            6️⃣ Каждая папка отправляется отдельным запросом<br>
+            7️⃣ <strong>Максимум 10 фото</strong>
         </div>
         
         <div class="drop-zone" id="dropZone">
             <span class="icon">📂</span>
             <p><strong>Перетащите головную папку сюда</strong></p>
+            <p style="font-size: 14px; color: #888;">или</p>
             <button class="btn btn-primary" onclick="document.getElementById('folderInput').click()">Выбрать папку</button>
             <input type="file" id="folderInput" webkitdirectory multiple>
         </div>
@@ -193,10 +274,12 @@ UPLOAD_PAGE = """
             <ul class="file-list" id="fileListContent"></ul>
             <div class="button-group">
                 <button class="btn btn-success" onclick="uploadFolder()">🚀 Загрузить</button>
-                <button class="btn btn-danger stop-btn" onclick="stopProcessing()">⏹ Остановить</button>
+                <button class="btn btn-stop" onclick="stopProcessing()">⏹ Остановить</button>
                 <button class="btn btn-danger" onclick="clearFiles()">🗑️ Очистить</button>
             </div>
         </div>
+        
+        <div class="queue-info" id="queueInfo"></div>
         
         <div class="progress-bar" id="progressBar">
             <div class="progress" id="progress">0%</div>
@@ -210,7 +293,7 @@ UPLOAD_PAGE = """
             <p style="margin-top: 10px; color: #666; font-size: 14px;">После публикации всех папок</p>
         </div>
         
-        <div class="footer">⚡ MAX Bot | Загрузка объявлений</div>
+        <div class="footer">⚡ MAX Bot | Загрузка объявлений v2.0</div>
     </div>
 
     <script>
@@ -220,6 +303,10 @@ UPLOAD_PAGE = """
         let selectedFiles = [];
         let isProcessing = false;
         let isStopped = false;
+        let processedCount = 0;
+        let totalFolders = 0;
+        let successCount = 0;
+        let errorCount = 0;
         
         const dropZone = document.getElementById('dropZone');
         const folderInput = document.getElementById('folderInput');
@@ -230,6 +317,7 @@ UPLOAD_PAGE = """
         const logDiv = document.getElementById('log');
         const progressBar = document.getElementById('progressBar');
         const progress = document.getElementById('progress');
+        const queueInfo = document.getElementById('queueInfo');
 
         dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
         dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('dragover'); });
@@ -298,6 +386,7 @@ UPLOAD_PAGE = """
                 const count = fileCount[folder] || 0;
                 const displayName = folder.includes('/') ? folder.split('/')[1] : folder;
                 li.innerHTML = `<span>📁 <strong>${displayName}</strong></span><span class="count">${count} файлов</span>`;
+                li.id = `folder-${folder.replace(/[^a-zA-Z0-9]/g, '_')}`;
                 fileListContent.appendChild(li);
             });
             
@@ -311,11 +400,17 @@ UPLOAD_PAGE = """
             fileList.style.display = 'none';
             statusDiv.style.display = 'none';
             progressBar.style.display = 'none';
+            queueInfo.style.display = 'none';
             logDiv.style.display = 'none';
             progress.style.width = '0%';
             progress.textContent = '0%';
+            progress.className = 'progress';
             folderInput.value = '';
             isStopped = false;
+            processedCount = 0;
+            totalFolders = 0;
+            successCount = 0;
+            errorCount = 0;
         }
 
         function addLog(message) {
@@ -355,6 +450,7 @@ UPLOAD_PAGE = """
                 if (result.success) {
                     showStatus('stop', '⏹ Процесс остановлен!');
                     addLog(`✅ ${result.message}`);
+                    progress.className = 'progress stopped';
                 } else {
                     showStatus('error', `❌ Ошибка остановки: ${result.message}`);
                 }
@@ -365,8 +461,93 @@ UPLOAD_PAGE = """
             isProcessing = false;
         }
 
+        function compressImage(file, maxWidth = 800, maxHeight = 800, quality = 0.7) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = (event) => {
+                    const img = new Image();
+                    img.src = event.target.result;
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        let width = img.width;
+                        let height = img.height;
+                        
+                        if (width > height) {
+                            if (width > maxWidth) {
+                                height = height * (maxWidth / width);
+                                width = maxWidth;
+                            }
+                        } else {
+                            if (height > maxHeight) {
+                                width = width * (maxHeight / height);
+                                height = maxHeight;
+                            }
+                        }
+                        
+                        canvas.width = width;
+                        canvas.height = height;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, width, height);
+                        
+                        const mimeType = 'image/jpeg';
+                        
+                        canvas.toBlob((blob) => {
+                            if (blob) {
+                                const compressedFile = new File([blob], file.name.replace(/\\.[^.]+$/, '.jpg'), {
+                                    type: mimeType,
+                                    lastModified: Date.now()
+                                });
+                                resolve(compressedFile);
+                            } else {
+                                reject(new Error('Не удалось сжать изображение'));
+                            }
+                        }, mimeType, quality);
+                    };
+                    img.onerror = reject;
+                };
+                reader.onerror = reject;
+            });
+        }
+
+        async function uploadSinglePhoto(file, folderName) {
+            try {
+                // Сжимаем фото
+                const compressed = await compressImage(file, 800, 800, 0.7);
+                
+                // Читаем как ArrayBuffer
+                const arrayBuffer = await compressed.arrayBuffer();
+                const bytes = new Uint8Array(arrayBuffer);
+                
+                addLog(`📤 Загрузка фото ${file.name} (${(compressed.size/1024).toFixed(0)}KB)...`);
+                
+                const formData = new FormData();
+                formData.append('photo', compressed);
+                formData.append('user_id', userId);
+                formData.append('folder_name', folderName);
+                
+                const response = await fetch('/upload_photo', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    addLog(`✅ Фото ${file.name} загружено`);
+                    return result.token;
+                } else {
+                    addLog(`❌ Ошибка загрузки ${file.name}: ${result.message}`);
+                    return null;
+                }
+            } catch (error) {
+                addLog(`❌ Ошибка загрузки ${file.name}: ${error.message}`);
+                return null;
+            }
+        }
+
         async function prepareFolderData(folderName, files) {
-            const txtFile = files.find(f => f.name === 'info' || f.name.endsWith('.txt'));
+            const txtFile = files.find(f => f.name === 'info.txt' || f.name.endsWith('.txt'));
             if (!txtFile) {
                 return null;
             }
@@ -384,29 +565,30 @@ UPLOAD_PAGE = """
             
             const imageFiles = files
                 .filter(f => f.type && f.type.startsWith('image/'))
-                .slice(0, 10);  // ИЗМЕНЕНО: 3 -> 10
+                .slice(0, 10);
             
-            const images = [];
+            // Загружаем каждое фото по отдельности
+            const imageTokens = [];
             for (const img of imageFiles) {
-                try {
-                    const arrayBuffer = await img.arrayBuffer();
-                    images.push({
-                        name: img.name,
-                        data: Array.from(new Uint8Array(arrayBuffer)),
-                        type: img.type || 'image/jpeg'
-                    });
-                    addLog(`✅ Фото ${img.name} преобразовано`);
-                } catch (e) {
-                    addLog(`⚠️ Ошибка чтения ${img.name}: ${e.message}`);
+                if (isStopped) {
+                    break;
                 }
+                const token = await uploadSinglePhoto(img, folderName);
+                if (token) {
+                    imageTokens.push(token);
+                }
+                // Задержка между загрузкой фото
+                await new Promise(r => setTimeout(r, 300));
             }
+            
+            addLog(`📦 Загружено ${imageTokens.length} из ${imageFiles.length} фото`);
             
             return {
                 folderName: folderName,
                 adText: adText,
                 metadataText: metadataText,
                 fullText: fullText,
-                images: images
+                imageTokens: imageTokens  // <-- ТОЛЬКО ТОКЕНЫ!
             };
         }
 
@@ -423,12 +605,17 @@ UPLOAD_PAGE = """
             
             isProcessing = true;
             isStopped = false;
+            processedCount = 0;
+            successCount = 0;
+            errorCount = 0;
             
             showStatus('info', '⏳ Подготовка данных...');
             progressBar.style.display = 'block';
             progress.style.width = '0%';
             progress.textContent = '0%';
+            progress.className = 'progress';
             logDiv.textContent = '';
+            queueInfo.style.display = 'block';
             addLog('🚀 Начинаем обработку...');
             
             const folders = {};
@@ -444,13 +631,12 @@ UPLOAD_PAGE = """
             });
             
             const folderNames = Object.keys(folders);
-            const totalFolders = folderNames.length;
+            totalFolders = folderNames.length;
             
             addLog(`📁 Найдено ${totalFolders} папок`);
+            queueInfo.textContent = `📋 В очереди: ${totalFolders} папок | Обработано: 0/${totalFolders}`;
             showStatus('info', `⏳ Подготовка 0/${totalFolders} папок...`);
             
-            let uploadedFolders = 0;
-            let failedFolders = 0;
             const results = [];
             
             for (let i = 0; i < folderNames.length; i++) {
@@ -465,6 +651,7 @@ UPLOAD_PAGE = """
                 const percent = Math.round((i / totalFolders) * 100);
                 progress.style.width = percent + '%';
                 progress.textContent = `${i}/${totalFolders}`;
+                queueInfo.textContent = `📋 В очереди: ${totalFolders - i} папок | Обработано: ${i}/${totalFolders}`;
                 showStatus('info', `⏳ Подготовка ${i+1}/${totalFolders}: ${folderName}`);
                 
                 try {
@@ -473,7 +660,7 @@ UPLOAD_PAGE = """
                     
                     if (!folderData) {
                         addLog(`⚠️ Пропускаем ${folderName}: нет текстового файла`);
-                        failedFolders++;
+                        errorCount++;
                         results.push(`❌ ${folderName}: нет текстового файла`);
                         continue;
                     }
@@ -483,7 +670,7 @@ UPLOAD_PAGE = """
                         break;
                     }
                     
-                    addLog(`📤 Отправка ${i+1}/${totalFolders}: ${folderName} (${folderData.images.length} фото)`);
+                    addLog(`📤 Отправка ${i+1}/${totalFolders}: ${folderName} (${folderData.imageTokens.length} фото)`);
                     
                     const response = await fetch('/publish_folder', {
                         method: 'POST',
@@ -497,34 +684,47 @@ UPLOAD_PAGE = """
                     const result = await response.json();
                     
                     if (result.success) {
-                        uploadedFolders++;
+                        successCount++;
                         addLog(`✅ ${folderName}: опубликовано`);
                         results.push(`✅ ${folderName}: успешно`);
                     } else {
-                        failedFolders++;
+                        errorCount++;
                         addLog(`❌ ${folderName}: ${result.message}`);
                         results.push(`❌ ${folderName}: ${result.message}`);
                     }
                     
                 } catch (error) {
-                    failedFolders++;
+                    errorCount++;
                     addLog(`❌ ${folderName}: ошибка - ${error.message}`);
                     results.push(`❌ ${folderName}: ${error.message}`);
                 }
                 
-                // ИЗМЕНЕНО: задержка 5 секунд между папками
+                processedCount = i + 1;
+                // ЗАДЕРЖКА 5 СЕКУНД МЕЖДУ ПАПКАМИ
                 await new Promise(r => setTimeout(r, 5000));
+            }
+            
+            if (isStopped) {
+                progress.style.width = '100%';
+                progress.textContent = `${processedCount}/${totalFolders} (Остановлено)`;
+                progress.className = 'progress stopped';
+                showStatus('stop', `⏹ Остановлено! Обработано ${processedCount}/${totalFolders} папок`);
+                addLog(`⏹ ПРОЦЕСС ОСТАНОВЛЕН`);
+                addLog(`📊 Обработано: ${successCount} успешно, ${errorCount} с ошибками`);
+                isProcessing = false;
+                return;
             }
             
             progress.style.width = '100%';
             progress.textContent = `${totalFolders}/${totalFolders}`;
+            queueInfo.textContent = `✅ Завершено! Обработано ${totalFolders} папок`;
             
-            if (failedFolders === 0) {
-                showStatus('success', `✅ Загружено ${uploadedFolders} папок!`);
-                addLog(`✅ ВСЕ ${uploadedFolders} папок загружены!`);
+            if (errorCount === 0) {
+                showStatus('success', `✅ Загружено ${successCount} папок!`);
+                addLog(`✅ ВСЕ ${successCount} папок загружены!`);
             } else {
-                showStatus('warning', `⚠️ Загружено ${uploadedFolders} папок, ${failedFolders} с ошибками`);
-                addLog(`⚠️ Загружено ${uploadedFolders} папок, ${failedFolders} с ошибками`);
+                showStatus('warning', `⚠️ Загружено ${successCount} папок, ${errorCount} с ошибками`);
+                addLog(`⚠️ Загружено ${successCount} папок, ${errorCount} с ошибками`);
             }
             
             if (results.length > 0) {
@@ -535,7 +735,7 @@ UPLOAD_PAGE = """
                 }
             }
             
-            if (uploadedFolders > 0) {
+            if (successCount > 0) {
                 addLog(`\\n📊 Скачать отчет: /report/${userId}`);
             }
             
@@ -556,9 +756,40 @@ def index():
 def upload_page():
     return render_template_string(UPLOAD_PAGE)
 
+@app.route('/upload_photo', methods=['POST'])
+def upload_photo():
+    """
+    Загружает ОДНО фото в MAX через /uploads
+    Возвращает токен
+    """
+    try:
+        photo = request.files.get('photo')
+        user_id = request.form.get('user_id')
+        folder_name = request.form.get('folder_name')
+        
+        if not photo:
+            return jsonify({'success': False, 'message': 'Нет фото'}), 400
+        
+        if not user_id:
+            return jsonify({'success': False, 'message': 'Нет user_id'}), 400
+        
+        # Читаем байты фото
+        image_bytes = photo.read()
+        
+        # Загружаем в MAX
+        token = api.upload_file(image_bytes, photo.filename)
+        
+        if token:
+            return jsonify({'success': True, 'token': token})
+        else:
+            return jsonify({'success': False, 'message': 'Не удалось загрузить фото'}), 500
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки фото: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
+
 @app.route('/stop_processing', methods=['POST'])
 def stop_processing():
-    """Останавливает процесс публикации"""
     try:
         data = request.get_json()
         user_id = data.get('user_id')
@@ -568,10 +799,8 @@ def stop_processing():
         
         logger.info(f"⏹ ПОЛУЧЕНА КОМАНДА ОСТАНОВКИ для пользователя {user_id}")
         
-        # Останавливаем publisher
         publisher.stop(user_id)
         
-        # Очищаем временные файлы
         try:
             temp_dir = os.path.join(DATA_DIR, 'temp', str(user_id))
             if os.path.exists(temp_dir):
@@ -602,23 +831,15 @@ def publish_folder():
         folder_name = folder_data.get('folderName')
         ad_text = folder_data.get('adText')
         metadata_text = folder_data.get('metadataText')
-        images = folder_data.get('images', [])
+        image_tokens = folder_data.get('imageTokens', [])  # <-- ТОЛЬКО ТОКЕНЫ!
         
         logger.info(f"📦 Получена папка: {folder_name} от пользователя {user_id}")
-        logger.info(f"📝 Текст: {len(ad_text)} символов, 🖼️ Фото: {len(images)}")
+        logger.info(f"📝 Текст: {len(ad_text)} символов, 🖼️ Фото: {len(image_tokens)}")
         
-        success, message = publisher.publish_single_folder(
-            user_id, folder_name, ad_text, metadata_text, images
+        # Передаем токены напрямую в publisher
+        success, message = publisher.publish_folder_with_tokens(
+            user_id, folder_name, ad_text, metadata_text, image_tokens
         )
-        
-        # Очищаем временные файлы после публикации
-        try:
-            temp_dir = os.path.join(DATA_DIR, 'temp', str(user_id), folder_name)
-            if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
-                logger.info(f"🗑️ Удалена временная папка: {temp_dir}")
-        except Exception as e:
-            logger.error(f"⚠️ Ошибка удаления временных файлов: {e}")
         
         if success:
             return jsonify({'success': True, 'message': message})
@@ -627,6 +848,8 @@ def publish_folder():
         
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/webhook', methods=['POST'])
@@ -722,8 +945,7 @@ def download_report(user_id, filename):
         if not os.path.exists(file_path):
             return "❌ Файл не найден", 404
         
-        response = send_file(file_path, as_attachment=True, download_name=filename)
-        return response
+        return send_file(file_path, as_attachment=True, download_name=filename)
         
     except Exception as e:
         logger.error(f"❌ Ошибка скачивания: {e}")
@@ -758,6 +980,18 @@ def setup_webhook():
             return f"❌ Ошибка: {r.status_code} - {r.text}"
     except Exception as e:
         return f"❌ Ошибка: {e}"
+
+@app.route('/cleanup_temp', methods=['POST'])
+def cleanup_temp():
+    try:
+        temp_dir = os.path.join(DATA_DIR, 'temp')
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+            os.makedirs(temp_dir, exist_ok=True)
+            return jsonify({'success': True, 'message': 'Временные файлы очищены'})
+        return jsonify({'success': True, 'message': 'Нет временных файлов'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
