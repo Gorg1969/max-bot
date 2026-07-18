@@ -32,6 +32,7 @@ if not TOKEN:
 db = Database()
 fm = FileManager(DATA_DIR)
 
+
 class APIClient:
     def __init__(self):
         self.token = TOKEN
@@ -137,12 +138,17 @@ class APIClient:
             )
             
             if response.status_code != 200:
-                logger.error(f"❌ Ошибка получения URL: {response.status_code} - {response.text}")
+                logger.error(f"❌ Ошибка получения URL: {response.status_code} - {response.text[:200]}")
                 return None
             
-            upload_data = response.json()
-            upload_url = upload_data.get('url')
+            try:
+                upload_data = response.json()
+            except ValueError:
+                raw_text = response.text.strip()
+                logger.error(f"❌ Невалидный JSON: {raw_text[:200]}")
+                return None
             
+            upload_url = upload_data.get('url')
             if not upload_url:
                 logger.error(f"❌ Не получен URL: {upload_data}")
                 return None
@@ -158,10 +164,15 @@ class APIClient:
             )
             
             if upload_response.status_code != 200:
-                logger.error(f"❌ Ошибка загрузки: {upload_response.status_code} - {upload_response.text}")
+                logger.error(f"❌ Ошибка загрузки: {upload_response.status_code} - {upload_response.text[:200]}")
                 return None
             
-            upload_result = upload_response.json()
+            try:
+                upload_result = upload_response.json()
+            except ValueError:
+                raw_text = upload_response.text.strip()
+                logger.error(f"❌ Невалидный JSON в ответе: {raw_text[:200]}")
+                return None
             
             # 3. Извлекаем токен
             token = None
@@ -174,6 +185,9 @@ class APIClient:
             if not token and 'token' in upload_result:
                 token = upload_result['token']
             
+            if not token and 'data' in upload_result and 'token' in upload_result['data']:
+                token = upload_result['data']['token']
+            
             if not token:
                 logger.error(f"❌ Не получен токен: {upload_result}")
                 return None
@@ -181,9 +195,18 @@ class APIClient:
             logger.info(f"✅ Файл загружен, токен: {token[:20]}...")
             return token
             
+        except requests.exceptions.Timeout:
+            logger.error("❌ Таймаут при загрузке файла")
+            return None
+        except requests.exceptions.ConnectionError:
+            logger.error("❌ Ошибка соединения при загрузке файла")
+            return None
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки: {e}")
+            import traceback
+            traceback.print_exc()
             return None
+
 
 api = APIClient()
 publisher = Publisher(api, fm, db)
@@ -461,7 +484,7 @@ UPLOAD_PAGE = """
             isProcessing = false;
         }
 
-        function compressImage(file, maxWidth = 800, maxHeight = 800, quality = 0.7) {
+        function compressImage(file, maxWidth = 600, maxHeight = 600, quality = 0.5) {
             return new Promise((resolve, reject) => {
                 const reader = new FileReader();
                 reader.readAsDataURL(file);
@@ -513,11 +536,13 @@ UPLOAD_PAGE = """
         async function uploadSinglePhoto(file, folderName) {
             try {
                 // Сжимаем фото
-                const compressed = await compressImage(file, 800, 800, 0.7);
-                
-                // Читаем как ArrayBuffer
-                const arrayBuffer = await compressed.arrayBuffer();
-                const bytes = new Uint8Array(arrayBuffer);
+                let compressed;
+                try {
+                    compressed = await compressImage(file, 600, 600, 0.5);
+                } catch (e) {
+                    addLog(`⚠️ Не удалось сжать ${file.name}, пробуем оригинал`);
+                    compressed = file;
+                }
                 
                 addLog(`📤 Загрузка фото ${file.name} (${(compressed.size/1024).toFixed(0)}KB)...`);
                 
@@ -530,6 +555,14 @@ UPLOAD_PAGE = """
                     method: 'POST',
                     body: formData
                 });
+                
+                // Проверяем Content-Type
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    addLog(`❌ Сервер вернул не JSON: ${text.substring(0, 100)}`);
+                    return null;
+                }
                 
                 const result = await response.json();
                 
@@ -588,7 +621,7 @@ UPLOAD_PAGE = """
                 adText: adText,
                 metadataText: metadataText,
                 fullText: fullText,
-                imageTokens: imageTokens  // <-- ТОЛЬКО ТОКЕНЫ!
+                imageTokens: imageTokens
             };
         }
 
@@ -752,16 +785,15 @@ UPLOAD_PAGE = """
 def index():
     return "🤖 MAX Bot is running!"
 
+
 @app.route('/upload', methods=['GET'])
 def upload_page():
     return render_template_string(UPLOAD_PAGE)
 
+
 @app.route('/upload_photo', methods=['POST'])
 def upload_photo():
-    """
-    Загружает ОДНО фото в MAX через /uploads
-    Возвращает токен
-    """
+    """Загружает ОДНО фото в MAX через /uploads"""
     try:
         photo = request.files.get('photo')
         user_id = request.form.get('user_id')
@@ -775,18 +807,24 @@ def upload_photo():
         
         # Читаем байты фото
         image_bytes = photo.read()
+        logger.info(f"📸 Загрузка фото {photo.filename}, размер: {len(image_bytes)} байт")
         
         # Загружаем в MAX
         token = api.upload_file(image_bytes, photo.filename)
         
         if token:
+            logger.info(f"✅ Фото загружено, токен: {token[:20]}...")
             return jsonify({'success': True, 'token': token})
         else:
+            logger.error(f"❌ Не удалось загрузить фото {photo.filename}")
             return jsonify({'success': False, 'message': 'Не удалось загрузить фото'}), 500
         
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки фото: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
+
 
 @app.route('/stop_processing', methods=['POST'])
 def stop_processing():
@@ -818,6 +856,7 @@ def stop_processing():
         logger.error(f"❌ Ошибка остановки: {e}")
         return jsonify({'success': False, 'message': str(e)}), 500
 
+
 @app.route('/publish_folder', methods=['POST'])
 def publish_folder():
     try:
@@ -831,12 +870,11 @@ def publish_folder():
         folder_name = folder_data.get('folderName')
         ad_text = folder_data.get('adText')
         metadata_text = folder_data.get('metadataText')
-        image_tokens = folder_data.get('imageTokens', [])  # <-- ТОЛЬКО ТОКЕНЫ!
+        image_tokens = folder_data.get('imageTokens', [])
         
         logger.info(f"📦 Получена папка: {folder_name} от пользователя {user_id}")
         logger.info(f"📝 Текст: {len(ad_text)} символов, 🖼️ Фото: {len(image_tokens)}")
         
-        # Передаем токены напрямую в publisher
         success, message = publisher.publish_folder_with_tokens(
             user_id, folder_name, ad_text, metadata_text, image_tokens
         )
@@ -851,6 +889,7 @@ def publish_folder():
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
+
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -893,7 +932,12 @@ def webhook():
         
         if text and text.strip() == '/stop':
             publisher.stop(user_id)
-            api.send_message(user_id, "⏹️ **Публикация остановлена!**\n\n✅ Все процессы остановлены\n🗑️ Временные файлы удалены")
+            api.send_message(
+                user_id, 
+                "⏹️ **Публикация остановлена!**\n\n"
+                "✅ Все процессы остановлены\n"
+                "🗑️ Временные файлы удалены"
+            )
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/report':
@@ -916,6 +960,7 @@ def webhook():
         logger.error(f"❌ ОШИБКА: {e}")
         return jsonify({"ok": False}), 500
 
+
 @app.route('/report/<int:user_id>')
 def report_page(user_id):
     report_path = report_gen.generate_report(user_id)
@@ -936,6 +981,7 @@ def report_page(user_id):
     </html>
     """
 
+
 @app.route('/download_report/<int:user_id>/<path:filename>')
 def download_report(user_id, filename):
     try:
@@ -951,13 +997,16 @@ def download_report(user_id, filename):
         logger.error(f"❌ Ошибка скачивания: {e}")
         return str(e), 500
 
+
 @app.route('/health')
 def health():
     return {"status": "ok"}
 
+
 @app.route('/status')
 def status():
     return {"status": "running", "token_set": bool(TOKEN)}
+
 
 @app.route('/setup_webhook')
 def setup_webhook():
@@ -981,6 +1030,7 @@ def setup_webhook():
     except Exception as e:
         return f"❌ Ошибка: {e}"
 
+
 @app.route('/cleanup_temp', methods=['POST'])
 def cleanup_temp():
     try:
@@ -992,6 +1042,17 @@ def cleanup_temp():
         return jsonify({'success': True, 'message': 'Нет временных файлов'})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.errorhandler(Exception)
+def handle_all_exceptions(error):
+    logger.error(f"Критическая ошибка обработки запроса: {error}", exc_info=True)
+    return jsonify({
+        'success': False,
+        'message': 'Внутренняя ошибка сервера',
+        'details': str(error)
+    }), 500
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
