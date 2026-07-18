@@ -13,6 +13,10 @@ from werkzeug.exceptions import ClientDisconnected
 from modules import Database, FileManager, Publisher, WebInterface
 from modules.report_generator import ReportGenerator
 
+# В Python консоли или в app.py добавьте:
+db = Database()
+db.fix_publication_times()  # исправит старые записи
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
