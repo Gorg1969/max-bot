@@ -49,38 +49,57 @@ class ReportGenerator:
             
             # Группируем по дате для заполнения
             current_date = None
+            index = 1
             
             for pub in publications_sorted:
                 folder_name = pub.get('folder_name', '')
                 chat_id = pub.get('group_id', '')
-                created_at = pub.get('created_at')
                 status = pub.get('status', '')
                 error = pub.get('error', '')
                 
                 # Получаем метаданные из БД
                 metadata = self.db.get_ad_metadata(user_id, folder_name)
                 
-                # Время публикации
-                if created_at:
-                    if isinstance(created_at, str):
+                # Время публикации - берем из ad_metadata
+                published_at = self.db.get_published_at(user_id, folder_name)
+                
+                # Форматируем время
+                if published_at:
+                    if isinstance(published_at, (int, float)):
+                        # Это timestamp
+                        published_at = datetime.fromtimestamp(published_at)
+                    elif isinstance(published_at, str):
                         try:
-                            # Пробуем разные форматы
-                            if 'T' in created_at:
-                                created_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-                            else:
-                                created_at = datetime.fromisoformat(created_at)
+                            published_at = datetime.fromisoformat(published_at.replace('Z', '+00:00'))
                         except:
-                            created_at = datetime.now(moscow_tz)
-                    if hasattr(created_at, 'tzinfo') and created_at.tzinfo is None:
-                        created_at = moscow_tz.localize(created_at)
-                    elif hasattr(created_at, 'tzinfo'):
-                        created_at = created_at.astimezone(moscow_tz)
-                    date_str = created_at.strftime('%d.%m.%Y')
-                    time_str = created_at.strftime('%H.%M')
+                            published_at = datetime.now(moscow_tz)
+                    
+                    if hasattr(published_at, 'tzinfo') and published_at.tzinfo is None:
+                        published_at = moscow_tz.localize(published_at)
+                    elif hasattr(published_at, 'tzinfo'):
+                        published_at = published_at.astimezone(moscow_tz)
+                    
+                    date_str = published_at.strftime('%d.%m.%Y')
+                    time_str = published_at.strftime('%H.%M')
                 else:
-                    now = datetime.now(moscow_tz)
-                    date_str = now.strftime('%d.%m.%Y')
-                    time_str = now.strftime('%H.%M')
+                    # Если нет в metadata, используем created_at из publications
+                    created_at = pub.get('created_at')
+                    if created_at:
+                        if isinstance(created_at, str):
+                            try:
+                                created_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                            except:
+                                created_at = datetime.now(moscow_tz)
+                        if hasattr(created_at, 'tzinfo') and created_at.tzinfo is None:
+                            created_at = moscow_tz.localize(created_at)
+                        elif hasattr(created_at, 'tzinfo'):
+                            created_at = created_at.astimezone(moscow_tz)
+                        date_str = created_at.strftime('%d.%m.%Y')
+                        time_str = created_at.strftime('%H.%M')
+                    else:
+                        now = datetime.now(moscow_tz)
+                        date_str = now.strftime('%d.%m.%Y')
+                        time_str = now.strftime('%H.%M')
                 
                 # Ссылка на пост - берем из метаданных
                 post_link = metadata.get('post_link', '')
@@ -97,15 +116,16 @@ class ReportGenerator:
                         display_date = ''
                     
                     success_data.append({
-                        '№': len(success_data) + 1,
+                        '№': index,
                         'Дата': display_date,
                         'Время публикации (МСК)': time_str,
                         'Ссылка на пост': post_link,
                         'Ссылка (источник)': metadata.get('Ссылка', ''),
-                        'Марка/модель': metadata.get('Название', ''),
+                        'Название': metadata.get('Название', ''),
                         'Код предложения': metadata.get('Код предложения', ''),
                         'Цена в лизинге': metadata.get('Цена в лизинге', ''),
                     })
+                    index += 1
                 else:
                     error_data.append({
                         'Папка': folder_name,
@@ -121,7 +141,7 @@ class ReportGenerator:
                     'Время публикации (МСК)': '',
                     'Ссылка на пост': '',
                     'Ссылка (источник)': '',
-                    'Марка/модель': '',
+                    'Название': '',
                     'Код предложения': '',
                     'Цена в лизинге': '',
                 }]
@@ -162,7 +182,7 @@ class ReportGenerator:
             ws_success = wb.create_sheet("Отчет по публикациям", 0)
             
             headers = ['№', 'Дата', 'Время публикации (МСК)', 'Ссылка на пост', 
-                      'Ссылка (источник)', 'Марка/модель', 'Код предложения']
+                      'Ссылка (источник)', 'Название', 'Код предложения', 'Цена в лизинге']
             
             # СТИЛИ
             header_font = Font(bold=True, size=11, color="FFFFFF", name="Calibri")
@@ -186,7 +206,7 @@ class ReportGenerator:
             title_cell = ws_success.cell(row=1, column=1, value="Отчет по публикациям")
             title_cell.font = Font(bold=True, size=16, name="Calibri", color="1A1A2E")
             title_cell.alignment = Alignment(horizontal="center", vertical="center")
-            ws_success.merge_cells('A1:G1')
+            ws_success.merge_cells('A1:H1')
             ws_success.row_dimensions[1].height = 35
             
             # Заголовки таблицы
@@ -223,13 +243,13 @@ class ReportGenerator:
             # Чередование цветов строк
             for row_idx in range(3, len(success_data) + 3):
                 if row_idx % 2 == 1:
-                    for col in range(1, 8):
+                    for col in range(1, 9):
                         cell = ws_success.cell(row=row_idx, column=col)
                         cell.fill = PatternFill(start_color="F8F9FA", end_color="F8F9FA", fill_type="solid")
             
             # Ширина колонок
             column_widths = {
-                'A': 5, 'B': 14, 'C': 18, 'D': 50, 'E': 40, 'F': 32, 'G': 18
+                'A': 5, 'B': 14, 'C': 18, 'D': 50, 'E': 40, 'F': 32, 'G': 18, 'H': 18
             }
             for col_letter, width in column_widths.items():
                 ws_success.column_dimensions[col_letter].width = width
@@ -318,7 +338,7 @@ class ReportGenerator:
                 
                 writer.writerow(['=== УСПЕШНЫЕ ПУБЛИКАЦИИ ==='])
                 writer.writerow(['№', 'Дата', 'Время публикации (МСК)', 'Ссылка на пост', 
-                               'Ссылка (источник)', 'Марка/модель', 'Код предложения'])
+                               'Ссылка (источник)', 'Название', 'Код предложения', 'Цена в лизинге'])
                 
                 for data in success_data:
                     writer.writerow([
@@ -327,8 +347,9 @@ class ReportGenerator:
                         data.get('Время публикации (МСК)', ''),
                         data.get('Ссылка на пост', ''),
                         data.get('Ссылка (источник)', ''),
-                        data.get('Марка/модель', ''),
+                        data.get('Название', ''),
                         data.get('Код предложения', ''),
+                        data.get('Цена в лизинге', ''),
                     ])
                 
                 writer.writerow([])
@@ -418,50 +439,74 @@ class ReportGenerator:
             moscow_tz = pytz.timezone('Europe/Moscow')
             report_data = []
             current_date = None
+            index = 1
             
             for pub in publications:
                 folder_name = pub.get('folder_name')
                 chat_id = pub.get('group_id')
-                created_at = pub.get('created_at')
                 
                 metadata = self.db.get_ad_metadata(user_id, folder_name)
                 
-                if created_at:
-                    if isinstance(created_at, str):
+                # Время публикации - берем из ad_metadata
+                published_at = self.db.get_published_at(user_id, folder_name)
+                
+                if published_at:
+                    if isinstance(published_at, (int, float)):
+                        published_at = datetime.fromtimestamp(published_at)
+                    elif isinstance(published_at, str):
                         try:
-                            created_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                            published_at = datetime.fromisoformat(published_at.replace('Z', '+00:00'))
                         except:
-                            created_at = datetime.now(moscow_tz)
-                    if hasattr(created_at, 'tzinfo') and created_at.tzinfo is None:
-                        created_at = moscow_tz.localize(created_at)
-                    else:
-                        created_at = created_at.astimezone(moscow_tz)
-                    date_str = created_at.strftime('%d.%m.%Y')
-                    time_str = created_at.strftime('%H.%M')
+                            published_at = datetime.now(moscow_tz)
+                    
+                    if hasattr(published_at, 'tzinfo') and published_at.tzinfo is None:
+                        published_at = moscow_tz.localize(published_at)
+                    elif hasattr(published_at, 'tzinfo'):
+                        published_at = published_at.astimezone(moscow_tz)
+                    
+                    date_str = published_at.strftime('%d.%m.%Y')
+                    time_str = published_at.strftime('%H.%M')
                 else:
-                    now = datetime.now(moscow_tz)
-                    date_str = now.strftime('%d.%m.%Y')
-                    time_str = now.strftime('%H.%M')
+                    created_at = pub.get('created_at')
+                    if created_at:
+                        if isinstance(created_at, str):
+                            try:
+                                created_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                            except:
+                                created_at = datetime.now(moscow_tz)
+                        if hasattr(created_at, 'tzinfo') and created_at.tzinfo is None:
+                            created_at = moscow_tz.localize(created_at)
+                        elif hasattr(created_at, 'tzinfo'):
+                            created_at = created_at.astimezone(moscow_tz)
+                        date_str = created_at.strftime('%d.%m.%Y')
+                        time_str = created_at.strftime('%H.%M')
+                    else:
+                        now = datetime.now(moscow_tz)
+                        date_str = now.strftime('%d.%m.%Y')
+                        time_str = now.strftime('%H.%M')
                 
                 post_link = metadata.get('post_link', '')
                 if not post_link and chat_id:
                     post_link = f"https://max.ru/c/{chat_id}"
                 
-                if current_date != date_str:
-                    current_date = date_str
-                    display_date = date_str
-                else:
-                    display_date = ''
-                
-                report_data.append({
-                    '№': len(report_data) + 1,
-                    'Дата': display_date,
-                    'Время публикации (МСК)': time_str,
-                    'Ссылка на пост': post_link,
-                    'Ссылка (источник)': metadata.get('Ссылка', ''),
-                    'Марка/модель': metadata.get('Название', ''),
-                    'Код предложения': metadata.get('Код предложения', ''),
-                })
+                if pub.get('status') == 'success':
+                    if current_date != date_str:
+                        current_date = date_str
+                        display_date = date_str
+                    else:
+                        display_date = ''
+                    
+                    report_data.append({
+                        '№': index,
+                        'Дата': display_date,
+                        'Время публикации (МСК)': time_str,
+                        'Ссылка на пост': post_link,
+                        'Ссылка (источник)': metadata.get('Ссылка', ''),
+                        'Название': metadata.get('Название', ''),
+                        'Код предложения': metadata.get('Код предложения', ''),
+                        'Цена в лизинге': metadata.get('Цена в лизинге', ''),
+                    })
+                    index += 1
             
             return report_data
             
