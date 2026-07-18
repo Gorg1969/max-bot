@@ -722,7 +722,7 @@ UPLOAD_PAGE = """
                     
                     if (result.success) {
                         successCount++;
-                        addLog(`✅ ${folderName}: опубликовано`);
+                        addLog(`✅ ${folderName}: опубликовано (ожидаем подтверждение)`);
                         results.push(`✅ ${folderName}: успешно`);
                     } else {
                         errorCount++;
@@ -899,22 +899,65 @@ def publish_folder():
 def webhook():
     try:
         data = request.get_json()
-        logger.info("📩 ПОЛУЧЕН ВЕБХУК!")
+        logger.info(f"📩 ПОЛУЧЕН ВЕБХУК: {data}")
+        
         if not data:
             return jsonify({"ok": True}), 200
         
+        # ===== ОБРАБОТКА СОБЫТИЯ message_created =====
+        # Проверяем различные варианты структуры события
+        event_type = data.get('event_type') or data.get('type')
+        
+        if event_type == 'message_created' or 'message_created' in str(data):
+            logger.info("📨 Получено событие message_created")
+            
+            # Извлекаем данные из разных возможных структур
+            message = data.get('message', {})
+            if not message:
+                # Пробуем альтернативную структуру
+                message = data.get('data', {}).get('message', {})
+            
+            if message:
+                chat_id = message.get('chat_id')
+                message_id = message.get('id')
+                
+                logger.info(f"📨 chat_id: {chat_id}, message_id: {message_id}")
+                
+                if chat_id and message_id:
+                    # Обрабатываем событие через publisher
+                    publisher.handle_message_created(data)
+                else:
+                    logger.warning(f"⚠️ Неполные данные в вебхуке: {data}")
+            else:
+                logger.warning(f"⚠️ Нет message в вебхуке: {data}")
+            
+            return jsonify({"ok": True}), 200
+        
+        # ===== ОБРАБОТКА ОБЫЧНОГО СООБЩЕНИЯ ОТ ПОЛЬЗОВАТЕЛЯ =====
         user_id = None
         text = None
         
+        # Извлекаем данные из разных возможных структур
         if 'message' in data:
             msg = data['message']
             if 'sender' in msg:
                 user_id = msg['sender'].get('user_id')
             if 'body' in msg:
                 text = msg['body'].get('text')
+        elif 'payload' in data:
+            # Альтернативная структура
+            payload = data.get('payload', {})
+            if 'sender' in payload:
+                user_id = payload['sender'].get('user_id')
+            if 'body' in payload:
+                text = payload['body'].get('text')
         
         if not user_id:
-            return jsonify({"ok": True}), 200
+            # Если не удалось определить user_id, пробуем другие варианты
+            user_id = data.get('user_id') or data.get('sender_id')
+            if not user_id:
+                logger.info(f"ℹ️ Не удалось определить user_id, пропускаем")
+                return jsonify({"ok": True}), 200
         
         logger.info(f"💬 user_id={user_id}, text={text}")
         
@@ -959,9 +1002,12 @@ def webhook():
                 api.send_message(user_id, "❌ Нет данных для отчета.")
             return jsonify({"ok": True}), 200
         
+        # Если ничего не подошло, но это вебхук - просто возвращаем ok
         return jsonify({"ok": True}), 200
     except Exception as e:
-        logger.error(f"❌ ОШИБКА: {e}")
+        logger.error(f"❌ ОШИБКА В ВЕБХУКЕ: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"ok": False}), 500
 
 
@@ -1014,24 +1060,38 @@ def status():
 
 @app.route('/setup_webhook')
 def setup_webhook():
+    """Настраивает подписку на вебхук с поддержкой message_created"""
     token = request.args.get('token') or TOKEN
     if not token:
         return "❌ Токен не найден", 400
+    
     webhook_url = "https://maxbot.bothost.tech/webhook"
     headers = {"Authorization": token, "Content-Type": "application/json"}
+    
     try:
+        # Пробуем настроить подписку с поддержкой message_created
+        payload = {
+            "url": webhook_url,
+            "update_types": ["message_created", "message_updated", "bot_started", "bot_stopped", "message_callback"]
+        }
+        
         r = requests.post(
             "https://platform-api2.max.ru/subscriptions",
             headers=headers,
-            json={"url": webhook_url, "update_types": ["message_created", "bot_started", "bot_stopped"]},
-            timeout=10,
+            json=payload,
+            timeout=30,
             verify=False
         )
+        
         if r.status_code == 200:
-            return f"✅ Вебхук настроен: {webhook_url}"
+            logger.info(f"✅ Вебхук настроен: {webhook_url}")
+            return f"✅ Вебхук настроен: {webhook_url}\nПодписка: {payload}"
         else:
+            logger.error(f"❌ Ошибка настройки вебхука: {r.status_code} - {r.text}")
             return f"❌ Ошибка: {r.status_code} - {r.text}"
+            
     except Exception as e:
+        logger.error(f"❌ Ошибка: {e}")
         return f"❌ Ошибка: {e}"
 
 
@@ -1062,4 +1122,28 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
     if TOKEN:
         logger.info(f"✅ Токен найден (первые 10): {TOKEN[:10]}...")
+    
+    # Попытка настроить вебхук при запуске
+    if TOKEN:
+        try:
+            webhook_url = "https://maxbot.bothost.tech/webhook"
+            headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
+            payload = {
+                "url": webhook_url,
+                "update_types": ["message_created", "message_updated", "bot_started", "bot_stopped", "message_callback"]
+            }
+            r = requests.post(
+                "https://platform-api2.max.ru/subscriptions",
+                headers=headers,
+                json=payload,
+                timeout=10,
+                verify=False
+            )
+            if r.status_code == 200:
+                logger.info(f"✅ Вебхук настроен при запуске: {webhook_url}")
+            else:
+                logger.warning(f"⚠️ Не удалось настроить вебхук: {r.status_code}")
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка настройки вебхука при запуске: {e}")
+    
     app.run(host='0.0.0.0', port=port, threaded=True)
