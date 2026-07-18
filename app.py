@@ -62,7 +62,36 @@ class APIClient:
         except Exception as e:
             logger.error(f"❌ Ошибка отправки: {e}")
             return False
-
+    def upload_file(self, file_data, filename='image.jpg'):
+        """Загрузка файла на сервер"""
+        if not self.token:
+            return None
+        try:
+            if isinstance(file_data, bytes):
+                files = {'file': (filename, file_data, 'image/jpeg')}
+            else:
+                return None
+            
+            response = requests.post(
+                f"{self.base_url}/files",
+                headers={"Authorization": self.token},
+                files=files,
+                timeout=60,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                token = result.get('token') or result.get('data', {}).get('token')
+                logger.info(f"✅ Файл загружен: {token[:20] if token else 'None'}...")
+                return token
+            else:
+                logger.error(f"❌ Ошибка загрузки файла: {response.status_code}")
+                return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки файла: {e}")
+            return None
+            
     def send_message_to_chat(self, chat_id, text):
         if not self.token:
             return False
