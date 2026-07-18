@@ -93,7 +93,7 @@ class Database:
             logger.error(f"❌ Ошибка миграции БД: {e}")
     
     def add_publication(self, user_id, folder_name, group_id, status='success', error=None):
-        """Добавляет запись о публикации"""
+        """Добавляет запись о публикации с правильным временем"""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         
@@ -113,10 +113,10 @@ class Database:
                 WHERE id = ?
             ''', (status, error, existing[0]))
         else:
-            # Создаем новую
+            # Создаем новую с CURRENT_TIMESTAMP
             c.execute('''
-                INSERT INTO publications (user_id, folder_name, group_id, status, error)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO publications (user_id, folder_name, group_id, status, error, created_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ''', (user_id, folder_name, group_id, status, error))
         
         conn.commit()
@@ -153,6 +153,7 @@ class Database:
             price = metadata.get('Цена в лизинге', '')
             post_link = metadata.get('post_link', '')
             
+            # Преобразуем timestamp в datetime
             if isinstance(published_at, (int, float)):
                 published_at = datetime.fromtimestamp(published_at)
             
@@ -225,7 +226,7 @@ class Database:
                 SELECT folder_name, group_id, status, created_at, error 
                 FROM publications 
                 WHERE user_id = ?
-                ORDER BY created_at DESC
+                ORDER BY created_at ASC
             '''
             if limit:
                 query += f" LIMIT {limit}"
@@ -319,3 +320,40 @@ class Database:
         except Exception as e:
             logger.error(f"❌ Ошибка получения статистики: {e}")
             return {'total': 0, 'success': 0, 'errors': 0}
+    
+    def fix_publication_times(self, user_id=None):
+        """Исправляет время публикации для старых записей"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            c = conn.cursor()
+            
+            if user_id:
+                c.execute('''
+                    UPDATE publications 
+                    SET created_at = CURRENT_TIMESTAMP 
+                    WHERE user_id = ? AND created_at IS NULL
+                ''', (user_id,))
+                c.execute('''
+                    UPDATE ad_metadata 
+                    SET published_at = CURRENT_TIMESTAMP 
+                    WHERE user_id = ? AND published_at IS NULL
+                ''', (user_id,))
+            else:
+                c.execute('''
+                    UPDATE publications 
+                    SET created_at = CURRENT_TIMESTAMP 
+                    WHERE created_at IS NULL
+                ''')
+                c.execute('''
+                    UPDATE ad_metadata 
+                    SET published_at = CURRENT_TIMESTAMP 
+                    WHERE published_at IS NULL
+                ''')
+            
+            conn.commit()
+            conn.close()
+            logger.info("✅ Время публикаций исправлено")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка исправления времени: {e}")
+            return False
