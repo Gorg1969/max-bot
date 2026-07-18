@@ -60,52 +60,33 @@ class ReportGenerator:
                 # Получаем метаданные из БД
                 metadata = self.db.get_ad_metadata(user_id, folder_name)
                 
-                # Время публикации - берем из ad_metadata
-                published_at = self.db.get_published_at(user_id, folder_name)
+                # Время публикации - берем из created_at в publications (оно сохраняется правильно)
+                created_at = pub.get('created_at')
                 
                 # Форматируем время
-                if published_at:
-                    if isinstance(published_at, (int, float)):
-                        # Это timestamp
-                        published_at = datetime.fromtimestamp(published_at)
-                    elif isinstance(published_at, str):
+                if created_at:
+                    if isinstance(created_at, str):
                         try:
-                            published_at = datetime.fromisoformat(published_at.replace('Z', '+00:00'))
+                            created_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
                         except:
-                            published_at = datetime.now(moscow_tz)
+                            created_at = datetime.now(moscow_tz)
                     
-                    if hasattr(published_at, 'tzinfo') and published_at.tzinfo is None:
-                        published_at = moscow_tz.localize(published_at)
-                    elif hasattr(published_at, 'tzinfo'):
-                        published_at = published_at.astimezone(moscow_tz)
+                    # Если created_at без timezone, добавляем
+                    if hasattr(created_at, 'tzinfo') and created_at.tzinfo is None:
+                        created_at = moscow_tz.localize(created_at)
+                    elif hasattr(created_at, 'tzinfo'):
+                        created_at = created_at.astimezone(moscow_tz)
                     
-                    date_str = published_at.strftime('%d.%m.%Y')
-                    time_str = published_at.strftime('%H.%M')
+                    date_str = created_at.strftime('%d.%m.%Y')
+                    time_str = created_at.strftime('%H.%M')
                 else:
-                    # Если нет в metadata, используем created_at из publications
-                    created_at = pub.get('created_at')
-                    if created_at:
-                        if isinstance(created_at, str):
-                            try:
-                                created_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-                            except:
-                                created_at = datetime.now(moscow_tz)
-                        if hasattr(created_at, 'tzinfo') and created_at.tzinfo is None:
-                            created_at = moscow_tz.localize(created_at)
-                        elif hasattr(created_at, 'tzinfo'):
-                            created_at = created_at.astimezone(moscow_tz)
-                        date_str = created_at.strftime('%d.%m.%Y')
-                        time_str = created_at.strftime('%H.%M')
-                    else:
-                        now = datetime.now(moscow_tz)
-                        date_str = now.strftime('%d.%m.%Y')
-                        time_str = now.strftime('%H.%M')
+                    # Если нет created_at, используем текущее время
+                    now = datetime.now(moscow_tz)
+                    date_str = now.strftime('%d.%m.%Y')
+                    time_str = now.strftime('%H.%M')
                 
-                # Ссылка на пост - берем из метаданных
-                post_link = metadata.get('post_link', '')
-                
-                if not post_link and chat_id:
-                    post_link = f"https://max.ru/c/{chat_id}"
+                # Ссылка на пост - формируем из chat_id (без post_id, т.к. сервер не возвращает)
+                post_link = f"https://max.ru/c/{chat_id}" if chat_id else ""
                 
                 # Данные для успешных публикаций
                 if status == 'success':
@@ -447,47 +428,30 @@ class ReportGenerator:
                 
                 metadata = self.db.get_ad_metadata(user_id, folder_name)
                 
-                # Время публикации - берем из ad_metadata
-                published_at = self.db.get_published_at(user_id, folder_name)
+                # Время публикации - берем из created_at в publications
+                created_at = pub.get('created_at')
                 
-                if published_at:
-                    if isinstance(published_at, (int, float)):
-                        published_at = datetime.fromtimestamp(published_at)
-                    elif isinstance(published_at, str):
+                if created_at:
+                    if isinstance(created_at, str):
                         try:
-                            published_at = datetime.fromisoformat(published_at.replace('Z', '+00:00'))
+                            created_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
                         except:
-                            published_at = datetime.now(moscow_tz)
+                            created_at = datetime.now(moscow_tz)
                     
-                    if hasattr(published_at, 'tzinfo') and published_at.tzinfo is None:
-                        published_at = moscow_tz.localize(published_at)
-                    elif hasattr(published_at, 'tzinfo'):
-                        published_at = published_at.astimezone(moscow_tz)
+                    if hasattr(created_at, 'tzinfo') and created_at.tzinfo is None:
+                        created_at = moscow_tz.localize(created_at)
+                    elif hasattr(created_at, 'tzinfo'):
+                        created_at = created_at.astimezone(moscow_tz)
                     
-                    date_str = published_at.strftime('%d.%m.%Y')
-                    time_str = published_at.strftime('%H.%M')
+                    date_str = created_at.strftime('%d.%m.%Y')
+                    time_str = created_at.strftime('%H.%M')
                 else:
-                    created_at = pub.get('created_at')
-                    if created_at:
-                        if isinstance(created_at, str):
-                            try:
-                                created_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-                            except:
-                                created_at = datetime.now(moscow_tz)
-                        if hasattr(created_at, 'tzinfo') and created_at.tzinfo is None:
-                            created_at = moscow_tz.localize(created_at)
-                        elif hasattr(created_at, 'tzinfo'):
-                            created_at = created_at.astimezone(moscow_tz)
-                        date_str = created_at.strftime('%d.%m.%Y')
-                        time_str = created_at.strftime('%H.%M')
-                    else:
-                        now = datetime.now(moscow_tz)
-                        date_str = now.strftime('%d.%m.%Y')
-                        time_str = now.strftime('%H.%M')
+                    now = datetime.now(moscow_tz)
+                    date_str = now.strftime('%d.%m.%Y')
+                    time_str = now.strftime('%H.%M')
                 
-                post_link = metadata.get('post_link', '')
-                if not post_link and chat_id:
-                    post_link = f"https://max.ru/c/{chat_id}"
+                # Ссылка на пост - из chat_id
+                post_link = f"https://max.ru/c/{chat_id}" if chat_id else ""
                 
                 if pub.get('status') == 'success':
                     if current_date != date_str:
