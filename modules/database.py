@@ -1,5 +1,4 @@
-# modules/database.py - полный файл с новыми методами
-
+# modules/database.py
 import sqlite3
 import os
 import logging
@@ -233,6 +232,48 @@ class Database:
             logger.error(f"❌ Ошибка получения публикаций: {e}")
             return []
     
+    def get_publication_time(self, user_id, folder_name):
+        """Получает время публикации для папки"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            c = conn.cursor()
+            c.execute('''
+                SELECT created_at 
+                FROM publications 
+                WHERE user_id = ? AND folder_name = ? AND status = 'success'
+                ORDER BY id DESC LIMIT 1
+            ''', (user_id, folder_name))
+            row = c.fetchone()
+            conn.close()
+            
+            if row and row[0]:
+                if isinstance(row[0], str):
+                    return datetime.fromisoformat(row[0])
+                return row[0]
+            return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения времени публикации: {e}")
+            return None
+    
+    def get_published_at(self, user_id, folder_name):
+        """Получает время публикации из ad_metadata"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            c = conn.cursor()
+            c.execute('''
+                SELECT published_at FROM ad_metadata 
+                WHERE user_id = ? AND folder_name = ?
+                ORDER BY id DESC LIMIT 1
+            ''', (user_id, folder_name))
+            row = c.fetchone()
+            conn.close()
+            if row and row[0]:
+                return row[0]
+            return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения published_at: {e}")
+            return None
+    
     def clear_user_data(self, user_id):
         """Полностью очищает все данные пользователя из БД"""
         try:
@@ -277,3 +318,40 @@ class Database:
         except Exception as e:
             logger.error(f"❌ Ошибка получения статистики: {e}")
             return {'total': 0, 'success': 0, 'errors': 0}
+    
+    def fix_publication_times(self, user_id=None):
+        """Исправляет время публикации для старых записей"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            c = conn.cursor()
+            
+            if user_id:
+                c.execute('''
+                    UPDATE publications 
+                    SET created_at = CURRENT_TIMESTAMP 
+                    WHERE user_id = ? AND created_at IS NULL
+                ''', (user_id,))
+                c.execute('''
+                    UPDATE ad_metadata 
+                    SET published_at = CURRENT_TIMESTAMP 
+                    WHERE user_id = ? AND published_at IS NULL
+                ''', (user_id,))
+            else:
+                c.execute('''
+                    UPDATE publications 
+                    SET created_at = CURRENT_TIMESTAMP 
+                    WHERE created_at IS NULL
+                ''')
+                c.execute('''
+                    UPDATE ad_metadata 
+                    SET published_at = CURRENT_TIMESTAMP 
+                    WHERE published_at IS NULL
+                ''')
+            
+            conn.commit()
+            conn.close()
+            logger.info("✅ Время публикаций исправлено")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка исправления времени: {e}")
+            return False
