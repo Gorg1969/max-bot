@@ -33,7 +33,7 @@ class Publisher:
         if match:
             chat_id = match.group(1)
             if len(chat_id) >= 10:
-                return f"-{chat_id}"  # <-- ВОЗВРАЩАЕМ С МИНУСОМ
+                return f"-{chat_id}"
         
         # Ищем любое число
         match = re.search(r'(\d{10,})', folder_name)
@@ -140,7 +140,7 @@ class Publisher:
             if not self.api.token:
                 return False
             
-            # Формируем вложения (максимум 10 фото)
+            # Формируем вложения (максимум 10 фото) - ИЗМЕНЕНО: 3 -> 10
             attachments = []
             for token in image_tokens[:10]:
                 attachments.append({
@@ -191,7 +191,7 @@ class Publisher:
                 return False
             
             attachments = []
-            for token in image_tokens[:10]:
+            for token in image_tokens[:10]:  # ИЗМЕНЕНО: 3 -> 10
                 attachments.append({
                     "type": "image",
                     "payload": {"token": token}
@@ -272,7 +272,7 @@ class Publisher:
             
             logger.info(f"📤 Извлечен chat_id: {chat_id}")
             
-            # 2. Загружаем изображения (максимум 10)
+            # 2. Загружаем изображения (максимум 10) - ИЗМЕНЕНО: 3 -> 10
             image_tokens = []
             max_images = min(len(images_data), 10) if isinstance(images_data, list) else 0
             
@@ -295,6 +295,8 @@ class Publisher:
                 if token:
                     image_tokens.append(token)
                     logger.info(f"✅ Изображение {i+1} загружено")
+                    # Небольшая задержка между загрузкой фото
+                    time.sleep(0.3)
                 else:
                     logger.warning(f"⚠️ Не удалось загрузить изображение {i+1}")
             
