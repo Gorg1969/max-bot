@@ -2,7 +2,7 @@
 import sqlite3
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,6 @@ class Database:
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         
-        # Таблица пользователей
         c.execute('''
             CREATE TABLE IF NOT EXISTS user_tokens (
                 user_id INTEGER PRIMARY KEY,
@@ -29,7 +28,6 @@ class Database:
             )
         ''')
         
-        # Таблица публикаций
         c.execute('''
             CREATE TABLE IF NOT EXISTS publications (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,7 +41,6 @@ class Database:
             )
         ''')
         
-        # Таблица метаданных для отчетов
         c.execute('''
             CREATE TABLE IF NOT EXISTS ad_metadata (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,12 +62,10 @@ class Database:
         logger.info("✅ База данных инициализирована")
     
     def migrate_db(self):
-        """Обновляет структуру БД при необходимости"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
             
-            # Проверяем наличие колонки post_link в ad_metadata
             c.execute("PRAGMA table_info(ad_metadata)")
             columns = [col[1] for col in c.fetchall()]
             
@@ -78,7 +73,6 @@ class Database:
                 c.execute('ALTER TABLE ad_metadata ADD COLUMN post_link TEXT')
                 logger.info("✅ Добавлена колонка post_link в ad_metadata")
             
-            # Проверяем наличие колонки error в publications
             c.execute("PRAGMA table_info(publications)")
             columns = [col[1] for col in c.fetchall()]
             
@@ -93,16 +87,13 @@ class Database:
             logger.error(f"❌ Ошибка миграции БД: {e}")
     
     def add_publication(self, user_id, folder_name, group_id, status='pending', error=None):
-        """Добавляет запись о публикации"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
-            
             c.execute('''
                 INSERT INTO publications (user_id, folder_name, group_id, status, error, created_at)
                 VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ''', (user_id, folder_name, group_id, status, error))
-            
             conn.commit()
             conn.close()
             logger.info(f"📝 Добавлена публикация: {folder_name} -> {group_id} (статус: {status})")
@@ -112,22 +103,17 @@ class Database:
             return False
     
     def update_publication_status(self, user_id, folder_name, status, error=None):
-        """Обновляет статус публикации"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
-            
             logger.info(f"🔄 Обновление статуса {folder_name} -> {status}")
-            
             c.execute('''
                 UPDATE publications 
                 SET status = ?, error = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE user_id = ? AND folder_name = ?
             ''', (status, error, user_id, folder_name))
-            
             conn.commit()
             conn.close()
-            
             logger.info(f"✅ Статус обновлен {folder_name}: {status}")
             return True
         except Exception as e:
@@ -135,7 +121,6 @@ class Database:
             return False
     
     def save_ad_metadata(self, user_id, folder_name, chat_id, metadata, published_at):
-        """Сохраняет метаданные для отчета"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
@@ -146,7 +131,6 @@ class Database:
             price = metadata.get('Цена в лизинге', '')
             post_link = metadata.get('post_link', '')
             
-            # Логируем что сохраняем
             logger.info(f"💾 Сохранение post_link для {folder_name}: '{post_link}'")
             
             if isinstance(published_at, (int, float)):
@@ -169,23 +153,18 @@ class Database:
             return False
     
     def update_post_link(self, user_id, folder_name, post_link):
-        """Обновляет ссылку на пост в ad_metadata"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
-            
             logger.info(f"🔄 Обновление post_link для {folder_name}: '{post_link}'")
-            
             c.execute('''
                 UPDATE ad_metadata 
                 SET post_link = ?
                 WHERE user_id = ? AND folder_name = ?
                 ORDER BY id DESC LIMIT 1
             ''', (post_link, user_id, folder_name))
-            
             conn.commit()
             conn.close()
-            
             logger.info(f"✅ Ссылка обновлена для {folder_name}: {post_link}")
             return True
         except Exception as e:
@@ -193,7 +172,6 @@ class Database:
             return False
     
     def get_post_link(self, user_id, folder_name):
-        """Получает post_link для папки"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
@@ -210,10 +188,6 @@ class Database:
             return None
     
     def get_ad_metadata(self, user_id, folder_name):
-        """
-        Получает метаданные из БД.
-        ВСЕГДА возвращает словарь со всеми полями, даже если записи нет.
-        """
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
@@ -226,17 +200,14 @@ class Database:
             row = c.fetchone()
             conn.close()
             
-            # ВСЕГДА возвращаем структуру со всеми полями
             if row:
                 return {
                     'Название': row[0] or '',
                     'Ссылка': row[1] or '',
                     'Код предложения': row[2] or '',
                     'Цена в лизинге': row[3] or '',
-                    'post_link': row[4] or None  # None если нет ссылки
+                    'post_link': row[4] or None
                 }
-            
-            # Если записи нет, возвращаем структуру с пустыми полями
             return {
                 'Название': '',
                 'Ссылка': '',
@@ -255,7 +226,6 @@ class Database:
             }
     
     def get_publications(self, user_id, limit=None):
-        """Получает список публикаций пользователя"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
@@ -287,9 +257,6 @@ class Database:
             return []
     
     def get_publications_with_status(self, user_id, status=None):
-        """
-        Получает публикации пользователя с возможностью фильтрации по статусу
-        """
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
@@ -329,16 +296,6 @@ class Database:
             return []
     
     def check_publication_status(self, user_id, folder_name):
-        """
-        Проверяет статус конкретной публикации
-        
-        Args:
-            user_id: ID пользователя
-            folder_name: Имя папки
-        
-        Returns:
-            str: Статус публикации ('pending', 'success', 'failed') или None
-        """
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
@@ -349,7 +306,6 @@ class Database:
             ''', (user_id, folder_name))
             row = c.fetchone()
             conn.close()
-            
             if row:
                 return row[0]
             return None
@@ -358,7 +314,6 @@ class Database:
             return None
     
     def has_pending_publications(self, user_id):
-        """Проверяет, есть ли у пользователя публикации в статусе 'pending'"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
@@ -374,7 +329,6 @@ class Database:
             return False
     
     def count_pending_publications(self, user_id):
-        """Возвращает количество pending публикаций"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
@@ -389,69 +343,21 @@ class Database:
             logger.error(f"❌ Ошибка подсчета pending: {e}")
             return 0
     
-    def get_publication_time(self, user_id, folder_name):
-        """Получает время публикации для папки"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            c = conn.cursor()
-            c.execute('''
-                SELECT created_at 
-                FROM publications 
-                WHERE user_id = ? AND folder_name = ? AND status = 'success'
-                ORDER BY id DESC LIMIT 1
-            ''', (user_id, folder_name))
-            row = c.fetchone()
-            conn.close()
-            
-            if row and row[0]:
-                if isinstance(row[0], str):
-                    return datetime.fromisoformat(row[0])
-                return row[0]
-            return None
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения времени публикации: {e}")
-            return None
-    
-    def get_published_at(self, user_id, folder_name):
-        """Получает время публикации из ad_metadata"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            c = conn.cursor()
-            c.execute('''
-                SELECT published_at FROM ad_metadata 
-                WHERE user_id = ? AND folder_name = ?
-                ORDER BY id DESC LIMIT 1
-            ''', (user_id, folder_name))
-            row = c.fetchone()
-            conn.close()
-            if row and row[0]:
-                return row[0]
-            return None
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения published_at: {e}")
-            return None
-    
     def clear_user_data(self, user_id):
-        """Полностью очищает все данные пользователя из БД"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
-            
             c.execute('DELETE FROM publications WHERE user_id = ?', (user_id,))
             c.execute('DELETE FROM ad_metadata WHERE user_id = ?', (user_id,))
-            
             conn.commit()
             conn.close()
-            
             logger.info(f"🗑️ Все данные пользователя {user_id} удалены из БД")
             return True
-            
         except Exception as e:
             logger.error(f"❌ Ошибка очистки данных пользователя: {e}")
             return False
     
     def get_stats(self, user_id):
-        """Получает статистику публикаций пользователя"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
@@ -481,7 +387,6 @@ class Database:
             return {'total': 0, 'success': 0, 'pending': 0, 'errors': 0}
     
     def fix_publication_times(self, user_id=None):
-        """Исправляет время публикации для старых записей"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
