@@ -94,31 +94,41 @@ class Database:
     
     def add_publication(self, user_id, folder_name, group_id, status='pending', error=None):
         """Добавляет запись о публикации"""
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
-        
-        c.execute('''
-            INSERT INTO publications (user_id, folder_name, group_id, status, error, created_at)
-            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        ''', (user_id, folder_name, group_id, status, error))
-        
-        conn.commit()
-        conn.close()
-        logger.info(f"📝 Добавлена публикация: {folder_name} -> {group_id} (статус: {status})")
+        try:
+            conn = sqlite3.connect(self.db_path)
+            c = conn.cursor()
+            
+            c.execute('''
+                INSERT INTO publications (user_id, folder_name, group_id, status, error, created_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''', (user_id, folder_name, group_id, status, error))
+            
+            conn.commit()
+            conn.close()
+            logger.info(f"📝 Добавлена публикация: {folder_name} -> {group_id} (статус: {status})")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка добавления публикации: {e}")
+            return False
     
     def update_publication_status(self, user_id, folder_name, status, error=None):
         """Обновляет статус публикации"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
+            
+            logger.info(f"🔄 Обновление статуса {folder_name} -> {status}")
+            
             c.execute('''
                 UPDATE publications 
                 SET status = ?, error = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE user_id = ? AND folder_name = ?
             ''', (status, error, user_id, folder_name))
+            
             conn.commit()
             conn.close()
-            logger.info(f"📝 Обновлен статус {folder_name}: {status}")
+            
+            logger.info(f"✅ Статус обновлен {folder_name}: {status}")
             return True
         except Exception as e:
             logger.error(f"❌ Ошибка обновления статуса: {e}")
@@ -136,7 +146,9 @@ class Database:
             price = metadata.get('Цена в лизинге', '')
             post_link = metadata.get('post_link', '')
             
-            # Преобразуем timestamp в datetime
+            # Логируем что сохраняем
+            logger.info(f"💾 Сохранение post_link для {folder_name}: '{post_link}'")
+            
             if isinstance(published_at, (int, float)):
                 published_at = datetime.fromtimestamp(published_at)
             
@@ -148,7 +160,8 @@ class Database:
             
             conn.commit()
             conn.close()
-            logger.info(f"📊 Метаданные сохранены для {folder_name}, post_link: {post_link}")
+            
+            logger.info(f"✅ Метаданные сохранены для {folder_name}, post_link: '{post_link}'")
             return True
             
         except Exception as e:
@@ -160,15 +173,20 @@ class Database:
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
+            
+            logger.info(f"🔄 Обновление post_link для {folder_name}: '{post_link}'")
+            
             c.execute('''
                 UPDATE ad_metadata 
                 SET post_link = ?
                 WHERE user_id = ? AND folder_name = ?
                 ORDER BY id DESC LIMIT 1
             ''', (post_link, user_id, folder_name))
+            
             conn.commit()
             conn.close()
-            logger.info(f"🔗 Обновлена ссылка для {folder_name}: {post_link}")
+            
+            logger.info(f"✅ Ссылка обновлена для {folder_name}: {post_link}")
             return True
         except Exception as e:
             logger.error(f"❌ Ошибка обновления ссылки: {e}")
@@ -250,6 +268,108 @@ class Database:
             logger.error(f"❌ Ошибка получения публикаций: {e}")
             return []
     
+    def get_publications_with_status(self, user_id, status=None):
+        """
+        Получает публикации пользователя с возможностью фильтрации по статусу
+        
+        Args:
+            user_id: ID пользователя
+            status: Фильтр по статусу ('pending', 'success', 'failed')
+        
+        Returns:
+            list: Список публикаций
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            c = conn.cursor()
+            
+            if status:
+                query = '''
+                    SELECT folder_name, group_id, status, created_at, error 
+                    FROM publications 
+                    WHERE user_id = ? AND status = ?
+                    ORDER BY created_at ASC
+                '''
+                c.execute(query, (user_id, status))
+            else:
+                query = '''
+                    SELECT folder_name, group_id, status, created_at, error 
+                    FROM publications 
+                    WHERE user_id = ?
+                    ORDER BY created_at ASC
+                '''
+                c.execute(query, (user_id,))
+            
+            rows = c.fetchall()
+            conn.close()
+            
+            publications = []
+            for row in rows:
+                publications.append({
+                    'folder_name': row[0],
+                    'group_id': row[1],
+                    'status': row[2],
+                    'created_at': row[3],
+                    'error': row[4] if len(row) > 4 else None
+                })
+            return publications
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения публикаций: {e}")
+            return []
+    
+    def check_publication_status(self, user_id, folder_name):
+        """
+        Проверяет статус конкретной публикации
+        
+        Args:
+            user_id: ID пользователя
+            folder_name: Имя папки
+        
+        Returns:
+            str: Статус публикации ('pending', 'success', 'failed') или None
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            c = conn.cursor()
+            c.execute('''
+                SELECT status FROM publications 
+                WHERE user_id = ? AND folder_name = ?
+                ORDER BY id DESC LIMIT 1
+            ''', (user_id, folder_name))
+            row = c.fetchone()
+            conn.close()
+            
+            if row:
+                return row[0]
+            return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки статуса: {e}")
+            return None
+    
+    def has_pending_publications(self, user_id):
+        """
+        Проверяет, есть ли у пользователя публикации в статусе 'pending'
+        
+        Args:
+            user_id: ID пользователя
+        
+        Returns:
+            bool: True если есть pending публикации
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            c = conn.cursor()
+            c.execute('''
+                SELECT COUNT(*) FROM publications 
+                WHERE user_id = ? AND status = 'pending'
+            ''', (user_id,))
+            count = c.fetchone()[0]
+            conn.close()
+            return count > 0
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки pending: {e}")
+            return False
+    
     def get_publication_time(self, user_id, folder_name):
         """Получает время публикации для папки"""
         try:
@@ -323,7 +443,10 @@ class Database:
             c.execute('SELECT COUNT(*) FROM publications WHERE user_id = ? AND status = "success"', (user_id,))
             success = c.fetchone()[0]
             
-            c.execute('SELECT COUNT(*) FROM publications WHERE user_id = ? AND status != "success"', (user_id,))
+            c.execute('SELECT COUNT(*) FROM publications WHERE user_id = ? AND status = "pending"', (user_id,))
+            pending = c.fetchone()[0]
+            
+            c.execute('SELECT COUNT(*) FROM publications WHERE user_id = ? AND status != "success" AND status != "pending"', (user_id,))
             errors = c.fetchone()[0]
             
             conn.close()
@@ -331,11 +454,12 @@ class Database:
             return {
                 'total': total,
                 'success': success,
+                'pending': pending,
                 'errors': errors
             }
         except Exception as e:
             logger.error(f"❌ Ошибка получения статистики: {e}")
-            return {'total': 0, 'success': 0, 'errors': 0}
+            return {'total': 0, 'success': 0, 'pending': 0, 'errors': 0}
     
     def fix_publication_times(self, user_id=None):
         """Исправляет время публикации для старых записей"""
