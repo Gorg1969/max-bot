@@ -45,7 +45,6 @@ class Publisher:
     def _send_and_get_id(self, chat_id, text, image_tokens):
         """
         Отправляет сообщение в чат и получает ID из ответа API.
-        С ПОЛНОЙ ДИАГНОСТИКОЙ ВСЕХ ПОЛЕЙ.
         """
         diagnostic = {
             'timestamp': datetime.now().isoformat(),
@@ -60,7 +59,7 @@ class Publisher:
             'response_headers': None,
             'response_body': None,
             'response_json': None,
-            'all_fields': []  # Список всех найденных полей
+            'all_fields': []
         }
         
         try:
@@ -114,87 +113,22 @@ class Publisher:
                     result = response.json()
                     diagnostic['response_json'] = result
                     
-                    # 🔥 ВЫВОДИМ ПОЛНЫЙ JSON ДЛЯ АНАЛИЗА
-                    full_json = json.dumps(result, indent=2, ensure_ascii=False)
-                    logger.info(f"📨 ПОЛНЫЙ JSON ОТВЕТА:\n{full_json}")
-                    
-                    # 🔥 ИЩЕМ ВСЕ ВОЗМОЖНЫЕ ПОЛЯ С ID
-                    all_fields = []
-                    
-                    def extract_fields(obj, path=""):
-                        if isinstance(obj, dict):
-                            for key, value in obj.items():
-                                current_path = f"{path}.{key}" if path else key
-                                all_fields.append(current_path)
-                                if isinstance(value, (dict, list)):
-                                    extract_fields(value, current_path)
-                        elif isinstance(obj, list):
-                            for i, item in enumerate(obj):
-                                extract_fields(item, f"{path}[{i}]")
-                    
-                    extract_fields(result)
-                    diagnostic['all_fields'] = all_fields
-                    
-                    # 🔥 ВЫВОДИМ ВСЕ НАЙДЕННЫЕ ПОЛЯ
-                    logger.info("=" * 80)
-                    logger.info("🔍 ВСЕ ПОЛЯ В ОТВЕТЕ:")
-                    for field in sorted(all_fields):
-                        logger.info(f"  • {field}")
-                    logger.info("=" * 80)
-                    
-                    # 🔥 ИЩЕМ ID ВО ВСЕХ ВОЗМОЖНЫХ МЕСТАХ
-                    # Поля, которые могут содержать ID поста
-                    id_fields = ['id', 'message_id', 'post_id', 'public_id', 
-                                'public_token', 'slug', 'alias', 'token', 
-                                'short_id', 'uid', 'uuid', 'url', 'link']
-                    
-                    found_id = None
-                    found_field = None
-                    
-                    def search_id(obj, path=""):
-                        nonlocal found_id, found_field
-                        if isinstance(obj, dict):
-                            for key, value in obj.items():
-                                current_path = f"{path}.{key}" if path else key
-                                # Проверяем поля, которые могут содержать ID
-                                if key.lower() in [f.lower() for f in id_fields]:
-                                    if value and isinstance(value, str) and len(str(value)) > 5:
-                                        # Проверяем что это не mid (он начинается с mid.)
-                                        if not str(value).startswith('mid.'):
-                                            found_id = value
-                                            found_field = current_path
-                                            logger.info(f"✅ Найден возможный ID в {current_path}: {value}")
-                                            return
-                                # Рекурсивный поиск
-                                if isinstance(value, dict):
-                                    search_id(value, current_path)
-                                elif isinstance(value, list):
-                                    for i, item in enumerate(value):
-                                        if isinstance(item, dict):
-                                            search_id(item, f"{current_path}[{i}]")
-                    
-                    search_id(result)
-                    
-                    # Если нашли ID - используем его
-                    if found_id:
-                        message_id = str(found_id)
-                        logger.info(f"✅ ИСПОЛЬЗУЕМ ID из {found_field}: {message_id}")
-                    else:
-                        # Если не нашли - используем seq
+                    # 🔥 ИЩЕМ ID (seq)
+                    if isinstance(result, dict):
                         if 'message' in result and isinstance(result['message'], dict):
                             msg = result['message']
                             if 'body' in msg and isinstance(msg['body'], dict):
                                 if 'seq' in msg['body']:
                                     message_id = str(msg['body']['seq'])
-                                    logger.info(f"⚠️ Используем seq как ID: {message_id}")
-                        elif 'seq' in result:
+                                    logger.info(f"✅ Найден seq (числовой ID): {message_id}")
+                        
+                        if not message_id and 'seq' in result:
                             message_id = str(result['seq'])
-                            logger.info(f"⚠️ Используем seq как ID: {message_id}")
+                            logger.info(f"✅ Найден seq: {message_id}")
                     
-                    # Если ID найден - создаем ссылку
                     if message_id:
                         post_link = f"https://max.ru/c/{chat_id_str}/{message_id}"
-                        logger.info(f"🔗 Ссылка создана: {post_link}")
+                        logger.info(f"🔗 Ссылка на пост создана: {post_link}")
                         
                         diagnostic['status'] = 'success'
                         diagnostic['message_id'] = message_id
@@ -203,16 +137,11 @@ class Publisher:
                         
                         return True, post_link
                     else:
-                        logger.error(f"❌ ID НЕ НАЙДЕН в ответе!")
-                        logger.error(f"❌ Полный ответ: {response.text[:500]}")
-                        
-                        diagnostic['status'] = 'failed'
-                        diagnostic['error'] = 'ID не найден в ответе API'
-                        self.diagnostic_log.append(diagnostic)
-                        
-                        # Фолбэк - ссылка на чат
+                        logger.warning(f"⚠️ ID не найден, используем ссылку на чат")
                         post_link = f"https://max.ru/c/{chat_id_str}"
-                        logger.info(f"🔗 Используем ссылку на чат: {post_link}")
+                        diagnostic['status'] = 'failed'
+                        diagnostic['error'] = 'ID не найден'
+                        self.diagnostic_log.append(diagnostic)
                         return True, post_link
                         
                 except json.JSONDecodeError as e:
@@ -284,7 +213,6 @@ class Publisher:
                 post_link = None
                 try:
                     result = response.json()
-                    # Ищем в ответе
                     if 'message' in result and isinstance(result['message'], dict):
                         msg = result['message']
                         if 'body' in msg and isinstance(msg['body'], dict):
@@ -314,6 +242,14 @@ class Publisher:
             return False, None
 
     def _parse_metadata(self, metadata_text):
+        """
+        Парсит метаданные из текста после #изъятая.
+        Возвращает словарь с полями:
+        - Название
+        - Ссылка (источник)
+        - Код предложения
+        - Цена в лизинге
+        """
         metadata = {}
         if not metadata_text:
             return metadata
@@ -347,6 +283,7 @@ class Publisher:
             logger.info(f"📤 Извлечен chat_id: {chat_id}")
             logger.info(f"📸 Получено {len(image_tokens)} токенов фото")
             
+            # Отправляем сообщение
             success, post_link = self._send_and_get_id(chat_id, ad_text, image_tokens)
             
             if not success:
@@ -356,36 +293,26 @@ class Publisher:
             if not success:
                 return False, "Не удалось отправить сообщение"
             
+            # 🔥 ПАРСИМ МЕТАДАННЫЕ (Ссылка-источник будет здесь)
             metadata = self._parse_metadata(metadata_text)
             metadata['chat_id'] = chat_id
             
+            # 🔥 СОХРАНЯЕМ post_link ОТДЕЛЬНО (это ссылка на пост в MAX)
             if post_link:
                 metadata['post_link'] = post_link
-                now = datetime.now(self.moscow_tz)
-                timestamp = now.timestamp()
-                self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, timestamp)
-                self.db.add_publication(user_id, folder_name, chat_id, status='success')
-                logger.info(f"✅ Папка {folder_name} опубликована, ссылка: {post_link}")
-                return True, f"✅ Папка {folder_name} опубликована"
+                logger.info(f"🔗 Ссылка на пост сохранена: {post_link}")
             else:
-                logger.warning(f"⚠️ Ссылка НЕ ПОЛУЧЕНА для {folder_name}")
-                now = datetime.now(self.moscow_tz)
-                timestamp = now.timestamp()
-                self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, timestamp)
-                self.db.add_publication(user_id, folder_name, chat_id, status='pending')
-                
-                pending_key = f"{chat_id}_{folder_name}"
-                self.pending_messages[pending_key] = {
-                    'user_id': user_id,
-                    'folder_name': folder_name,
-                    'chat_id': chat_id,
-                    'metadata': metadata,
-                    'timestamp': timestamp
-                }
-                logger.info(f"📝 Добавлено в pending: {pending_key}")
-                logger.info(f"📊 Всего pending записей: {len(self.pending_messages)}")
-                
-                return True, f"✅ Папка {folder_name} опубликована, ожидаем подтверждение"
+                metadata['post_link'] = ''
+                logger.warning(f"⚠️ Ссылка на пост не получена")
+            
+            # Сохраняем в БД
+            now = datetime.now(self.moscow_tz)
+            timestamp = now.timestamp()
+            self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, timestamp)
+            self.db.add_publication(user_id, folder_name, chat_id, status='success')
+            
+            logger.info(f"✅ Папка {folder_name} опубликована")
+            return True, f"✅ Папка {folder_name} опубликована"
             
         except Exception as e:
             logger.error(f"❌ Ошибка публикации {folder_name}: {e}")
