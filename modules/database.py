@@ -174,6 +174,23 @@ class Database:
             logger.error(f"❌ Ошибка обновления ссылки: {e}")
             return False
     
+    def get_post_link(self, user_id, folder_name):
+        """Получает post_link для папки"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            c = conn.cursor()
+            c.execute('''
+                SELECT post_link FROM ad_metadata 
+                WHERE user_id = ? AND folder_name = ?
+                ORDER BY id DESC LIMIT 1
+            ''', (user_id, folder_name))
+            row = c.fetchone()
+            conn.close()
+            return row[0] if row and row[0] else None
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения post_link: {e}")
+            return None
+    
     def get_ad_metadata(self, user_id, folder_name):
         """Получает метаданные из БД"""
         try:
