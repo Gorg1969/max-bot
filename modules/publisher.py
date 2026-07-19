@@ -147,6 +147,15 @@ class Publisher:
                             if 'mid' in result['data']:
                                 message_id = result['data']['mid']
                                 logger.info(f"✅ Найден ID в data.mid: {message_id}")
+                        
+                        # Вариант 7: вложенный в message
+                        if not message_id and 'message' in result and isinstance(result['message'], dict):
+                            if 'id' in result['message']:
+                                message_id = result['message']['id']
+                                logger.info(f"✅ Найден ID в message.id: {message_id}")
+                            elif 'mid' in result['message']:
+                                message_id = result['message']['mid']
+                                logger.info(f"✅ Найден ID в message.mid: {message_id}")
                     
                     # ЕСЛИ ID НАЙДЕН - СОЗДАЕМ ССЫЛКУ
                     if message_id:
@@ -169,6 +178,11 @@ class Publisher:
                         # СОВСЕМ НЕТ ID
                         logger.warning(f"⚠️ ID НЕ НАЙДЕН в ответе API!")
                         logger.warning(f"⚠️ Полный ответ: {response.text}")
+                        
+                        # ПРОВЕРЯЕМ, МОЖЕТ ID В ДРУГОМ МЕСТЕ
+                        # Иногда API возвращает ID в поле 'result'
+                        if 'result' in result:
+                            logger.info(f"📨 Поле result: {result['result']}")
                         
                         return True, None  # Успех, но без ID
                         
