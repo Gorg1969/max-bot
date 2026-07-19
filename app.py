@@ -267,6 +267,8 @@ UPLOAD_PAGE = """
         #reportStatus { margin-top: 15px; padding: 15px; border-radius: 5px; display: none; font-weight: 500; white-space: pre-line; }
         .queue-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; display: none; font-weight: 500; }
         .photo-progress { margin: 5px 0; font-size: 13px; color: #666; }
+        .clear-btn { background: #dc3545; color: white; }
+        .clear-btn:hover { background: #c82333; }
         @media (max-width: 600px) {
             body { padding: 10px; margin: 10px; }
             .container { padding: 15px; }
@@ -307,7 +309,8 @@ UPLOAD_PAGE = """
             <div class="button-group">
                 <button class="btn btn-success" onclick="uploadFolder()">🚀 Загрузить</button>
                 <button class="btn btn-stop" onclick="stopProcessing()">⏹ Остановить</button>
-                <button class="btn btn-danger" onclick="clearFiles()">🗑️ Очистить</button>
+                <button class="btn btn-danger" onclick="clearFiles()">🗑️ Очистить список</button>
+                <button class="btn btn-danger clear-btn" onclick="clearAllData()">🗑️ Очистить БД</button>
             </div>
         </div>
         
@@ -330,6 +333,9 @@ UPLOAD_PAGE = """
                 </button>
                 <button class="btn btn-warning" onclick="forceUpdateLinks()">
                     🔄 Обновить ссылки
+                </button>
+                <button class="btn btn-danger clear-btn" onclick="clearAllData()">
+                    🗑️ Очистить все
                 </button>
             </div>
             <div id="reportStatus"></div>
@@ -368,12 +374,10 @@ UPLOAD_PAGE = """
         const reportBtn = document.getElementById('reportBtn');
         const reportStatus = document.getElementById('reportStatus');
 
-        // Запускаем проверку статуса при загрузке страницы
         document.addEventListener('DOMContentLoaded', function() {
             setTimeout(checkReportStatus, 3000);
         });
 
-        // Останавливаем интервал при уходе со страницы
         window.addEventListener('beforeunload', function() {
             if (statusCheckInterval) {
                 clearInterval(statusCheckInterval);
@@ -589,6 +593,38 @@ UPLOAD_PAGE = """
             } catch (error) {
                 addLog(`❌ Ошибка: ${error.message}`);
                 showStatus('error', `❌ Ошибка: ${error.message}`);
+            }
+        }
+
+        async function clearAllData() {
+            if (!confirm('⚠️ Удалить ВСЕ данные пользователя?\n\nОтчеты останутся, но история публикаций будет очищена.')) {
+                return;
+            }
+            
+            try {
+                addLog('🗑️ Очистка данных...');
+                
+                const response = await fetch(`/clear_user_data/${userId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    showStatus('success', '✅ Данные очищены');
+                    addLog('✅ Все данные пользователя очищены');
+                    reportStatus.style.display = 'none';
+                    reportBtn.disabled = true;
+                    reportReady = false;
+                    setTimeout(checkReportStatus, 1000);
+                } else {
+                    showStatus('error', '❌ ' + result.message);
+                    addLog('❌ Ошибка: ' + result.message);
+                }
+            } catch (error) {
+                showStatus('error', '❌ Ошибка: ' + error.message);
+                addLog('❌ Ошибка: ' + error.message);
             }
         }
 
@@ -914,11 +950,20 @@ UPLOAD_PAGE = """
             
             isProcessing = false;
             
-            // Автоматически проверяем статус через 30 секунд
+            // Автоматическая проверка через 30 секунд
             setTimeout(function() {
                 addLog('🔄 Автоматическая проверка статуса...');
                 checkReportStatus();
             }, 30000);
+            
+            // Автоочистка через 5 минут после публикации
+            setTimeout(function() {
+                addLog('🧹 Автоочистка данных...');
+                fetch('/auto_cleanup/' + userId, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+            }, 300000); // 5 минут
         }
     </script>
 </body>
@@ -1160,6 +1205,9 @@ def download_report(user_id, filename):
         if not os.path.exists(file_path):
             return "❌ Файл не найден", 404
         
+        # Отмечаем, что отчет скачан - запустится автоочистка через 30 секунд
+        report_gen.mark_report_downloaded(user_id)
+        
         return send_file(file_path, as_attachment=True, download_name=filename)
         
     except Exception as e:
@@ -1230,31 +1278,14 @@ def cleanup_temp():
 
 @app.route('/report_status/<int:user_id>')
 def report_status(user_id):
-    """
-    Проверяет статус публикаций пользователя.
-    Возвращает:
-    - total: всего публикаций
-    - pending: сколько ожидают ссылки
-    - success: сколько готово
-    - ready: готов ли отчет (нет pending)
-    """
+    """Проверяет статус публикаций пользователя"""
     try:
-        publications = db.get_publications(user_id)
+        stats = db.get_stats(user_id)
         
-        if not publications:
-            return jsonify({
-                'total': 0,
-                'pending': 0,
-                'success': 0,
-                'failed': 0,
-                'ready': False,
-                'message': 'Нет публикаций'
-            })
-        
-        pending = len([p for p in publications if p.get('status') == 'pending'])
-        success = len([p for p in publications if p.get('status') == 'success'])
-        failed = len([p for p in publications if p.get('status') == 'failed'])
-        total = len(publications)
+        pending = stats['pending']
+        success = stats['success']
+        failed = stats['errors']
+        total = stats['total']
         
         ready = pending == 0 and success > 0
         
@@ -1274,10 +1305,7 @@ def report_status(user_id):
 
 @app.route('/force_update_links', methods=['POST'])
 def force_update_links():
-    """
-    Принудительно обновляет ссылки для всех pending публикаций.
-    Используется для тестирования или ручного обновления.
-    """
+    """Принудительно обновляет ссылки для всех pending публикаций"""
     try:
         data = request.get_json()
         user_id = data.get('user_id')
@@ -1309,6 +1337,56 @@ def force_update_links():
         
     except Exception as e:
         logger.error(f"❌ Ошибка принудительного обновления: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/clear_user_data/<int:user_id>', methods=['POST'])
+def clear_user_data(user_id):
+    """Очищает все данные пользователя из БД"""
+    try:
+        db.clear_user_data(user_id)
+        publisher.clear_diagnostic_log()
+        publisher.pending_messages = {}
+        
+        logger.info(f"🗑️ Данные пользователя {user_id} очищены")
+        return jsonify({
+            'success': True,
+            'message': f'Данные пользователя {user_id} очищены'
+        })
+    except Exception as e:
+        logger.error(f"❌ Ошибка очистки данных: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/auto_cleanup/<int:user_id>', methods=['POST'])
+def auto_cleanup(user_id):
+    """Автоматическая очистка данных пользователя через 5 минут"""
+    try:
+        def delayed_cleanup():
+            time.sleep(300)  # 5 минут
+            logger.info(f"🧹 Автоочистка данных для {user_id} через 5 минут")
+            db.clear_user_data(user_id)
+            # Очищаем файлы
+            user_folder = fm.get_user_folder(user_id)
+            if os.path.exists(user_folder):
+                for item in os.listdir(user_folder):
+                    item_path = os.path.join(user_folder, item)
+                    if os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+                    elif not item.startswith('Отчет_'):
+                        try:
+                            os.remove(item_path)
+                        except:
+                            pass
+            publisher.clear_diagnostic_log()
+            publisher.pending_messages = {}
+            logger.info(f"✅ Данные пользователя {user_id} очищены")
+        
+        threading.Thread(target=delayed_cleanup, daemon=True).start()
+        return jsonify({'success': True, 'message': 'Автоочистка запланирована через 5 минут'})
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка автоочистки: {e}")
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
