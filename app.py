@@ -239,6 +239,11 @@ UPLOAD_PAGE = """
         .btn-danger:hover { background: #c82333; }
         .btn-stop { background: #fd7e14; color: white; }
         .btn-stop:hover { background: #e06b0a; }
+        .btn-info { background: #17a2b8; color: white; }
+        .btn-info:hover { background: #138496; }
+        .btn-warning { background: #ffc107; color: #333; }
+        .btn-warning:hover { background: #e0a800; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
         .status { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
         .status.success { background: #d4edda; color: #155724; display: block; border-left: 4px solid #28a745; }
         .status.error { background: #f8d7da; color: #721c24; display: block; border-left: 4px solid #dc3545; }
@@ -258,6 +263,8 @@ UPLOAD_PAGE = """
         .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
         .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; border-top: 1px solid #eee; padding-top: 20px; }
         .report-section { margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 10px; border: 1px solid #dee2e6; text-align: center; }
+        .report-section .btn-group { display: flex; gap: 10px; align-items: center; justify-content: center; flex-wrap: wrap; }
+        #reportStatus { margin-top: 15px; padding: 15px; border-radius: 5px; display: none; font-weight: 500; white-space: pre-line; }
         .queue-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; display: none; font-weight: 500; }
         .photo-progress { margin: 5px 0; font-size: 13px; color: #666; }
         @media (max-width: 600px) {
@@ -265,6 +272,7 @@ UPLOAD_PAGE = """
             .container { padding: 15px; }
             .button-group { flex-direction: column; }
             .btn { width: 100%; }
+            .report-section .btn-group { flex-direction: column; }
         }
     </style>
 </head>
@@ -313,8 +321,21 @@ UPLOAD_PAGE = """
         <div id="log"></div>
         
         <div class="report-section">
-            <button class="btn btn-primary" onclick="getReport()">📊 Скачать отчет</button>
-            <p style="margin-top: 10px; color: #666; font-size: 14px;">После публикации всех папок</p>
+            <div class="btn-group">
+                <button class="btn btn-primary" id="reportBtn" onclick="getReport()" disabled>
+                    📊 Скачать отчет
+                </button>
+                <button class="btn btn-info" onclick="checkReportStatus()">
+                    🔄 Проверить статус
+                </button>
+                <button class="btn btn-warning" onclick="forceUpdateLinks()">
+                    🔄 Обновить ссылки
+                </button>
+            </div>
+            <div id="reportStatus"></div>
+            <p style="margin-top: 10px; color: #666; font-size: 14px;">
+                После публикации подождите 1-2 минуты, затем нажмите "Проверить статус"
+            </p>
         </div>
         
         <div class="footer">⚡ MAX Bot | Загрузка объявлений v2.0</div>
@@ -331,6 +352,8 @@ UPLOAD_PAGE = """
         let totalFolders = 0;
         let successCount = 0;
         let errorCount = 0;
+        let reportReady = false;
+        let statusCheckInterval = null;
         
         const dropZone = document.getElementById('dropZone');
         const folderInput = document.getElementById('folderInput');
@@ -342,6 +365,20 @@ UPLOAD_PAGE = """
         const progressBar = document.getElementById('progressBar');
         const progress = document.getElementById('progress');
         const queueInfo = document.getElementById('queueInfo');
+        const reportBtn = document.getElementById('reportBtn');
+        const reportStatus = document.getElementById('reportStatus');
+
+        // Запускаем проверку статуса при загрузке страницы
+        document.addEventListener('DOMContentLoaded', function() {
+            setTimeout(checkReportStatus, 3000);
+        });
+
+        // Останавливаем интервал при уходе со страницы
+        window.addEventListener('beforeunload', function() {
+            if (statusCheckInterval) {
+                clearInterval(statusCheckInterval);
+            }
+        });
 
         dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
         dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('dragover'); });
@@ -435,6 +472,9 @@ UPLOAD_PAGE = """
             totalFolders = 0;
             successCount = 0;
             errorCount = 0;
+            reportReady = false;
+            reportBtn.disabled = true;
+            reportStatus.style.display = 'none';
         }
 
         function addLog(message) {
@@ -450,7 +490,106 @@ UPLOAD_PAGE = """
         }
 
         function getReport() {
+            if (!reportReady) {
+                showStatus('warning', '⏳ Отчет еще не готов, подождите...');
+                return;
+            }
             window.open(`/report/${userId}`, '_blank');
+        }
+
+        async function checkReportStatus() {
+            try {
+                const response = await fetch(`/report_status/${userId}`);
+                const result = await response.json();
+                
+                reportStatus.style.display = 'block';
+                
+                if (result.error) {
+                    reportStatus.className = 'status error';
+                    reportStatus.textContent = '❌ ' + result.error;
+                    reportBtn.disabled = true;
+                    reportReady = false;
+                    return;
+                }
+                
+                let statusText = `📊 Всего: ${result.total} | ✅ Готово: ${result.success}`;
+                
+                if (result.pending > 0) {
+                    statusText += ` | ⏳ Ожидают: ${result.pending}`;
+                    reportStatus.className = 'status info';
+                    statusText += '\\n⏳ Подождите, ссылки еще формируются...';
+                    reportBtn.disabled = true;
+                    reportReady = false;
+                } else if (result.failed > 0) {
+                    statusText += ` | ❌ Ошибок: ${result.failed}`;
+                    reportStatus.className = 'status warning';
+                    if (result.success > 0) {
+                        statusText += '\\n⚠️ Часть публикаций завершилась с ошибкой';
+                        reportBtn.disabled = false;
+                        reportReady = true;
+                    } else {
+                        statusText += '\\n❌ Все публикации завершились с ошибкой';
+                        reportBtn.disabled = true;
+                        reportReady = false;
+                    }
+                } else if (result.ready && result.success > 0) {
+                    reportStatus.className = 'status success';
+                    statusText += '\\n✅ Отчет готов! Нажмите "Скачать отчет"';
+                    reportBtn.disabled = false;
+                    reportReady = true;
+                } else {
+                    reportStatus.className = 'status info';
+                    statusText += '\\n⏳ Нет готовых публикаций';
+                    reportBtn.disabled = true;
+                    reportReady = false;
+                }
+                
+                reportStatus.textContent = statusText;
+                
+                if (result.pending > 0) {
+                    if (statusCheckInterval) {
+                        clearInterval(statusCheckInterval);
+                    }
+                    statusCheckInterval = setInterval(checkReportStatus, 10000);
+                } else {
+                    if (statusCheckInterval) {
+                        clearInterval(statusCheckInterval);
+                        statusCheckInterval = null;
+                    }
+                }
+                
+            } catch (error) {
+                console.error('Ошибка проверки статуса:', error);
+                reportStatus.style.display = 'block';
+                reportStatus.className = 'status error';
+                reportStatus.textContent = '❌ Ошибка проверки статуса: ' + error.message;
+            }
+        }
+
+        async function forceUpdateLinks() {
+            try {
+                addLog('🔄 Принудительное обновление ссылок...');
+                
+                const response = await fetch('/force_update_links', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: parseInt(userId) })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    addLog(`✅ ${result.message}`);
+                    showStatus('success', `✅ ${result.message}`);
+                    setTimeout(checkReportStatus, 1000);
+                } else {
+                    addLog(`❌ ${result.message}`);
+                    showStatus('error', `❌ ${result.message}`);
+                }
+            } catch (error) {
+                addLog(`❌ Ошибка: ${error.message}`);
+                showStatus('error', `❌ Ошибка: ${error.message}`);
+            }
         }
 
         async function stopProcessing() {
@@ -638,6 +777,8 @@ UPLOAD_PAGE = """
             processedCount = 0;
             successCount = 0;
             errorCount = 0;
+            reportReady = false;
+            reportBtn.disabled = true;
             
             showStatus('info', '⏳ Подготовка данных...');
             progressBar.style.display = 'block';
@@ -646,6 +787,7 @@ UPLOAD_PAGE = """
             progress.className = 'progress';
             logDiv.textContent = '';
             queueInfo.style.display = 'block';
+            reportStatus.style.display = 'none';
             addLog('🚀 Начинаем обработку...');
             
             const folders = {};
@@ -715,7 +857,7 @@ UPLOAD_PAGE = """
                     
                     if (result.success) {
                         successCount++;
-                        addLog(`✅ ${folderName}: опубликовано (ожидаем подтверждение)`);
+                        addLog(`✅ ${folderName}: опубликовано`);
                         results.push(`✅ ${folderName}: успешно`);
                     } else {
                         errorCount++;
@@ -730,7 +872,7 @@ UPLOAD_PAGE = """
                 }
                 
                 processedCount = i + 1;
-                await new Promise(r => setTimeout(r, 5000));
+                await new Promise(r => setTimeout(r, 2000));
             }
             
             if (isStopped) {
@@ -751,6 +893,8 @@ UPLOAD_PAGE = """
             if (errorCount === 0) {
                 showStatus('success', `✅ Загружено ${successCount} папок!`);
                 addLog(`✅ ВСЕ ${successCount} папок загружены!`);
+                addLog(`⏳ Подождите 1-2 минуты для получения ссылок`);
+                addLog(`📊 Затем нажмите "Проверить статус"`);
             } else {
                 showStatus('warning', `⚠️ Загружено ${successCount} папок, ${errorCount} с ошибками`);
                 addLog(`⚠️ Загружено ${successCount} папок, ${errorCount} с ошибками`);
@@ -765,10 +909,16 @@ UPLOAD_PAGE = """
             }
             
             if (successCount > 0) {
-                addLog(`\\n📊 Скачать отчет: /report/${userId}`);
+                addLog(`\\n📊 После ожидания нажмите "Проверить статус"`);
             }
             
             isProcessing = false;
+            
+            // Автоматически проверяем статус через 30 секунд
+            setTimeout(function() {
+                addLog('🔄 Автоматическая проверка статуса...');
+                checkReportStatus();
+            }, 30000);
         }
     </script>
 </body>
@@ -1076,36 +1226,49 @@ def cleanup_temp():
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
-# ========== НОВЫЕ ЭНДПОИНТЫ ДЛЯ МОНИТОРИНГА ==========
+# ========== ДИАГНОСТИЧЕСКИЕ ЭНДПОИНТЫ ==========
 
-@app.route('/pending_status/<int:user_id>')
-def pending_status(user_id):
-    """Показывает статус pending публикаций"""
+@app.route('/report_status/<int:user_id>')
+def report_status(user_id):
+    """
+    Проверяет статус публикаций пользователя.
+    Возвращает:
+    - total: всего публикаций
+    - pending: сколько ожидают ссылки
+    - success: сколько готово
+    - ready: готов ли отчет (нет pending)
+    """
     try:
-        publications = db.get_publications_with_status(user_id, 'pending')
+        publications = db.get_publications(user_id)
         
-        result = {
-            'user_id': user_id,
-            'pending_count': len(publications),
-            'publications': []
-        }
-        
-        for pub in publications:
-            folder_name = pub.get('folder_name')
-            metadata = db.get_ad_metadata(user_id, folder_name)
-            post_link = metadata.get('post_link')
-            
-            result['publications'].append({
-                'folder_name': folder_name,
-                'created_at': pub.get('created_at'),
-                'has_link': bool(post_link),
-                'post_link': post_link
+        if not publications:
+            return jsonify({
+                'total': 0,
+                'pending': 0,
+                'success': 0,
+                'failed': 0,
+                'ready': False,
+                'message': 'Нет публикаций'
             })
         
-        return jsonify(result)
+        pending = len([p for p in publications if p.get('status') == 'pending'])
+        success = len([p for p in publications if p.get('status') == 'success'])
+        failed = len([p for p in publications if p.get('status') == 'failed'])
+        total = len(publications)
+        
+        ready = pending == 0 and success > 0
+        
+        return jsonify({
+            'total': total,
+            'pending': pending,
+            'success': success,
+            'failed': failed,
+            'ready': ready,
+            'message': '✅ Отчет готов!' if ready else f'⏳ Ожидание {pending} публикаций...'
+        })
         
     except Exception as e:
-        logger.error(f"❌ Ошибка получения статуса: {e}")
+        logger.error(f"❌ Ошибка проверки статуса: {e}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -1159,35 +1322,18 @@ def webhook_test():
     })
 
 
-@app.errorhandler(Exception)
-def handle_all_exceptions(error):
-    logger.error(f"Критическая ошибка обработки запроса: {error}", exc_info=True)
-    return jsonify({
-        'success': False,
-        'message': 'Внутренняя ошибка сервера',
-        'details': str(error)
-    }), 500
-
-# app.py - добавить в конец файла
-
-# ========== ДИАГНОСТИЧЕСКИЕ ЭНДПОИНТЫ ==========
-
 @app.route('/diagnostic/<int:user_id>')
 def diagnostic_log(user_id):
     """Показывает диагностический журнал для пользователя"""
     try:
-        # Проверяем, что пользователь существует
         user_folder = fm.get_user_folder(user_id)
         if not os.path.exists(user_folder):
             return jsonify({'error': 'Пользователь не найден'}), 404
         
-        # Получаем диагностический журнал из publisher
         diagnostic_data = publisher.get_diagnostic_log()
         
-        # Фильтруем по user_id если есть в данных
         user_diagnostic = []
         for entry in diagnostic_data:
-            # Если в записи есть chat_id, проверяем через БД
             if entry.get('chat_id'):
                 publications = db.get_publications(user_id)
                 for pub in publications:
@@ -1195,15 +1341,14 @@ def diagnostic_log(user_id):
                         user_diagnostic.append(entry)
                         break
         
-        # Если нет отфильтрованных, показываем все последние
         if not user_diagnostic:
-            user_diagnostic = diagnostic_data[-20:]  # Последние 20 записей
+            user_diagnostic = diagnostic_data[-20:]
         
         return jsonify({
             'user_id': user_id,
             'total_entries': len(diagnostic_data),
             'user_entries': len(user_diagnostic),
-            'diagnostic': user_diagnostic[-50:]  # Последние 50 записей
+            'diagnostic': user_diagnostic[-50:]
         })
         
     except Exception as e:
@@ -1239,6 +1384,17 @@ def diagnostic_last():
             })
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.errorhandler(Exception)
+def handle_all_exceptions(error):
+    logger.error(f"Критическая ошибка обработки запроса: {error}", exc_info=True)
+    return jsonify({
+        'success': False,
+        'message': 'Внутренняя ошибка сервера',
+        'details': str(error)
+    }), 500
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
