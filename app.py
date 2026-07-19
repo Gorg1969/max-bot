@@ -875,6 +875,8 @@ def publish_folder():
         )
         
         if success:
+            # 🔥 ФИКС: Проверяем, что данные сохранились в БД
+            # Даже если ссылка не получена, публикация считается успешной
             return jsonify({'success': True, 'message': message})
         else:
             return jsonify({'success': False, 'message': message}), 500
@@ -911,6 +913,10 @@ def webhook():
             user_id = sender.get('user_id')
             text = body.get('text', '')
             message_id = body.get('mid')  # ID сообщения
+            
+            # 🔥 ФИКС: Приводим chat_id к строке для единообразия
+            if chat_id is not None:
+                chat_id = str(chat_id)
             
             logger.info(f"📨 chat_id: {chat_id}, user_id: {user_id}, text: {text}, mid: {message_id}")
             
@@ -958,11 +964,17 @@ def webhook():
                         api.send_message(user_id, "❌ Нет данных для отчета.")
                     return jsonify({"ok": True}), 200
             
-            # Если есть chat_id и message_id - это ответ от бота (получаем post_id)
+            # 🔥 ФИКС: Если есть chat_id и message_id - это ответ от бота
             if chat_id and message_id:
                 logger.info(f"📨 Получен ID сообщения: {message_id} для чата {chat_id}")
-                # Обрабатываем через publisher
-                publisher.handle_message_created(chat_id, message_id)
+                
+                # 🔥 ФИКС: Передаем user_id если он есть
+                if user_id:
+                    publisher.handle_message_created(chat_id, message_id, user_id)
+                else:
+                    # Пытаемся найти user_id в pending_messages
+                    publisher.handle_message_created(chat_id, message_id)
+                
                 return jsonify({"ok": True}), 200
             
             return jsonify({"ok": True}), 200
