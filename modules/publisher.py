@@ -43,7 +43,9 @@ class Publisher:
         return None
 
     def _send_and_get_id(self, chat_id, text, image_tokens):
-        """Отправляет сообщение в чат с диагностикой"""
+        """
+        Отправляет сообщение в чат и получает ID из ответа API.
+        """
         diagnostic = {
             'timestamp': datetime.now().isoformat(),
             'chat_id': chat_id,
@@ -111,50 +113,94 @@ class Publisher:
                     diagnostic['response_json'] = result
                     logger.info(f"📨 JSON ОТВЕТА: {json.dumps(result, indent=2, ensure_ascii=False)[:500]}")
                     
-                    # Ищем ID во всех полях
+                    # 🔥 ИЩЕМ ID ВО ВСЕХ ВОЗМОЖНЫХ МЕСТАХ
                     if isinstance(result, dict):
-                        if 'mid' in result:
-                            message_id = str(result['mid'])
-                        elif 'id' in result:
-                            message_id = str(result['id'])
-                        elif 'message_id' in result:
-                            message_id = str(result['message_id'])
+                        # Вариант 1: message.body.mid (основной)
+                        if 'message' in result and isinstance(result['message'], dict):
+                            msg = result['message']
+                            if 'body' in msg and isinstance(msg['body'], dict):
+                                if 'mid' in msg['body']:
+                                    mid = msg['body']['mid']
+                                    # Убираем префикс "mid." если он есть
+                                    if mid.startswith('mid.'):
+                                        message_id = mid[4:]  # Убираем "mid."
+                                    else:
+                                        message_id = mid
+                                    logger.info(f"✅ Найден ID в message.body.mid: {message_id}")
                         
+                        # Вариант 2: data.mid
                         if not message_id and 'data' in result and isinstance(result['data'], dict):
-                            data = result['data']
-                            if 'mid' in data:
-                                message_id = str(data['mid'])
-                            elif 'id' in data:
-                                message_id = str(data['id'])
-                            elif 'message_id' in data:
-                                message_id = str(data['message_id'])
+                            if 'mid' in result['data']:
+                                mid = result['data']['mid']
+                                if mid.startswith('mid.'):
+                                    message_id = mid[4:]
+                                else:
+                                    message_id = mid
+                                logger.info(f"✅ Найден ID в data.mid: {message_id}")
+                        
+                        # Вариант 3: прямые поля
+                        if not message_id and 'mid' in result:
+                            mid = result['mid']
+                            if mid.startswith('mid.'):
+                                message_id = mid[4:]
+                            else:
+                                message_id = mid
+                            logger.info(f"✅ Найден ID в mid: {message_id}")
+                        
+                        # Вариант 4: message_id
+                        if not message_id and 'message_id' in result:
+                            message_id = str(result['message_id'])
+                            logger.info(f"✅ Найден ID в message_id: {message_id}")
+                        
+                        # Вариант 5: id
+                        if not message_id and 'id' in result:
+                            message_id = str(result['id'])
+                            logger.info(f"✅ Найден ID в id: {message_id}")
                     
-                    # Проверяем Location
+                    # Проверяем Location заголовок
                     if not message_id:
                         location = response.headers.get('Location', '')
                         if location:
-                            match = re.search(r'/(\d+)$', location)
+                            logger.info(f"📍 Location: {location}")
+                            match = re.search(r'/([a-fA-F0-9]+)$', location)
                             if match:
                                 message_id = match.group(1)
+                                logger.info(f"✅ Найден ID в Location: {message_id}")
                     
+                    # Если ID найден - создаем ссылку
                     if message_id:
                         post_link = f"https://max.ru/c/{chat_id_str}/{message_id}"
-                        logger.info(f"✅ Найден ID: {message_id}, ссылка: {post_link}")
+                        logger.info(f"🔗 Ссылка создана: {post_link}")
+                        
                         diagnostic['status'] = 'success'
                         diagnostic['message_id'] = message_id
                         diagnostic['post_link'] = post_link
                         self.diagnostic_log.append(diagnostic)
+                        
                         return True, post_link
                     else:
-                        logger.warning(f"⚠️ ID не найден, используем ссылку на чат")
-                        post_link = f"https://max.ru/c/{chat_id_str}"
-                        diagnostic['status'] = 'success_no_id'
-                        diagnostic['post_link'] = post_link
+                        logger.warning(f"⚠️ ID НЕ НАЙДЕН в ответе!")
+                        logger.warning(f"⚠️ Полный ответ: {response.text[:500]}")
+                        
+                        diagnostic['status'] = 'failed'
+                        diagnostic['error'] = 'ID не найден в ответе API'
                         self.diagnostic_log.append(diagnostic)
+                        
+                        # Фолбэк - ссылка на чат
+                        post_link = f"https://max.ru/c/{chat_id_str}"
+                        logger.info(f"🔗 Используем ссылку на чат: {post_link}")
                         return True, post_link
                         
+                except json.JSONDecodeError as e:
+                    logger.error(f"❌ Ошибка парсинга JSON: {e}")
+                    diagnostic['status'] = 'failed'
+                    diagnostic['error'] = f'JSONDecodeError: {e}'
+                    self.diagnostic_log.append(diagnostic)
+                    return True, None
                 except Exception as e:
                     logger.error(f"❌ Ошибка обработки ответа: {e}")
+                    import traceback
+                    traceback.print_exc()
                     diagnostic['status'] = 'failed'
                     diagnostic['error'] = str(e)
                     self.diagnostic_log.append(diagnostic)
@@ -168,6 +214,8 @@ class Publisher:
                 
         except Exception as e:
             logger.error(f"❌ Критическая ошибка: {e}")
+            import traceback
+            traceback.print_exc()
             diagnostic['status'] = 'failed'
             diagnostic['error'] = str(e)
             self.diagnostic_log.append(diagnostic)
@@ -209,15 +257,44 @@ class Publisher:
             )
             
             if response.status_code == 200:
-                post_link = f"https://max.ru/c/{user_id}"
+                message_id = None
+                post_link = None
                 try:
                     result = response.json()
-                    if 'data' in result and 'id' in result['data']:
-                        post_link = f"https://max.ru/c/{user_id}/{result['data']['id']}"
-                    elif 'id' in result:
-                        post_link = f"https://max.ru/c/{user_id}/{result['id']}"
+                    
+                    if 'message' in result and isinstance(result['message'], dict):
+                        msg = result['message']
+                        if 'body' in msg and isinstance(msg['body'], dict):
+                            if 'mid' in msg['body']:
+                                mid = msg['body']['mid']
+                                if mid.startswith('mid.'):
+                                    message_id = mid[4:]
+                                else:
+                                    message_id = mid
+                    elif 'data' in result and isinstance(result['data'], dict):
+                        if 'mid' in result['data']:
+                            mid = result['data']['mid']
+                            if mid.startswith('mid.'):
+                                message_id = mid[4:]
+                            else:
+                                message_id = mid
+                    elif 'mid' in result:
+                        mid = result['mid']
+                        if mid.startswith('mid.'):
+                            message_id = mid[4:]
+                        else:
+                            message_id = mid
+                    
+                    if message_id:
+                        post_link = f"https://max.ru/c/{user_id}/{message_id}"
+                    else:
+                        post_link = None
                 except:
-                    pass
+                    post_link = None
+                
+                if not post_link:
+                    post_link = f"https://max.ru/c/{user_id}"
+                
                 logger.info(f"✅ Отправлено пользователю {user_id}, ссылка: {post_link}")
                 return True, post_link
             else:
@@ -250,10 +327,10 @@ class Publisher:
     def publish_folder_with_tokens(self, user_id, folder_name, ad_text, metadata_text, image_tokens):
         """
         Публикует папку с уже загруженными токенами фото.
-        НЕ ЖДЕТ ВЕБХУКИ - сразу сохраняет как pending.
         """
         try:
             if self.STOP_FLAG.get(user_id, False):
+                logger.info(f"⏹️ Пропускаем папку {folder_name} - остановка")
                 return False, "Остановка пользователем"
             
             chat_id = self.extract_chat_id_from_folder(folder_name)
@@ -279,7 +356,7 @@ class Publisher:
             metadata = self._parse_metadata(metadata_text)
             metadata['chat_id'] = chat_id
             
-            # Если ссылка получена сразу
+            # Если ссылка получена
             if post_link:
                 metadata['post_link'] = post_link
                 now = datetime.now(self.moscow_tz)
@@ -289,15 +366,14 @@ class Publisher:
                 logger.info(f"✅ Папка {folder_name} опубликована, ссылка: {post_link}")
                 return True, f"✅ Папка {folder_name} опубликована"
             
-            # Если ссылка не получена - сохраняем как pending
+            # Если ссылка не получена
             else:
-                logger.info(f"⏳ Папка {folder_name} в статусе pending, ожидаем вебхук")
+                logger.warning(f"⚠️ Ссылка НЕ ПОЛУЧЕНА для {folder_name}")
                 now = datetime.now(self.moscow_tz)
                 timestamp = now.timestamp()
                 self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, timestamp)
                 self.db.add_publication(user_id, folder_name, chat_id, status='pending')
                 
-                # Сохраняем в pending для вебхука
                 pending_key = f"{chat_id}_{folder_name}"
                 self.pending_messages[pending_key] = {
                     'user_id': user_id,
@@ -330,7 +406,6 @@ class Publisher:
             logger.info(f"📨 ВЕБХУК: chat_id={chat_id_str}, message_id={message_id}")
             logger.info(f"📊 Всего pending записей: {len(self.pending_messages)}")
             
-            # Ищем в pending
             found = False
             matching_keys = []
             
@@ -343,7 +418,6 @@ class Publisher:
                 logger.warning(f"⚠️ Нет pending записи для chat_id {chat_id_str}")
                 return False
             
-            # Обновляем все найденные записи
             for key in matching_keys:
                 data = self.pending_messages[key]
                 folder_name = data['folder_name']
