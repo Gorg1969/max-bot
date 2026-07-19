@@ -45,7 +45,7 @@ class Publisher:
     def _send_and_get_id(self, chat_id, text, image_tokens):
         """
         Отправляет сообщение в чат и получает ID из ответа API.
-        Ищет внешний токен поста (public_token, slug) для формирования ссылки.
+        Использует seq (числовой ID) для ссылки.
         """
         diagnostic = {
             'timestamp': datetime.now().isoformat(),
@@ -116,71 +116,29 @@ class Publisher:
                     
                     # 🔥 ИЩЕМ ID ВО ВСЕХ ВОЗМОЖНЫХ МЕСТАХ
                     if isinstance(result, dict):
-                        # Вариант 1: ищем внешний токен поста (public_token, slug, short_id)
-                        # Сначала проверяем корневой объект
-                        if 'public_token' in result:
-                            message_id = result['public_token']
-                            logger.info(f"✅ Найден public_token: {message_id}")
-                        elif 'slug' in result:
-                            message_id = result['slug']
-                            logger.info(f"✅ Найден slug: {message_id}")
-                        elif 'short_id' in result:
-                            message_id = str(result['short_id'])
-                            logger.info(f"✅ Найден short_id: {message_id}")
-                        
-                        # Проверяем в message
-                        if not message_id and 'message' in result and isinstance(result['message'], dict):
+                        # Вариант 1: message.body.seq (ЧИСЛОВОЙ ID для браузера)
+                        if 'message' in result and isinstance(result['message'], dict):
                             msg = result['message']
-                            if 'public_token' in msg:
-                                message_id = msg['public_token']
-                                logger.info(f"✅ Найден public_token в message: {message_id}")
-                            elif 'slug' in msg:
-                                message_id = msg['slug']
-                                logger.info(f"✅ Найден slug в message: {message_id}")
-                            elif 'short_id' in msg:
-                                message_id = str(msg['short_id'])
-                                logger.info(f"✅ Найден short_id в message: {message_id}")
+                            if 'body' in msg and isinstance(msg['body'], dict):
+                                # Сначала ищем seq - это числовой ID для ссылки
+                                if 'seq' in msg['body']:
+                                    message_id = str(msg['body']['seq'])
+                                    logger.info(f"✅ Найден seq (числовой ID): {message_id}")
                         
-                        # Проверяем в data
+                        # Вариант 2: data.seq
                         if not message_id and 'data' in result and isinstance(result['data'], dict):
-                            data = result['data']
-                            if 'public_token' in data:
-                                message_id = data['public_token']
-                                logger.info(f"✅ Найден public_token в data: {message_id}")
-                            elif 'slug' in data:
-                                message_id = data['slug']
-                                logger.info(f"✅ Найден slug в data: {message_id}")
-                            elif 'short_id' in data:
-                                message_id = str(data['short_id'])
-                                logger.info(f"✅ Найден short_id в data: {message_id}")
-                            elif 'mid' in data:
-                                # Если нет внешнего токена, берем mid без префикса
-                                mid = data['mid']
-                                if mid.startswith('mid.'):
-                                    message_id = mid[4:]
-                                else:
-                                    message_id = mid
-                                logger.info(f"⚠️ Используем mid без префикса: {message_id}")
+                            if 'seq' in result['data']:
+                                message_id = str(result['data']['seq'])
+                                logger.info(f"✅ Найден seq в data: {message_id}")
                         
-                        # Если ничего не нашли, берем mid
+                        # Вариант 3: прямой seq
+                        if not message_id and 'seq' in result:
+                            message_id = str(result['seq'])
+                            logger.info(f"✅ Найден seq: {message_id}")
+                        
+                        # Вариант 4: если нет seq - используем mid (но без префикса)
                         if not message_id:
-                            # Проверяем body
-                            if 'body' in result and isinstance(result['body'], dict):
-                                if 'mid' in result['body']:
-                                    mid = result['body']['mid']
-                                    if mid.startswith('mid.'):
-                                        message_id = mid[4:]
-                                    else:
-                                        message_id = mid
-                                    logger.info(f"⚠️ Используем mid из body без префикса: {message_id}")
-                            elif 'mid' in result:
-                                mid = result['mid']
-                                if mid.startswith('mid.'):
-                                    message_id = mid[4:]
-                                else:
-                                    message_id = mid
-                                logger.info(f"⚠️ Используем mid без префикса: {message_id}")
-                            elif 'message' in result and isinstance(result['message'], dict):
+                            if 'message' in result and isinstance(result['message'], dict):
                                 msg = result['message']
                                 if 'body' in msg and isinstance(msg['body'], dict):
                                     if 'mid' in msg['body']:
@@ -189,15 +147,21 @@ class Publisher:
                                             message_id = mid[4:]
                                         else:
                                             message_id = mid
-                                        logger.info(f"⚠️ Используем mid из message.body без префикса: {message_id}")
+                                        logger.info(f"⚠️ Используем mid без префикса: {message_id}")
+                            elif 'mid' in result:
+                                mid = result['mid']
+                                if mid.startswith('mid.'):
+                                    message_id = mid[4:]
+                                else:
+                                    message_id = mid
+                                logger.info(f"⚠️ Используем mid без префикса: {message_id}")
                     
                     # Проверяем Location заголовок
                     if not message_id:
                         location = response.headers.get('Location', '')
                         if location:
                             logger.info(f"📍 Location: {location}")
-                            # Ищем внешний токен в Location
-                            match = re.search(r'/([a-zA-Z0-9_-]{10,})$', location)
+                            match = re.search(r'/(\d+)$', location)
                             if match:
                                 message_id = match.group(1)
                                 logger.info(f"✅ Найден ID в Location: {message_id}")
@@ -297,30 +261,25 @@ class Publisher:
                 try:
                     result = response.json()
                     
-                    # Ищем внешний токен
-                    if 'public_token' in result:
-                        message_id = result['public_token']
-                    elif 'slug' in result:
-                        message_id = result['slug']
-                    elif 'short_id' in result:
-                        message_id = str(result['short_id'])
-                    elif 'message' in result and isinstance(result['message'], dict):
+                    # Ищем seq (числовой ID)
+                    if 'message' in result and isinstance(result['message'], dict):
                         msg = result['message']
-                        if 'public_token' in msg:
-                            message_id = msg['public_token']
-                        elif 'slug' in msg:
-                            message_id = msg['slug']
-                        elif 'body' in msg and isinstance(msg['body'], dict):
-                            if 'mid' in msg['body']:
+                        if 'body' in msg and isinstance(msg['body'], dict):
+                            if 'seq' in msg['body']:
+                                message_id = str(msg['body']['seq'])
+                            elif 'mid' in msg['body']:
                                 mid = msg['body']['mid']
                                 if mid.startswith('mid.'):
                                     message_id = mid[4:]
                                 else:
                                     message_id = mid
+                    elif 'seq' in result:
+                        message_id = str(result['seq'])
                     elif 'data' in result and isinstance(result['data'], dict):
-                        data = result['data']
-                        if 'mid' in data:
-                            mid = data['mid']
+                        if 'seq' in result['data']:
+                            message_id = str(result['data']['seq'])
+                        elif 'mid' in result['data']:
+                            mid = result['data']['mid']
                             if mid.startswith('mid.'):
                                 message_id = mid[4:]
                             else:
@@ -366,9 +325,6 @@ class Publisher:
         return metadata
 
     def publish_folder_with_tokens(self, user_id, folder_name, ad_text, metadata_text, image_tokens):
-        """
-        Публикует папку с уже загруженными токенами фото.
-        """
         try:
             if self.STOP_FLAG.get(user_id, False):
                 logger.info(f"⏹️ Пропускаем папку {folder_name} - остановка")
@@ -383,7 +339,6 @@ class Publisher:
             logger.info(f"📤 Извлечен chat_id: {chat_id}")
             logger.info(f"📸 Получено {len(image_tokens)} токенов фото")
             
-            # Отправляем сообщение
             success, post_link = self._send_and_get_id(chat_id, ad_text, image_tokens)
             
             if not success:
@@ -393,11 +348,9 @@ class Publisher:
             if not success:
                 return False, "Не удалось отправить сообщение"
             
-            # Парсим метаданные
             metadata = self._parse_metadata(metadata_text)
             metadata['chat_id'] = chat_id
             
-            # Если ссылка получена
             if post_link:
                 metadata['post_link'] = post_link
                 now = datetime.now(self.moscow_tz)
@@ -406,8 +359,6 @@ class Publisher:
                 self.db.add_publication(user_id, folder_name, chat_id, status='success')
                 logger.info(f"✅ Папка {folder_name} опубликована, ссылка: {post_link}")
                 return True, f"✅ Папка {folder_name} опубликована"
-            
-            # Если ссылка не получена
             else:
                 logger.warning(f"⚠️ Ссылка НЕ ПОЛУЧЕНА для {folder_name}")
                 now = datetime.now(self.moscow_tz)
@@ -435,10 +386,6 @@ class Publisher:
             return False, str(e)
 
     def handle_message_created(self, chat_id, message_id, user_id=None):
-        """
-        Обрабатывает вебхук message_created.
-        Обновляет ссылку в БД.
-        """
         try:
             if not chat_id or not message_id:
                 return False
