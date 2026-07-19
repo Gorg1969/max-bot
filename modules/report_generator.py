@@ -28,6 +28,7 @@ class ReportGenerator:
     def generate_report(self, user_id, wait_for_links=True):
         """
         Генерирует Excel отчет с двумя листами.
+        Теперь проверяет статус публикаций.
         
         Args:
             user_id: ID пользователя
@@ -35,23 +36,39 @@ class ReportGenerator:
         """
         try:
             user_folder = self.fm.get_user_folder(user_id)
+            
+            # СНАЧАЛА ПРОВЕРЯЕМ СТАТУС
             publications = self.db.get_publications(user_id)
             
             if not publications:
                 logger.warning(f"⚠️ Нет публикаций для пользователя {user_id}")
                 return None
             
-            # 🔥 ФИКС: Если нужно ждать ссылки
-            if wait_for_links:
+            # ПРОВЕРЯЕМ, ЕСТЬ ЛИ PENDING
+            has_pending = self.db.has_pending_publications(user_id)
+            
+            if has_pending and wait_for_links:
+                logger.info(f"⏳ Обнаружены pending публикации, ожидаем ссылки...")
                 self._wait_for_links(user_id, publications)
-                # Обновляем список публикаций после ожидания
+                # Обновляем список после ожидания
                 publications = self.db.get_publications(user_id)
+                has_pending = self.db.has_pending_publications(user_id)
+            
+            # ФИЛЬТРУЕМ ТОЛЬКО УСПЕШНЫЕ ПУБЛИКАЦИИ
+            success_publications = [p for p in publications if p.get('status') == 'success']
+            error_publications = [p for p in publications if p.get('status') != 'success' and p.get('status') != 'pending']
+            
+            if not success_publications:
+                logger.warning(f"⚠️ Нет успешных публикаций для пользователя {user_id}")
+                if has_pending:
+                    logger.warning(f"⚠️ Есть pending публикации, но они еще не завершены")
+                return None
             
             moscow_tz = pytz.timezone('Europe/Moscow')
             success_data = []
             error_data = []
             
-            publications_sorted = sorted(publications, key=lambda x: x.get('created_at', ''))
+            publications_sorted = sorted(success_publications, key=lambda x: x.get('created_at', ''))
             current_date = None
             index = 1
             
@@ -94,33 +111,32 @@ class ReportGenerator:
                     date_str = now.strftime('%d.%m.%Y')
                     time_str = now.strftime('%H.%M')
                 
-                if status == 'success':
-                    if current_date != date_str:
-                        current_date = date_str
-                        display_date = date_str
-                    else:
-                        display_date = ''
-                    
-                    success_data.append({
-                        '№': index,
-                        'Дата': display_date,
-                        'Время публикации (МСК)': time_str,
-                        'Ссылка на пост': post_link if post_link else '⚠️ Ссылка не получена',
-                        'Ссылка (источник)': metadata.get('Ссылка', ''),
-                        'Название': metadata.get('Название', ''),
-                        'Код предложения': metadata.get('Код предложения', ''),
-                        'Цена в лизинге': metadata.get('Цена в лизинге', ''),
-                    })
-                    index += 1
+                if current_date != date_str:
+                    current_date = date_str
+                    display_date = date_str
                 else:
-                    error_data.append({
-                        'Папка': folder_name,
-                        'Ошибка': error or 'Неизвестная ошибка'
-                    })
+                    display_date = ''
+                
+                success_data.append({
+                    '№': index,
+                    'Дата': display_date,
+                    'Время публикации (МСК)': time_str,
+                    'Ссылка на пост': post_link if post_link else '⚠️ Ссылка не получена',
+                    'Ссылка (источник)': metadata.get('Ссылка', ''),
+                    'Название': metadata.get('Название', ''),
+                    'Код предложения': metadata.get('Код предложения', ''),
+                    'Цена в лизинге': metadata.get('Цена в лизинге', ''),
+                })
+                index += 1
             
-            if not success_data:
-                logger.warning(f"⚠️ Нет успешных публикаций для пользователя {user_id}")
-                return None
+            # Добавляем ошибки в отчет
+            for pub in error_publications:
+                folder_name = pub.get('folder_name', '')
+                error = pub.get('error', 'Неизвестная ошибка')
+                error_data.append({
+                    'Папка': folder_name,
+                    'Ошибка': error
+                })
             
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             report_filename = f"Отчет_{timestamp}.xlsx"
