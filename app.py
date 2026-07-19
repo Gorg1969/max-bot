@@ -83,7 +83,6 @@ class APIClient:
             return False
 
     def send_message_with_attachments(self, chat_id, text, tokens):
-        """Отправляет сообщение с вложениями (фото) в чат"""
         if not self.token:
             return False
         try:
@@ -120,16 +119,11 @@ class APIClient:
             return False
 
     def upload_file(self, image_bytes, filename='image.jpg'):
-        """
-        Загружает ОДНО изображение в MAX через /uploads
-        Возвращает токен или None
-        """
         if not self.token:
             logger.error("❌ Нет токена для загрузки")
             return None
         
         try:
-            # 1. Получаем URL для загрузки
             response = requests.post(
                 f"{self.base_url}/uploads",
                 headers={"Authorization": self.token},
@@ -154,7 +148,6 @@ class APIClient:
                 logger.error(f"❌ Не получен URL: {upload_data}")
                 return None
             
-            # 2. Загружаем файл
             files = {'data': (filename, image_bytes, 'image/jpeg')}
             
             upload_response = requests.post(
@@ -175,7 +168,6 @@ class APIClient:
                 logger.error(f"❌ Невалидный JSON в ответе: {raw_text[:200]}")
                 return None
             
-            # 3. Извлекаем токен
             token = None
             if 'photos' in upload_result and isinstance(upload_result['photos'], dict):
                 for photo_data in upload_result['photos'].values():
@@ -384,8 +376,15 @@ UPLOAD_PAGE = """
             }
         });
 
-        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
-        dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('dragover'); });
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
+
         dropZone.addEventListener('drop', (e) => {
             e.preventDefault();
             dropZone.classList.remove('dragover');
@@ -597,7 +596,7 @@ UPLOAD_PAGE = """
         }
 
         async function clearAllData() {
-            if (!confirm('⚠️ Удалить ВСЕ данные пользователя?\n\nОтчеты останутся, но история публикаций будет очищена.')) {
+            if (!confirm('⚠️ Удалить ВСЕ данные пользователя?\\n\\nОтчеты останутся, но история публикаций будет очищена.')) {
                 return;
             }
             
@@ -950,20 +949,18 @@ UPLOAD_PAGE = """
             
             isProcessing = false;
             
-            // Автоматическая проверка через 30 секунд
             setTimeout(function() {
                 addLog('🔄 Автоматическая проверка статуса...');
                 checkReportStatus();
             }, 30000);
             
-            // Автоочистка через 5 минут после публикации
             setTimeout(function() {
                 addLog('🧹 Автоочистка данных...');
                 fetch('/auto_cleanup/' + userId, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' }
                 });
-            }, 300000); // 5 минут
+            }, 300000);
         }
     </script>
 </body>
@@ -984,7 +981,6 @@ def upload_page():
 
 @app.route('/upload_photo', methods=['POST'])
 def upload_photo():
-    """Загружает ОДНО фото в MAX через /uploads"""
     try:
         photo = request.files.get('photo')
         user_id = request.form.get('user_id')
@@ -1205,7 +1201,6 @@ def download_report(user_id, filename):
         if not os.path.exists(file_path):
             return "❌ Файл не найден", 404
         
-        # Отмечаем, что отчет скачан - запустится автоочистка через 30 секунд
         report_gen.mark_report_downloaded(user_id)
         
         return send_file(file_path, as_attachment=True, download_name=filename)
@@ -1227,7 +1222,6 @@ def status():
 
 @app.route('/setup_webhook')
 def setup_webhook():
-    """Настраивает подписку на вебхук"""
     token = request.args.get('token') or TOKEN
     if not token:
         return "❌ Токен не найден", 400
@@ -1251,7 +1245,7 @@ def setup_webhook():
         
         if r.status_code == 200:
             logger.info(f"✅ Вебхук настроен: {webhook_url}")
-            return f"✅ Вебхук настроен: {webhook_url}\nПодписка: {payload}"
+            return f"✅ Вебхук настроен: {webhook_url}\\nПодписка: {payload}"
         else:
             logger.error(f"❌ Ошибка настройки вебхука: {r.status_code} - {r.text}")
             return f"❌ Ошибка: {r.status_code} - {r.text}"
@@ -1274,11 +1268,8 @@ def cleanup_temp():
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
-# ========== ДИАГНОСТИЧЕСКИЕ ЭНДПОИНТЫ ==========
-
 @app.route('/report_status/<int:user_id>')
 def report_status(user_id):
-    """Проверяет статус публикаций пользователя"""
     try:
         stats = db.get_stats(user_id)
         
@@ -1305,7 +1296,6 @@ def report_status(user_id):
 
 @app.route('/force_update_links', methods=['POST'])
 def force_update_links():
-    """Принудительно обновляет ссылки для всех pending публикаций"""
     try:
         data = request.get_json()
         user_id = data.get('user_id')
@@ -1342,7 +1332,6 @@ def force_update_links():
 
 @app.route('/clear_user_data/<int:user_id>', methods=['POST'])
 def clear_user_data(user_id):
-    """Очищает все данные пользователя из БД"""
     try:
         db.clear_user_data(user_id)
         publisher.clear_diagnostic_log()
@@ -1360,13 +1349,11 @@ def clear_user_data(user_id):
 
 @app.route('/auto_cleanup/<int:user_id>', methods=['POST'])
 def auto_cleanup(user_id):
-    """Автоматическая очистка данных пользователя через 5 минут"""
     try:
         def delayed_cleanup():
-            time.sleep(300)  # 5 минут
+            time.sleep(300)
             logger.info(f"🧹 Автоочистка данных для {user_id} через 5 минут")
             db.clear_user_data(user_id)
-            # Очищаем файлы
             user_folder = fm.get_user_folder(user_id)
             if os.path.exists(user_folder):
                 for item in os.listdir(user_folder):
@@ -1392,7 +1379,6 @@ def auto_cleanup(user_id):
 
 @app.route('/webhook_test', methods=['GET'])
 def webhook_test():
-    """Тестовый эндпоинт для проверки статуса вебхука"""
     return jsonify({
         'status': 'ok',
         'pending_count': len(publisher.pending_messages),
@@ -1402,7 +1388,6 @@ def webhook_test():
 
 @app.route('/diagnostic/<int:user_id>')
 def diagnostic_log(user_id):
-    """Показывает диагностический журнал для пользователя"""
     try:
         user_folder = fm.get_user_folder(user_id)
         if not os.path.exists(user_folder):
@@ -1436,7 +1421,6 @@ def diagnostic_log(user_id):
 
 @app.route('/diagnostic/clear', methods=['POST'])
 def clear_diagnostic_log():
-    """Очищает диагностический журнал"""
     try:
         publisher.clear_diagnostic_log()
         return jsonify({'success': True, 'message': 'Диагностический журнал очищен'})
@@ -1446,7 +1430,6 @@ def clear_diagnostic_log():
 
 @app.route('/diagnostic/last')
 def diagnostic_last():
-    """Показывает последнюю диагностическую запись"""
     try:
         diagnostic_data = publisher.get_diagnostic_log()
         if diagnostic_data:
