@@ -23,8 +23,8 @@ class ReportGenerator:
     def __init__(self, file_manager, db):
         self.fm = file_manager
         self.db = db
-        self.MAX_WAIT_TIME = 30  # Максимальное время ожидания в секундах
-        self.CHECK_INTERVAL = 1  # Интервал проверки в секундах
+        self.MAX_WAIT_TIME = 60  # Увеличено до 60 секунд
+        self.CHECK_INTERVAL = 2  # Интервал проверки в секундах
         self._generating = {}  # Словарь для отслеживания активных генераций {user_id: timestamp}
         self._lock = threading.Lock()  # Блокировка для предотвращения множественных вызовов
     
@@ -36,15 +36,14 @@ class ReportGenerator:
             user_id: ID пользователя
             wait_for_links: Ждать ли появления ссылок
         """
-        # 🔥 ЗАЩИТА ОТ МНОЖЕСТВЕННЫХ ВЫЗОВОВ
+        # ЗАЩИТА ОТ МНОЖЕСТВЕННЫХ ВЫЗОВОВ
         with self._lock:
             if user_id in self._generating:
                 elapsed = time.time() - self._generating[user_id]
-                if elapsed < 60:  # Если прошло меньше минуты с последнего вызова
+                if elapsed < 120:  # Увеличено до 2 минут
                     logger.warning(f"⚠️ Генерация отчета для {user_id} уже выполняется (прошло {elapsed:.1f}с)")
                     return None
                 else:
-                    # Если прошло больше минуты, считаем что зависло и разрешаем новый вызов
                     logger.warning(f"⚠️ Предыдущая генерация для {user_id} зависла, разрешаем новый вызов")
             
             self._generating[user_id] = time.time()
@@ -71,7 +70,7 @@ class ReportGenerator:
                 publications = self.db.get_publications(user_id)
                 pending_count = self.db.count_pending_publications(user_id)
             
-            # 🔥 ФИЛЬТРУЕМ ТОЛЬКО УСПЕШНЫЕ ПУБЛИКАЦИИ
+            # ФИЛЬТРУЕМ ТОЛЬКО УСПЕШНЫЕ ПУБЛИКАЦИИ
             success_publications = []
             error_publications = []
             
@@ -109,7 +108,7 @@ class ReportGenerator:
                 # Читаем post_link из метаданных (теперь всегда есть словарь)
                 post_link = metadata.get('post_link')
                 
-                # 🔥 ЛОГИРУЕМ СТАТУС
+                # ЛОГИРУЕМ СТАТУС
                 if post_link:
                     logger.info(f"🔗 Для папки {folder_name} post_link: '{post_link}'")
                 else:
@@ -241,7 +240,7 @@ class ReportGenerator:
                 waited += self.CHECK_INTERVAL
                 
                 # Показываем прогресс
-                if waited % 5 == 0:
+                if waited % 10 == 0:
                     logger.info(f"⏳ Ожидание ссылок... {waited}с из {self.MAX_WAIT_TIME}с, осталось {len(still_pending)}")
             
             if waited >= self.MAX_WAIT_TIME:
@@ -253,14 +252,23 @@ class ReportGenerator:
                     status = self.db.check_publication_status(user_id, folder_name)
                     
                     if status == 'pending':
-                        logger.warning(f"⚠️ Публикация {folder_name} так и не получила ссылку")
-                        # Обновляем статус на 'failed' с ошибкой
-                        self.db.update_publication_status(
-                            user_id, 
-                            folder_name, 
-                            'failed',
-                            error="Ссылка не получена за отведенное время (30с)"
-                        )
+                        # Проверяем, не появилась ли ссылка в ad_metadata
+                        metadata = self.db.get_ad_metadata(user_id, folder_name)
+                        post_link = metadata.get('post_link')
+                        
+                        if post_link:
+                            # Ссылка появилась! Обновляем статус
+                            self.db.update_publication_status(user_id, folder_name, 'success')
+                            logger.info(f"✅ Ссылка появилась для {folder_name}: {post_link}")
+                        else:
+                            # Ссылки нет - помечаем как failed
+                            logger.warning(f"⚠️ Публикация {folder_name} так и не получила ссылку")
+                            self.db.update_publication_status(
+                                user_id, 
+                                folder_name, 
+                                'failed',
+                                error="Ссылка не получена за отведенное время (60с)"
+                            )
             
             logger.info(f"✅ Ожидание завершено. Получено {completed} ссылок из {len(pending_publications)}")
             
@@ -466,5 +474,5 @@ class ReportGenerator:
         with self._lock:
             if user_id in self._generating:
                 elapsed = time.time() - self._generating[user_id]
-                return elapsed < 60  # Считаем активной если меньше минуты
+                return elapsed < 120  # Считаем активной если меньше 2 минут
             return False
