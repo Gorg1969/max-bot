@@ -7,6 +7,7 @@ import requests
 import threading
 import json
 import uuid
+import base64
 from datetime import datetime
 import pytz
 
@@ -42,10 +43,23 @@ class Publisher:
         
         return None
 
+    def _seq_to_max_id(self, seq: int) -> str:
+        """
+        Преобразует числовой seq в короткий хэш MAX.
+        Формула: base64(seq.to_bytes(8, 'big')) без padding
+        """
+        try:
+            seq_bytes = int(seq).to_bytes(8, byteorder='big')
+            encoded = base64.urlsafe_b64encode(seq_bytes).decode('utf-8').rstrip('=')
+            return encoded
+        except Exception as e:
+            logger.error(f"❌ Ошибка конвертации seq в MAX ID: {e}")
+            return str(seq)
+
     def _send_and_get_id(self, chat_id, text, image_tokens):
         """
         Отправляет сообщение в чат и возвращает ссылку на пост.
-        ВЫВОДИТ ПОЛНЫЙ JSON ДЛЯ АНАЛИЗА.
+        Использует seq -> base64 конвертацию для получения короткого ID.
         """
         try:
             if not self.api.token:
@@ -85,53 +99,37 @@ class Publisher:
             logger.info(f"📨 СТАТУС ОТВЕТА: {response.status_code}")
             
             if response.status_code == 200:
-                message_id = None
-                post_link = None
-                
                 try:
                     result = response.json()
                     logger.info(f"📨 ПОЛНЫЙ JSON ОТВЕТА: {json.dumps(result, indent=2, ensure_ascii=False)}")
                     
                     # 🔥 ИЩЕМ SEQ
+                    seq = None
                     if isinstance(result, dict):
                         if 'message' in result and isinstance(result['message'], dict):
                             msg = result['message']
                             if 'body' in msg and isinstance(msg['body'], dict):
                                 if 'seq' in msg['body']:
-                                    message_id = str(msg['body']['seq'])
-                                    logger.info(f"✅ Найден seq в message.body.seq: {message_id}")
+                                    seq = msg['body']['seq']
+                                    logger.info(f"✅ Найден seq: {seq}")
                         
-                        if not message_id and 'seq' in result:
-                            message_id = str(result['seq'])
-                            logger.info(f"✅ Найден seq в корне: {message_id}")
-                        
-                        # 🔥 ТАКЖЕ ИЩЕМ short_id, public_id, token (на случай если они есть)
-                        if not message_id and 'short_id' in result:
-                            message_id = str(result['short_id'])
-                            logger.info(f"✅ Найден short_id: {message_id}")
-                        elif not message_id and 'public_id' in result:
-                            message_id = str(result['public_id'])
-                            logger.info(f"✅ Найден public_id: {message_id}")
-                        elif not message_id and 'token' in result:
-                            message_id = str(result['token'])
-                            logger.info(f"✅ Найден token: {message_id}")
-                        elif not message_id and 'slug' in result:
-                            message_id = str(result['slug'])
-                            logger.info(f"✅ Найден slug: {message_id}")
+                        if not seq and 'seq' in result:
+                            seq = result['seq']
+                            logger.info(f"✅ Найден seq в корне: {seq}")
                     
-                    # 🔥 ФОРМИРУЕМ ССЫЛКУ
-                    if message_id:
-                        post_link = f"https://max.ru/c/{chat_id_str}/{message_id}"
+                    if seq:
+                        # 🔥 КОНВЕРТИРУЕМ SEQ В КОРОТКИЙ ХЭШ MAX
+                        encoded_id = self._seq_to_max_id(seq)
+                        post_link = f"https://max.ru/c/{chat_id_str}/{encoded_id}"
                         logger.info(f"🔗 Ссылка на пост создана: {post_link}")
+                        logger.info(f"📊 seq: {seq} -> encoded: {encoded_id}")
                         return True, post_link
                     else:
-                        logger.warning(f"⚠️ ID не найден в ответе")
-                        logger.warning(f"⚠️ Полный ответ: {response.text[:500]}")
+                        logger.warning(f"⚠️ seq не найден в ответе")
                         return True, None
                         
                 except json.JSONDecodeError as e:
                     logger.error(f"❌ Ошибка парсинга JSON: {e}")
-                    logger.error(f"❌ Ответ: {response.text}")
                     return True, None
                 except Exception as e:
                     logger.error(f"❌ Ошибка обработки ответа: {e}")
@@ -140,7 +138,6 @@ class Publisher:
                     return True, None
             else:
                 logger.error(f"❌ Ошибка API: {response.status_code}")
-                logger.error(f"❌ Тело ошибки: {response.text}")
                 return False, None
                 
         except Exception as e:
@@ -150,7 +147,6 @@ class Publisher:
             return False, None
 
     def _send_to_user(self, user_id, text, image_tokens):
-        """Отправляет сообщение пользователю (резерв)"""
         try:
             if not self.api.token:
                 return False, None
@@ -185,7 +181,7 @@ class Publisher:
             )
             
             if response.status_code == 200:
-                message_id = None
+                seq = None
                 post_link = None
                 try:
                     result = response.json()
@@ -193,12 +189,13 @@ class Publisher:
                         msg = result['message']
                         if 'body' in msg and isinstance(msg['body'], dict):
                             if 'seq' in msg['body']:
-                                message_id = str(msg['body']['seq'])
+                                seq = msg['body']['seq']
                     elif 'seq' in result:
-                        message_id = str(result['seq'])
+                        seq = result['seq']
                     
-                    if message_id:
-                        post_link = f"https://max.ru/c/{user_id}/{message_id}"
+                    if seq:
+                        encoded_id = self._seq_to_max_id(seq)
+                        post_link = f"https://max.ru/c/{user_id}/{encoded_id}"
                     else:
                         post_link = None
                 except:
@@ -218,14 +215,6 @@ class Publisher:
             return False, None
 
     def _parse_metadata(self, metadata_text):
-        """
-        Парсит метаданные из текста после #изъятая.
-        Возвращает словарь с полями:
-        - Название
-        - Ссылка (источник)
-        - Код предложения
-        - Цена в лизинге
-        """
         metadata = {}
         if not metadata_text:
             return metadata
@@ -241,34 +230,24 @@ class Publisher:
             match = re.search(pattern, metadata_text, re.IGNORECASE)
             if match:
                 metadata[key] = match.group(1).strip()
-                logger.info(f"📝 Найдено поле {key}: {metadata[key][:50]}...")
         
         return metadata
 
     def publish_folder_with_tokens(self, user_id, folder_name, ad_text, metadata_text, image_tokens):
-        """
-        Публикует папку с уже загруженными токенами фото.
-        ВОЗВРАЩАЕТ ССЫЛКУ НА ПОСТ.
-        """
         try:
             if self.STOP_FLAG.get(user_id, False):
-                logger.info(f"⏹️ Пропускаем папку {folder_name} - остановка")
                 return False, "Остановка пользователем"
             
             chat_id = self.extract_chat_id_from_folder(folder_name)
             
             if not chat_id:
-                logger.error(f"❌ Не удалось извлечь chat_id из: {folder_name}")
                 return False, f"Не удалось извлечь chat_id из {folder_name}"
             
             logger.info(f"📤 Извлечен chat_id: {chat_id}")
-            logger.info(f"📸 Получено {len(image_tokens)} токенов фото")
             
-            # 🔥 ПАРСИМ МЕТАДАННЫЕ
             metadata = self._parse_metadata(metadata_text)
             metadata['chat_id'] = chat_id
             
-            # 🔥 ОТПРАВЛЯЕМ СООБЩЕНИЕ И ПОЛУЧАЕМ ССЫЛКУ
             success, post_link = self._send_and_get_id(chat_id, ad_text, image_tokens)
             
             if not success:
@@ -278,7 +257,6 @@ class Publisher:
             if not success:
                 return False, "Не удалось отправить сообщение"
             
-            # 🔥 СОХРАНЯЕМ post_link
             if post_link:
                 metadata['post_link'] = post_link
                 logger.info(f"🔗 Ссылка на пост сохранена: {post_link}")
@@ -286,22 +264,17 @@ class Publisher:
                 metadata['post_link'] = ''
                 logger.warning(f"⚠️ Ссылка на пост не получена")
             
-            # 🔥 ПРОВЕРКА: если в post_link попала ссылка-источник - очищаем
             if metadata['post_link'] and 'https://max.ru/u/' in metadata['post_link']:
                 logger.error(f"❌ ОШИБКА: В post_link попала ссылка-источник! Очищаем.")
                 metadata['post_link'] = ''
             
-            # Сохраняем в БД
             now = datetime.now(self.moscow_tz)
             timestamp = now.timestamp()
             self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, timestamp)
             self.db.add_publication(user_id, folder_name, chat_id, status='success')
             
             logger.info(f"✅ Папка {folder_name} опубликована")
-            logger.info(f"📊 Ссылка на пост: {metadata['post_link']}")
-            logger.info(f"📊 Ссылка-источник: {metadata.get('Ссылка', 'Нет')}")
             
-            # 🔥 ВОЗВРАЩАЕМ ССЫЛКУ В ОТВЕТ КЛИЕНТУ
             if post_link:
                 return True, f"✅ Папка {folder_name} опубликована, ссылка: {post_link}"
             else:
@@ -314,10 +287,6 @@ class Publisher:
             return False, str(e)
 
     def handle_message_created(self, chat_id, message_id, user_id=None):
-        """
-        Обрабатывает вебхук message_created.
-        Обновляет ссылку в БД.
-        """
         try:
             if not chat_id or not message_id:
                 return False
@@ -358,7 +327,6 @@ class Publisher:
             return False
 
     def publish_single_folder(self, user_id, folder_name, ad_text, metadata_text, images_data):
-        """Старый метод - загружает фото и публикует"""
         try:
             if self.STOP_FLAG.get(user_id, False):
                 return False, "Остановка пользователем"
@@ -399,7 +367,6 @@ class Publisher:
             return False, str(e)
 
     def stop(self, user_id):
-        """Останавливает публикацию"""
         logger.info(f"⏹️ Остановка для пользователя {user_id}")
         self.STOP_FLAG[user_id] = True
         
