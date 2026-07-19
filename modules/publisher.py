@@ -180,7 +180,6 @@ class Publisher:
                         logger.warning(f"⚠️ Полный ответ: {response.text}")
                         
                         # ПРОВЕРЯЕМ, МОЖЕТ ID В ДРУГОМ МЕСТЕ
-                        # Иногда API возвращает ID в поле 'result'
                         if 'result' in result:
                             logger.info(f"📨 Поле result: {result['result']}")
                         
