@@ -6,6 +6,7 @@ from datetime import datetime
 import pytz
 import logging
 import time
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -24,45 +25,71 @@ class ReportGenerator:
         self.db = db
         self.MAX_WAIT_TIME = 30  # Максимальное время ожидания в секундах
         self.CHECK_INTERVAL = 1  # Интервал проверки в секундах
+        self._generating = {}  # Словарь для отслеживания активных генераций {user_id: timestamp}
+        self._lock = threading.Lock()  # Блокировка для предотвращения множественных вызовов
     
     def generate_report(self, user_id, wait_for_links=True):
         """
         Генерирует Excel отчет с двумя листами.
-        Теперь проверяет статус публикаций.
         
         Args:
             user_id: ID пользователя
             wait_for_links: Ждать ли появления ссылок
         """
+        # 🔥 ЗАЩИТА ОТ МНОЖЕСТВЕННЫХ ВЫЗОВОВ
+        with self._lock:
+            if user_id in self._generating:
+                elapsed = time.time() - self._generating[user_id]
+                if elapsed < 60:  # Если прошло меньше минуты с последнего вызова
+                    logger.warning(f"⚠️ Генерация отчета для {user_id} уже выполняется (прошло {elapsed:.1f}с)")
+                    return None
+                else:
+                    # Если прошло больше минуты, считаем что зависло и разрешаем новый вызов
+                    logger.warning(f"⚠️ Предыдущая генерация для {user_id} зависла, разрешаем новый вызов")
+            
+            self._generating[user_id] = time.time()
+        
         try:
             user_folder = self.fm.get_user_folder(user_id)
             
-            # СНАЧАЛА ПРОВЕРЯЕМ СТАТУС
+            # Получаем все публикации
             publications = self.db.get_publications(user_id)
             
             if not publications:
                 logger.warning(f"⚠️ Нет публикаций для пользователя {user_id}")
+                with self._lock:
+                    del self._generating[user_id]
                 return None
             
-            # ПРОВЕРЯЕМ, ЕСТЬ ЛИ PENDING
-            has_pending = self.db.has_pending_publications(user_id)
+            # Проверяем наличие pending публикаций
+            pending_count = self.db.count_pending_publications(user_id)
             
-            if has_pending and wait_for_links:
-                logger.info(f"⏳ Обнаружены pending публикации, ожидаем ссылки...")
+            if pending_count > 0 and wait_for_links:
+                logger.info(f"⏳ Обнаружено {pending_count} pending публикаций, ожидаем ссылки...")
                 self._wait_for_links(user_id, publications)
                 # Обновляем список после ожидания
                 publications = self.db.get_publications(user_id)
-                has_pending = self.db.has_pending_publications(user_id)
+                pending_count = self.db.count_pending_publications(user_id)
             
-            # ФИЛЬТРУЕМ ТОЛЬКО УСПЕШНЫЕ ПУБЛИКАЦИИ
-            success_publications = [p for p in publications if p.get('status') == 'success']
-            error_publications = [p for p in publications if p.get('status') != 'success' and p.get('status') != 'pending']
+            # 🔥 ФИЛЬТРУЕМ ТОЛЬКО УСПЕШНЫЕ ПУБЛИКАЦИИ
+            success_publications = []
+            error_publications = []
+            
+            for pub in publications:
+                if pub.get('status') == 'success':
+                    success_publications.append(pub)
+                elif pub.get('status') != 'pending':
+                    error_publications.append(pub)
             
             if not success_publications:
                 logger.warning(f"⚠️ Нет успешных публикаций для пользователя {user_id}")
-                if has_pending:
-                    logger.warning(f"⚠️ Есть pending публикации, но они еще не завершены")
+                if pending_count > 0:
+                    logger.warning(f"⚠️ {pending_count} публикаций все еще в статусе 'pending'")
+                with self._lock:
+                    del self._generating[user_id]
                 return None
+            
+            logger.info(f"📊 Найдено {len(success_publications)} успешных публикаций, {len(error_publications)} с ошибками")
             
             moscow_tz = pytz.timezone('Europe/Moscow')
             success_data = []
@@ -75,20 +102,23 @@ class ReportGenerator:
             for pub in publications_sorted:
                 folder_name = pub.get('folder_name', '')
                 chat_id = pub.get('group_id', '')
-                status = pub.get('status', '')
-                error = pub.get('error', '')
                 
                 # Получаем метаданные из БД
                 metadata = self.db.get_ad_metadata(user_id, folder_name)
                 
-                # Читаем post_link из метаданных
-                post_link = metadata.get('post_link', '')
+                # Читаем post_link из метаданных (теперь всегда есть словарь)
+                post_link = metadata.get('post_link')
                 
-                # Логируем для отладки
+                # 🔥 ЛОГИРУЕМ СТАТУС
                 if post_link:
-                    logger.info(f"🔗 Для папки {folder_name} post_link из БД: '{post_link}'")
+                    logger.info(f"🔗 Для папки {folder_name} post_link: '{post_link}'")
                 else:
-                    logger.warning(f"⚠️ Для папки {folder_name} post_link отсутствует в БД")
+                    # Если публикация success, но ссылки нет - это аномалия
+                    logger.warning(f"⚠️ Для папки {folder_name} post_link отсутствует, хотя статус 'success'")
+                    # Пробуем обновить статус на 'pending' чтобы система дождалась ссылки
+                    self.db.update_publication_status(user_id, folder_name, 'pending', 
+                                                     error="Ссылка не найдена, повторное ожидание")
+                    continue  # Пропускаем эту публикацию в отчете
                 
                 # Время публикации
                 created_at = pub.get('created_at')
@@ -138,6 +168,11 @@ class ReportGenerator:
                     'Ошибка': error
                 })
             
+            # Проверяем, остались ли публикации в pending
+            pending_after = self.db.count_pending_publications(user_id)
+            if pending_after > 0:
+                logger.warning(f"⚠️ {pending_after} публикаций остались в статусе 'pending' после генерации отчета")
+            
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             report_filename = f"Отчет_{timestamp}.xlsx"
             report_path = os.path.join(user_folder, report_filename)
@@ -151,21 +186,24 @@ class ReportGenerator:
             
             logger.info(f"📊 Отчет создан: {report_path}")
             self.cleanup_user_data(user_id, keep_report=True)
+            
+            with self._lock:
+                del self._generating[user_id]
+            
             return report_path
             
         except Exception as e:
             logger.error(f"❌ Ошибка создания отчета: {e}")
             import traceback
             traceback.print_exc()
+            with self._lock:
+                if user_id in self._generating:
+                    del self._generating[user_id]
             return None
     
     def _wait_for_links(self, user_id, publications):
         """
         Ожидает появления ссылок для публикаций со статусом 'pending'
-        
-        Args:
-            user_id: ID пользователя
-            publications: Список публикаций
         """
         try:
             # Находим публикации со статусом 'pending'
@@ -182,26 +220,19 @@ class ReportGenerator:
             
             while waited < self.MAX_WAIT_TIME:
                 # Проверяем каждую pending публикацию
-                all_done = True
+                still_pending = []
                 
                 for pub in pending_publications:
                     folder_name = pub.get('folder_name')
                     # Проверяем статус в БД
-                    current_pubs = self.db.get_publications(user_id)
-                    current_status = None
+                    status = self.db.check_publication_status(user_id, folder_name)
                     
-                    for p in current_pubs:
-                        if p.get('folder_name') == folder_name:
-                            current_status = p.get('status')
-                            break
-                    
-                    if current_status == 'pending':
-                        all_done = False
-                        break
-                    elif current_status == 'success':
+                    if status == 'pending':
+                        still_pending.append(folder_name)
+                    elif status == 'success':
                         completed += 1
                 
-                if all_done:
+                if not still_pending:
                     logger.info(f"✅ Все {len(pending_publications)} публикаций получили ссылки")
                     break
                 
@@ -211,7 +242,7 @@ class ReportGenerator:
                 
                 # Показываем прогресс
                 if waited % 5 == 0:
-                    logger.info(f"⏳ Ожидание ссылок... {waited}с из {self.MAX_WAIT_TIME}с")
+                    logger.info(f"⏳ Ожидание ссылок... {waited}с из {self.MAX_WAIT_TIME}с, осталось {len(still_pending)}")
             
             if waited >= self.MAX_WAIT_TIME:
                 logger.warning(f"⚠️ Истекло время ожидания ({self.MAX_WAIT_TIME}с) для некоторых публикаций")
@@ -219,25 +250,19 @@ class ReportGenerator:
                 # Проверяем, какие публикации так и остались без ссылок
                 for pub in pending_publications:
                     folder_name = pub.get('folder_name')
-                    current_pubs = self.db.get_publications(user_id)
-                    current_status = None
+                    status = self.db.check_publication_status(user_id, folder_name)
                     
-                    for p in current_pubs:
-                        if p.get('folder_name') == folder_name:
-                            current_status = p.get('status')
-                            break
-                    
-                    if current_status == 'pending':
+                    if status == 'pending':
                         logger.warning(f"⚠️ Публикация {folder_name} так и не получила ссылку")
                         # Обновляем статус на 'failed' с ошибкой
                         self.db.update_publication_status(
                             user_id, 
                             folder_name, 
                             'failed',
-                            error="Ссылка не получена за отведенное время"
+                            error="Ссылка не получена за отведенное время (30с)"
                         )
             
-            logger.info(f"✅ Ожидание завершено. Получено {completed} ссылок")
+            logger.info(f"✅ Ожидание завершено. Получено {completed} ссылок из {len(pending_publications)}")
             
         except Exception as e:
             logger.error(f"❌ Ошибка в _wait_for_links: {e}")
@@ -435,3 +460,11 @@ class ReportGenerator:
                 
         except Exception as e:
             logger.error(f"❌ Ошибка очистки: {e}")
+    
+    def is_generating(self, user_id):
+        """Проверяет, выполняется ли генерация отчета для пользователя"""
+        with self._lock:
+            if user_id in self._generating:
+                elapsed = time.time() - self._generating[user_id]
+                return elapsed < 60  # Считаем активной если меньше минуты
+            return False
