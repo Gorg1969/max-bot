@@ -22,7 +22,7 @@ class Publisher:
         self.FOLDER_TIMEOUT = 120
         self.STOP_FLAG = {}
         self.moscow_tz = pytz.timezone('Europe/Moscow')
-        # 🔥 Словарь для хранения временных данных ДО получения вебхука
+        # Словарь для хранения временных данных до получения вебхука
         self.pending_messages = {}  # key: chat_id -> {user_id, folder_name, metadata, timestamp}
 
     def extract_chat_id_from_folder(self, folder_name):
@@ -56,8 +56,8 @@ class Publisher:
 
     def _send_and_get_id(self, chat_id, text, image_tokens):
         """
-        Отправляет сообщение в чат.
-        ВОЗВРАЩАЕТ ID ТОЛЬКО ЕСЛИ ОН ЕСТЬ В ОТВЕТЕ.
+        Отправляет сообщение в чат и получает ID.
+        ВАЖНО: при отсутствии ID возвращает None, НЕ заглушку!
         """
         try:
             if not self.api.token:
@@ -102,7 +102,7 @@ class Publisher:
                     result = response.json()
                     logger.info(f"📨 Ответ API: {json.dumps(result, indent=2)}")
                     
-                    # Пробуем найти ID в ответе
+                    # Ищем ID в ответе
                     if isinstance(result, dict):
                         if 'data' in result and isinstance(result['data'], dict):
                             if 'id' in result['data']:
@@ -119,19 +119,20 @@ class Publisher:
                         if not message_id and 'mid' in result:
                             message_id = result['mid']
                     
-                    # Если ID найден - сразу формируем ссылку
+                    # ЕСЛИ ID НЕ НАЙДЕН - ВОЗВРАЩАЕМ None, А НЕ ЗАГЛУШКУ!
                     if message_id:
                         post_link = f"https://max.ru/c/{chat_id_str}/{message_id}"
-                        logger.info(f"🔗 Получен ID из API: {message_id}, ссылка: {post_link}")
+                        logger.info(f"🔗 Получен ID: {message_id}, ссылка: {post_link}")
                         return True, post_link
                     else:
-                        # ID НЕ найден - сообщение отправлено, но ID будет позже
-                        logger.info(f"📨 Сообщение отправлено, но ID будет получен через вебхук")
+                        # ❌ НЕ СОЗДАЕМ ЗАГЛУШКУ!
+                        logger.warning(f"⚠️ ID не найден в ответе для чата {chat_id_str}")
+                        logger.warning(f"⚠️ Ответ: {response.text[:200]}")
                         return True, None  # Успех, но без ID
                         
                 except Exception as e:
-                    logger.error(f"❌ Ошибка парсинга ответа: {e}")
-                    return True, None  # Сообщение отправлено, но ID не получен
+                    logger.error(f"❌ Ошибка парсинга: {e}")
+                    return True, None
             else:
                 logger.error(f"❌ Ошибка: {response.status_code} - {response.text}")
                 return False, None
@@ -227,7 +228,7 @@ class Publisher:
     def publish_folder_with_tokens(self, user_id, folder_name, ad_text, metadata_text, image_tokens):
         """
         Публикует папку с уже загруженными токенами фото.
-        🔥 КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Сохраняет в pending ДО получения ID.
+        Сохраняет в pending ДО получения ID.
         """
         try:
             if self.STOP_FLAG.get(user_id, False):
@@ -258,7 +259,7 @@ class Publisher:
             metadata = self._parse_metadata(metadata_text)
             metadata['chat_id'] = chat_id
             
-            # 🔥 ЕСЛИ ССЫЛКА ПОЛУЧЕНА СРАЗУ
+            # ЕСЛИ ССЫЛКА ПОЛУЧЕНА СРАЗУ
             if post_link:
                 metadata['post_link'] = post_link
                 logger.info(f"🔗 Ссылка получена сразу: {post_link}")
@@ -272,7 +273,7 @@ class Publisher:
                 logger.info(f"✅ Папка {folder_name} опубликована, ссылка сохранена")
                 return True, f"✅ Папка {folder_name} опубликована"
             
-            # 🔥 ЕСЛИ ССЫЛКА НЕ ПОЛУЧЕНА - ЖДЕМ ВЕБХУК
+            # ЕСЛИ ССЫЛКА НЕ ПОЛУЧЕНА - ЖДЕМ ВЕБХУК
             else:
                 logger.info(f"⏳ Ссылка не получена сразу, ожидаем вебхук для {folder_name}")
                 
@@ -282,7 +283,7 @@ class Publisher:
                 self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, timestamp)
                 self.db.add_publication(user_id, folder_name, chat_id, status='pending')
                 
-                # 🔥 СОХРАНЯЕМ В PENDING ДЛЯ ВЕБХУКА
+                # СОХРАНЯЕМ В PENDING ДЛЯ ВЕБХУКА
                 pending_key = f"{chat_id}_{folder_name}"
                 self.pending_messages[pending_key] = {
                     'user_id': user_id,
@@ -305,7 +306,7 @@ class Publisher:
     def handle_message_created(self, chat_id, message_id, user_id=None):
         """
         Обрабатывает событие message_created из вебхука.
-        🔥 ОБНОВЛЯЕТ ССЫЛКУ В БД.
+        ОБНОВЛЯЕТ ССЫЛКУ В БД.
         """
         try:
             if not chat_id or not message_id:
@@ -316,7 +317,7 @@ class Publisher:
             logger.info(f"📨 Обработка вебхука: chat_id={chat_id_str}, message_id={message_id}")
             logger.info(f"📊 Всего pending записей: {len(self.pending_messages)}")
             
-            # 🔥 ИЩЕМ В PENDING ПО chat_id
+            # ИЩЕМ В PENDING ПО chat_id
             found = False
             matching_keys = []
             
@@ -331,7 +332,7 @@ class Publisher:
                 logger.info(f"📊 Содержимое pending: {list(self.pending_messages.keys())}")
                 return False
             
-            # 🔥 ОБНОВЛЯЕМ ВСЕ НАЙДЕННЫЕ ЗАПИСИ
+            # ОБНОВЛЯЕМ ВСЕ НАЙДЕННЫЕ ЗАПИСИ
             for key in matching_keys:
                 data = self.pending_messages[key]
                 folder_name = data['folder_name']
@@ -340,7 +341,7 @@ class Publisher:
                 # Формируем полную ссылку
                 post_link = f"https://max.ru/c/{chat_id_str}/{message_id}"
                 
-                # 🔥 ОБНОВЛЯЕМ ССЫЛКУ В БД
+                # ОБНОВЛЯЕМ ССЫЛКУ В БД
                 self.db.update_post_link(user_id_from_pending, folder_name, post_link)
                 self.db.update_publication_status(user_id_from_pending, folder_name, 'success')
                 
