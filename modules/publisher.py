@@ -45,7 +45,7 @@ class Publisher:
     def _send_and_get_id(self, chat_id, text, image_tokens):
         """
         Отправляет сообщение в чат и получает ID из ответа API.
-        Использует seq (числовой ID) для ссылки.
+        С ПОЛНОЙ ДИАГНОСТИКОЙ ВСЕХ ПОЛЕЙ.
         """
         diagnostic = {
             'timestamp': datetime.now().isoformat(),
@@ -59,7 +59,8 @@ class Publisher:
             'response_status': None,
             'response_headers': None,
             'response_body': None,
-            'response_json': None
+            'response_json': None,
+            'all_fields': []  # Список всех найденных полей
         }
         
         try:
@@ -101,7 +102,7 @@ class Publisher:
             
             diagnostic['response_status'] = response.status_code
             diagnostic['response_headers'] = dict(response.headers)
-            diagnostic['response_body'] = response.text[:2000]
+            diagnostic['response_body'] = response.text[:5000]
             
             logger.info(f"📨 СТАТУС ОТВЕТА: {response.status_code}")
             
@@ -112,59 +113,83 @@ class Publisher:
                 try:
                     result = response.json()
                     diagnostic['response_json'] = result
-                    logger.info(f"📨 JSON ОТВЕТА: {json.dumps(result, indent=2, ensure_ascii=False)[:500]}")
+                    
+                    # 🔥 ВЫВОДИМ ПОЛНЫЙ JSON ДЛЯ АНАЛИЗА
+                    full_json = json.dumps(result, indent=2, ensure_ascii=False)
+                    logger.info(f"📨 ПОЛНЫЙ JSON ОТВЕТА:\n{full_json}")
+                    
+                    # 🔥 ИЩЕМ ВСЕ ВОЗМОЖНЫЕ ПОЛЯ С ID
+                    all_fields = []
+                    
+                    def extract_fields(obj, path=""):
+                        if isinstance(obj, dict):
+                            for key, value in obj.items():
+                                current_path = f"{path}.{key}" if path else key
+                                all_fields.append(current_path)
+                                if isinstance(value, (dict, list)):
+                                    extract_fields(value, current_path)
+                        elif isinstance(obj, list):
+                            for i, item in enumerate(obj):
+                                extract_fields(item, f"{path}[{i}]")
+                    
+                    extract_fields(result)
+                    diagnostic['all_fields'] = all_fields
+                    
+                    # 🔥 ВЫВОДИМ ВСЕ НАЙДЕННЫЕ ПОЛЯ
+                    logger.info("=" * 80)
+                    logger.info("🔍 ВСЕ ПОЛЯ В ОТВЕТЕ:")
+                    for field in sorted(all_fields):
+                        logger.info(f"  • {field}")
+                    logger.info("=" * 80)
                     
                     # 🔥 ИЩЕМ ID ВО ВСЕХ ВОЗМОЖНЫХ МЕСТАХ
-                    if isinstance(result, dict):
-                        # Вариант 1: message.body.seq (ЧИСЛОВОЙ ID для браузера)
+                    # Поля, которые могут содержать ID поста
+                    id_fields = ['id', 'message_id', 'post_id', 'public_id', 
+                                'public_token', 'slug', 'alias', 'token', 
+                                'short_id', 'uid', 'uuid', 'url', 'link']
+                    
+                    found_id = None
+                    found_field = None
+                    
+                    def search_id(obj, path=""):
+                        nonlocal found_id, found_field
+                        if isinstance(obj, dict):
+                            for key, value in obj.items():
+                                current_path = f"{path}.{key}" if path else key
+                                # Проверяем поля, которые могут содержать ID
+                                if key.lower() in [f.lower() for f in id_fields]:
+                                    if value and isinstance(value, str) and len(str(value)) > 5:
+                                        # Проверяем что это не mid (он начинается с mid.)
+                                        if not str(value).startswith('mid.'):
+                                            found_id = value
+                                            found_field = current_path
+                                            logger.info(f"✅ Найден возможный ID в {current_path}: {value}")
+                                            return
+                                # Рекурсивный поиск
+                                if isinstance(value, dict):
+                                    search_id(value, current_path)
+                                elif isinstance(value, list):
+                                    for i, item in enumerate(value):
+                                        if isinstance(item, dict):
+                                            search_id(item, f"{current_path}[{i}]")
+                    
+                    search_id(result)
+                    
+                    # Если нашли ID - используем его
+                    if found_id:
+                        message_id = str(found_id)
+                        logger.info(f"✅ ИСПОЛЬЗУЕМ ID из {found_field}: {message_id}")
+                    else:
+                        # Если не нашли - используем seq
                         if 'message' in result and isinstance(result['message'], dict):
                             msg = result['message']
                             if 'body' in msg and isinstance(msg['body'], dict):
-                                # Сначала ищем seq - это числовой ID для ссылки
                                 if 'seq' in msg['body']:
                                     message_id = str(msg['body']['seq'])
-                                    logger.info(f"✅ Найден seq (числовой ID): {message_id}")
-                        
-                        # Вариант 2: data.seq
-                        if not message_id and 'data' in result and isinstance(result['data'], dict):
-                            if 'seq' in result['data']:
-                                message_id = str(result['data']['seq'])
-                                logger.info(f"✅ Найден seq в data: {message_id}")
-                        
-                        # Вариант 3: прямой seq
-                        if not message_id and 'seq' in result:
+                                    logger.info(f"⚠️ Используем seq как ID: {message_id}")
+                        elif 'seq' in result:
                             message_id = str(result['seq'])
-                            logger.info(f"✅ Найден seq: {message_id}")
-                        
-                        # Вариант 4: если нет seq - используем mid (но без префикса)
-                        if not message_id:
-                            if 'message' in result and isinstance(result['message'], dict):
-                                msg = result['message']
-                                if 'body' in msg and isinstance(msg['body'], dict):
-                                    if 'mid' in msg['body']:
-                                        mid = msg['body']['mid']
-                                        if mid.startswith('mid.'):
-                                            message_id = mid[4:]
-                                        else:
-                                            message_id = mid
-                                        logger.info(f"⚠️ Используем mid без префикса: {message_id}")
-                            elif 'mid' in result:
-                                mid = result['mid']
-                                if mid.startswith('mid.'):
-                                    message_id = mid[4:]
-                                else:
-                                    message_id = mid
-                                logger.info(f"⚠️ Используем mid без префикса: {message_id}")
-                    
-                    # Проверяем Location заголовок
-                    if not message_id:
-                        location = response.headers.get('Location', '')
-                        if location:
-                            logger.info(f"📍 Location: {location}")
-                            match = re.search(r'/(\d+)$', location)
-                            if match:
-                                message_id = match.group(1)
-                                logger.info(f"✅ Найден ID в Location: {message_id}")
+                            logger.info(f"⚠️ Используем seq как ID: {message_id}")
                     
                     # Если ID найден - создаем ссылку
                     if message_id:
@@ -178,8 +203,8 @@ class Publisher:
                         
                         return True, post_link
                     else:
-                        logger.warning(f"⚠️ ID НЕ НАЙДЕН в ответе!")
-                        logger.warning(f"⚠️ Полный ответ: {response.text[:500]}")
+                        logger.error(f"❌ ID НЕ НАЙДЕН в ответе!")
+                        logger.error(f"❌ Полный ответ: {response.text[:500]}")
                         
                         diagnostic['status'] = 'failed'
                         diagnostic['error'] = 'ID не найден в ответе API'
@@ -221,7 +246,6 @@ class Publisher:
             return False, None
 
     def _send_to_user(self, user_id, text, image_tokens):
-        """Отправляет сообщение пользователю (резерв)"""
         try:
             if not self.api.token:
                 return False, None
@@ -260,30 +284,14 @@ class Publisher:
                 post_link = None
                 try:
                     result = response.json()
-                    
-                    # Ищем seq (числовой ID)
+                    # Ищем в ответе
                     if 'message' in result and isinstance(result['message'], dict):
                         msg = result['message']
                         if 'body' in msg and isinstance(msg['body'], dict):
                             if 'seq' in msg['body']:
                                 message_id = str(msg['body']['seq'])
-                            elif 'mid' in msg['body']:
-                                mid = msg['body']['mid']
-                                if mid.startswith('mid.'):
-                                    message_id = mid[4:]
-                                else:
-                                    message_id = mid
                     elif 'seq' in result:
                         message_id = str(result['seq'])
-                    elif 'data' in result and isinstance(result['data'], dict):
-                        if 'seq' in result['data']:
-                            message_id = str(result['data']['seq'])
-                        elif 'mid' in result['data']:
-                            mid = result['data']['mid']
-                            if mid.startswith('mid.'):
-                                message_id = mid[4:]
-                            else:
-                                message_id = mid
                     
                     if message_id:
                         post_link = f"https://max.ru/c/{user_id}/{message_id}"
