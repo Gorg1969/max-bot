@@ -44,29 +44,11 @@ class Publisher:
 
     def _send_and_get_id(self, chat_id, text, image_tokens):
         """
-        Отправляет сообщение в чат и получает ID из ответа API.
+        Отправляет сообщение в чат и возвращает ссылку на пост.
         ВЫВОДИТ ПОЛНЫЙ JSON ДЛЯ АНАЛИЗА.
         """
-        diagnostic = {
-            'timestamp': datetime.now().isoformat(),
-            'chat_id': chat_id,
-            'text_length': len(text),
-            'image_count': len(image_tokens),
-            'status': None,
-            'message_id': None,
-            'post_link': None,
-            'error': None,
-            'response_status': None,
-            'response_headers': None,
-            'response_body': None,
-            'response_json': None,
-            'all_fields': []
-        }
-        
         try:
             if not self.api.token:
-                diagnostic['error'] = 'Нет токена API'
-                self.diagnostic_log.append(diagnostic)
                 return False, None
             
             attachments = []
@@ -100,17 +82,7 @@ class Publisher:
                 verify=False
             )
             
-            diagnostic['response_status'] = response.status_code
-            diagnostic['response_headers'] = dict(response.headers)
-            diagnostic['response_body'] = response.text
-            
             logger.info(f"📨 СТАТУС ОТВЕТА: {response.status_code}")
-            
-            # 🔥 ВЫВОДИМ ПОЛНЫЙ ТЕЛО ОТВЕТА (ВЕСЬ!)
-            logger.info("=" * 80)
-            logger.info("📨 ПОЛНЫЙ ТЕЛО ОТВЕТА:")
-            logger.info(response.text)
-            logger.info("=" * 80)
             
             if response.status_code == 200:
                 message_id = None
@@ -118,22 +90,10 @@ class Publisher:
                 
                 try:
                     result = response.json()
-                    diagnostic['response_json'] = result
+                    logger.info(f"📨 ПОЛНЫЙ JSON ОТВЕТА: {json.dumps(result, indent=2, ensure_ascii=False)}")
                     
-                    # 🔥 ВЫВОДИМ ПОЛНЫЙ РАСПАРСЕННЫЙ JSON
-                    logger.info("=" * 80)
-                    logger.info("📨 ПОЛНЫЙ РАСПАРСЕННЫЙ JSON:")
-                    logger.info(json.dumps(result, indent=2, ensure_ascii=False))
-                    logger.info("=" * 80)
-                    
-                    # 🔥 ИЩЕМ ID ВО ВСЕХ ВОЗМОЖНЫХ МЕСТАХ
+                    # 🔥 ИЩЕМ SEQ
                     if isinstance(result, dict):
-                        # Проверяем все ключи верхнего уровня
-                        logger.info("🔍 КЛЮЧИ ВЕРХНЕГО УРОВНЯ:")
-                        for key in result.keys():
-                            logger.info(f"  • {key}: {type(result[key]).__name__}")
-                        
-                        # Ищем seq
                         if 'message' in result and isinstance(result['message'], dict):
                             msg = result['message']
                             if 'body' in msg and isinstance(msg['body'], dict):
@@ -145,70 +105,52 @@ class Publisher:
                             message_id = str(result['seq'])
                             logger.info(f"✅ Найден seq в корне: {message_id}")
                         
-                        # Если есть mid - тоже выводим
-                        if 'message' in result and isinstance(result['message'], dict):
-                            msg = result['message']
-                            if 'body' in msg and isinstance(msg['body'], dict):
-                                if 'mid' in msg['body']:
-                                    logger.info(f"📌 Найден mid: {msg['body']['mid']}")
+                        # 🔥 ТАКЖЕ ИЩЕМ short_id, public_id, token (на случай если они есть)
+                        if not message_id and 'short_id' in result:
+                            message_id = str(result['short_id'])
+                            logger.info(f"✅ Найден short_id: {message_id}")
+                        elif not message_id and 'public_id' in result:
+                            message_id = str(result['public_id'])
+                            logger.info(f"✅ Найден public_id: {message_id}")
+                        elif not message_id and 'token' in result:
+                            message_id = str(result['token'])
+                            logger.info(f"✅ Найден token: {message_id}")
+                        elif not message_id and 'slug' in result:
+                            message_id = str(result['slug'])
+                            logger.info(f"✅ Найден slug: {message_id}")
                     
                     # 🔥 ФОРМИРУЕМ ССЫЛКУ
                     if message_id:
                         post_link = f"https://max.ru/c/{chat_id_str}/{message_id}"
                         logger.info(f"🔗 Ссылка на пост создана: {post_link}")
-                        
-                        diagnostic['status'] = 'success'
-                        diagnostic['message_id'] = message_id
-                        diagnostic['post_link'] = post_link
-                        self.diagnostic_log.append(diagnostic)
-                        
                         return True, post_link
                     else:
-                        logger.error(f"❌ ID НЕ НАЙДЕН!")
-                        logger.error(f"❌ Полный ответ: {response.text}")
-                        
-                        diagnostic['status'] = 'failed'
-                        diagnostic['error'] = 'ID не найден в ответе API'
-                        self.diagnostic_log.append(diagnostic)
-                        
-                        # Фолбэк - ссылка на чат
-                        post_link = f"https://max.ru/c/{chat_id_str}"
-                        logger.info(f"🔗 Используем ссылку на чат: {post_link}")
-                        return True, post_link
+                        logger.warning(f"⚠️ ID не найден в ответе")
+                        logger.warning(f"⚠️ Полный ответ: {response.text[:500]}")
+                        return True, None
                         
                 except json.JSONDecodeError as e:
                     logger.error(f"❌ Ошибка парсинга JSON: {e}")
                     logger.error(f"❌ Ответ: {response.text}")
-                    diagnostic['status'] = 'failed'
-                    diagnostic['error'] = f'JSONDecodeError: {e}'
-                    self.diagnostic_log.append(diagnostic)
                     return True, None
                 except Exception as e:
                     logger.error(f"❌ Ошибка обработки ответа: {e}")
                     import traceback
                     traceback.print_exc()
-                    diagnostic['status'] = 'failed'
-                    diagnostic['error'] = str(e)
-                    self.diagnostic_log.append(diagnostic)
                     return True, None
             else:
                 logger.error(f"❌ Ошибка API: {response.status_code}")
                 logger.error(f"❌ Тело ошибки: {response.text}")
-                diagnostic['status'] = 'failed'
-                diagnostic['error'] = f'HTTP {response.status_code}'
-                self.diagnostic_log.append(diagnostic)
                 return False, None
                 
         except Exception as e:
             logger.error(f"❌ Критическая ошибка: {e}")
             import traceback
             traceback.print_exc()
-            diagnostic['status'] = 'failed'
-            diagnostic['error'] = str(e)
-            self.diagnostic_log.append(diagnostic)
             return False, None
 
     def _send_to_user(self, user_id, text, image_tokens):
+        """Отправляет сообщение пользователю (резерв)"""
         try:
             if not self.api.token:
                 return False, None
@@ -276,6 +218,14 @@ class Publisher:
             return False, None
 
     def _parse_metadata(self, metadata_text):
+        """
+        Парсит метаданные из текста после #изъятая.
+        Возвращает словарь с полями:
+        - Название
+        - Ссылка (источник)
+        - Код предложения
+        - Цена в лизинге
+        """
         metadata = {}
         if not metadata_text:
             return metadata
@@ -296,6 +246,10 @@ class Publisher:
         return metadata
 
     def publish_folder_with_tokens(self, user_id, folder_name, ad_text, metadata_text, image_tokens):
+        """
+        Публикует папку с уже загруженными токенами фото.
+        ВОЗВРАЩАЕТ ССЫЛКУ НА ПОСТ.
+        """
         try:
             if self.STOP_FLAG.get(user_id, False):
                 logger.info(f"⏹️ Пропускаем папку {folder_name} - остановка")
@@ -310,9 +264,11 @@ class Publisher:
             logger.info(f"📤 Извлечен chat_id: {chat_id}")
             logger.info(f"📸 Получено {len(image_tokens)} токенов фото")
             
+            # 🔥 ПАРСИМ МЕТАДАННЫЕ
             metadata = self._parse_metadata(metadata_text)
             metadata['chat_id'] = chat_id
             
+            # 🔥 ОТПРАВЛЯЕМ СООБЩЕНИЕ И ПОЛУЧАЕМ ССЫЛКУ
             success, post_link = self._send_and_get_id(chat_id, ad_text, image_tokens)
             
             if not success:
@@ -322,7 +278,7 @@ class Publisher:
             if not success:
                 return False, "Не удалось отправить сообщение"
             
-            # 🔥 ЯВНО УСТАНАВЛИВАЕМ post_link
+            # 🔥 СОХРАНЯЕМ post_link
             if post_link:
                 metadata['post_link'] = post_link
                 logger.info(f"🔗 Ссылка на пост сохранена: {post_link}")
@@ -335,6 +291,7 @@ class Publisher:
                 logger.error(f"❌ ОШИБКА: В post_link попала ссылка-источник! Очищаем.")
                 metadata['post_link'] = ''
             
+            # Сохраняем в БД
             now = datetime.now(self.moscow_tz)
             timestamp = now.timestamp()
             self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, timestamp)
@@ -343,7 +300,12 @@ class Publisher:
             logger.info(f"✅ Папка {folder_name} опубликована")
             logger.info(f"📊 Ссылка на пост: {metadata['post_link']}")
             logger.info(f"📊 Ссылка-источник: {metadata.get('Ссылка', 'Нет')}")
-            return True, f"✅ Папка {folder_name} опубликована"
+            
+            # 🔥 ВОЗВРАЩАЕМ ССЫЛКУ В ОТВЕТ КЛИЕНТУ
+            if post_link:
+                return True, f"✅ Папка {folder_name} опубликована, ссылка: {post_link}"
+            else:
+                return True, f"✅ Папка {folder_name} опубликована"
             
         except Exception as e:
             logger.error(f"❌ Ошибка публикации {folder_name}: {e}")
@@ -352,6 +314,10 @@ class Publisher:
             return False, str(e)
 
     def handle_message_created(self, chat_id, message_id, user_id=None):
+        """
+        Обрабатывает вебхук message_created.
+        Обновляет ссылку в БД.
+        """
         try:
             if not chat_id or not message_id:
                 return False
@@ -392,6 +358,7 @@ class Publisher:
             return False
 
     def publish_single_folder(self, user_id, folder_name, ad_text, metadata_text, images_data):
+        """Старый метод - загружает фото и публикует"""
         try:
             if self.STOP_FLAG.get(user_id, False):
                 return False, "Остановка пользователем"
@@ -432,6 +399,7 @@ class Publisher:
             return False, str(e)
 
     def stop(self, user_id):
+        """Останавливает публикацию"""
         logger.info(f"⏹️ Остановка для пользователя {user_id}")
         self.STOP_FLAG[user_id] = True
         
