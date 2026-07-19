@@ -210,7 +210,10 @@ class Database:
             return None
     
     def get_ad_metadata(self, user_id, folder_name):
-        """Получает метаданные из БД"""
+        """
+        Получает метаданные из БД.
+        ВСЕГДА возвращает словарь со всеми полями, даже если записи нет.
+        """
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
@@ -223,18 +226,33 @@ class Database:
             row = c.fetchone()
             conn.close()
             
+            # ВСЕГДА возвращаем структуру со всеми полями
             if row:
                 return {
                     'Название': row[0] or '',
                     'Ссылка': row[1] or '',
                     'Код предложения': row[2] or '',
                     'Цена в лизинге': row[3] or '',
-                    'post_link': row[4] or ''
+                    'post_link': row[4] or None  # None если нет ссылки
                 }
-            return {}
+            
+            # Если записи нет, возвращаем структуру с пустыми полями
+            return {
+                'Название': '',
+                'Ссылка': '',
+                'Код предложения': '',
+                'Цена в лизинге': '',
+                'post_link': None
+            }
         except Exception as e:
             logger.error(f"❌ Ошибка получения метаданных: {e}")
-            return {}
+            return {
+                'Название': '',
+                'Ссылка': '',
+                'Код предложения': '',
+                'Цена в лизинге': '',
+                'post_link': None
+            }
     
     def get_publications(self, user_id, limit=None):
         """Получает список публикаций пользователя"""
@@ -271,13 +289,6 @@ class Database:
     def get_publications_with_status(self, user_id, status=None):
         """
         Получает публикации пользователя с возможностью фильтрации по статусу
-        
-        Args:
-            user_id: ID пользователя
-            status: Фильтр по статусу ('pending', 'success', 'failed')
-        
-        Returns:
-            list: Список публикаций
         """
         try:
             conn = sqlite3.connect(self.db_path)
@@ -347,15 +358,7 @@ class Database:
             return None
     
     def has_pending_publications(self, user_id):
-        """
-        Проверяет, есть ли у пользователя публикации в статусе 'pending'
-        
-        Args:
-            user_id: ID пользователя
-        
-        Returns:
-            bool: True если есть pending публикации
-        """
+        """Проверяет, есть ли у пользователя публикации в статусе 'pending'"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
@@ -369,6 +372,22 @@ class Database:
         except Exception as e:
             logger.error(f"❌ Ошибка проверки pending: {e}")
             return False
+    
+    def count_pending_publications(self, user_id):
+        """Возвращает количество pending публикаций"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            c = conn.cursor()
+            c.execute('''
+                SELECT COUNT(*) FROM publications 
+                WHERE user_id = ? AND status = 'pending'
+            ''', (user_id,))
+            count = c.fetchone()[0]
+            conn.close()
+            return count
+        except Exception as e:
+            logger.error(f"❌ Ошибка подсчета pending: {e}")
+            return 0
     
     def get_publication_time(self, user_id, folder_name):
         """Получает время публикации для папки"""
