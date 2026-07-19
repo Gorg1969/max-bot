@@ -45,7 +45,7 @@ class Publisher:
     def _send_and_get_id(self, chat_id, text, image_tokens):
         """
         Отправляет сообщение в чат и получает ID из ответа API.
-        ИСПРАВЛЕНО: Поиск seq/token вместо ссылок из markup.
+        ВЫВОДИТ ПОЛНЫЙ JSON ДЛЯ АНАЛИЗА.
         """
         diagnostic = {
             'timestamp': datetime.now().isoformat(),
@@ -60,6 +60,7 @@ class Publisher:
             'response_headers': None,
             'response_body': None,
             'response_json': None,
+            'all_fields': []
         }
         
         try:
@@ -82,7 +83,7 @@ class Publisher:
             
             if attachments:
                 payload["attachments"] = attachments
-
+            
             chat_id_str = str(chat_id)
             chat_id_for_api = chat_id_str if chat_id_str.startswith('-') else f"-{chat_id_str}"
             
@@ -101,9 +102,15 @@ class Publisher:
             
             diagnostic['response_status'] = response.status_code
             diagnostic['response_headers'] = dict(response.headers)
-            diagnostic['response_body'] = response.text[:5000]
+            diagnostic['response_body'] = response.text
             
             logger.info(f"📨 СТАТУС ОТВЕТА: {response.status_code}")
+            
+            # 🔥 ВЫВОДИМ ПОЛНЫЙ ТЕЛО ОТВЕТА (ВЕСЬ!)
+            logger.info("=" * 80)
+            logger.info("📨 ПОЛНЫЙ ТЕЛО ОТВЕТА:")
+            logger.info(response.text)
+            logger.info("=" * 80)
             
             if response.status_code == 200:
                 message_id = None
@@ -113,72 +120,65 @@ class Publisher:
                     result = response.json()
                     diagnostic['response_json'] = result
                     
-                    # 🔥 НОВЫЙ АЛГОРИТМ ПОИСКА ССЫЛКИ
+                    # 🔥 ВЫВОДИМ ПОЛНЫЙ РАСПАРСЕННЫЙ JSON
+                    logger.info("=" * 80)
+                    logger.info("📨 ПОЛНЫЙ РАСПАРСЕННЫЙ JSON:")
+                    logger.info(json.dumps(result, indent=2, ensure_ascii=False))
+                    logger.info("=" * 80)
                     
-                    # Приоритет 1: Заголовок Location (абсолютный путь)
-                    location = response.headers.get('Location', '')
-                    if location:
-                        if location.startswith('/'):
-                            post_link = f"https://max.ru{location}"
-                        else:
-                            post_link = location
-                        logger.info(f"✅ Ссылка найдена в Header Location: {post_link}")
-                        return True, post_link
-
-                    # Приоритет 2: Поле seq (числовой ID поста)
+                    # 🔥 ИЩЕМ ID ВО ВСЕХ ВОЗМОЖНЫХ МЕСТАХ
                     if isinstance(result, dict):
-                        msg = result.get('message', {})
-                        body = msg.get('body', {})
+                        # Проверяем все ключи верхнего уровня
+                        logger.info("🔍 КЛЮЧИ ВЕРХНЕГО УРОВНЯ:")
+                        for key in result.keys():
+                            logger.info(f"  • {key}: {type(result[key]).__name__}")
                         
-                        if 'seq' in body:
-                            message_id = str(body['seq'])
-                            logger.info(f"✅ Найден seq в message.body: {message_id}")
-                        elif 'seq' in result:
+                        # Ищем seq
+                        if 'message' in result and isinstance(result['message'], dict):
+                            msg = result['message']
+                            if 'body' in msg and isinstance(msg['body'], dict):
+                                if 'seq' in msg['body']:
+                                    message_id = str(msg['body']['seq'])
+                                    logger.info(f"✅ Найден seq в message.body.seq: {message_id}")
+                        
+                        if not message_id and 'seq' in result:
                             message_id = str(result['seq'])
-                            logger.info(f"✅ Найден seq в root: {message_id}")
+                            logger.info(f"✅ Найден seq в корне: {message_id}")
+                        
+                        # Если есть mid - тоже выводим
+                        if 'message' in result and isinstance(result['message'], dict):
+                            msg = result['message']
+                            if 'body' in msg and isinstance(msg['body'], dict):
+                                if 'mid' in msg['body']:
+                                    logger.info(f"📌 Найден mid: {msg['body']['mid']}")
                     
-                    # Если нашли числовой ID - собираем стандартную ссылку
+                    # 🔥 ФОРМИРУЕМ ССЫЛКУ
                     if message_id:
-                        final_link = f"https://max.ru/c/{chat_id_str}/{message_id}"
-                        logger.info(f"🔗 ФИНАЛЬНАЯ ССЫЛКА: {final_link}")
+                        post_link = f"https://max.ru/c/{chat_id_str}/{message_id}"
+                        logger.info(f"🔗 Ссылка на пост создана: {post_link}")
                         
                         diagnostic['status'] = 'success'
                         diagnostic['message_id'] = message_id
-                        diagnostic['post_link'] = final_link
+                        diagnostic['post_link'] = post_link
                         self.diagnostic_log.append(diagnostic)
-                        return True, final_link
-                    
-                    # Приоритет 3: Публичный токен (если придет вдруг alias/public_token)
-                    public_token = None
-                    def find_key(obj, key_name):
-                        if isinstance(obj, dict):
-                            for k, v in obj.items():
-                                if k == key_name:
-                                    return v
-                                found = find_key(v, key_name)
-                                if found: return found
-                        elif isinstance(obj, list):
-                            for item in obj:
-                                found = find_key(item, key_name)
-                                if found: return found
-                        return None
-                    
-                    public_token = find_key(result, 'alias') or find_key(result, 'public_token')
-                    if public_token and not public_token.startswith('http'):
-                        final_link = f"https://max.ru/c/{chat_id_str}/{public_token}"
-                        logger.info(f"🔗 Токен найден: {final_link}")
-                        return True, final_link
-
-                    # Если ничего не найдено
-                    logger.warning("⚠️ Технический ID не найден в ответе.")
-                    fallback_link = f"https://max.ru/c/{chat_id_str}"
-                    diagnostic['status'] = 'pending'
-                    diagnostic['error'] = 'ID не найден'
-                    self.diagnostic_log.append(diagnostic)
-                    return True, fallback_link
+                        
+                        return True, post_link
+                    else:
+                        logger.error(f"❌ ID НЕ НАЙДЕН!")
+                        logger.error(f"❌ Полный ответ: {response.text}")
+                        
+                        diagnostic['status'] = 'failed'
+                        diagnostic['error'] = 'ID не найден в ответе API'
+                        self.diagnostic_log.append(diagnostic)
+                        
+                        # Фолбэк - ссылка на чат
+                        post_link = f"https://max.ru/c/{chat_id_str}"
+                        logger.info(f"🔗 Используем ссылку на чат: {post_link}")
+                        return True, post_link
                         
                 except json.JSONDecodeError as e:
                     logger.error(f"❌ Ошибка парсинга JSON: {e}")
+                    logger.error(f"❌ Ответ: {response.text}")
                     diagnostic['status'] = 'failed'
                     diagnostic['error'] = f'JSONDecodeError: {e}'
                     self.diagnostic_log.append(diagnostic)
@@ -193,6 +193,7 @@ class Publisher:
                     return True, None
             else:
                 logger.error(f"❌ Ошибка API: {response.status_code}")
+                logger.error(f"❌ Тело ошибки: {response.text}")
                 diagnostic['status'] = 'failed'
                 diagnostic['error'] = f'HTTP {response.status_code}'
                 self.diagnostic_log.append(diagnostic)
@@ -207,15 +208,81 @@ class Publisher:
             self.diagnostic_log.append(diagnostic)
             return False, None
 
+    def _send_to_user(self, user_id, text, image_tokens):
+        try:
+            if not self.api.token:
+                return False, None
+            
+            attachments = []
+            for token in image_tokens[:10]:
+                attachments.append({
+                    "type": "image",
+                    "payload": {"token": token}
+                })
+            
+            payload = {
+                "user_id": user_id,
+                "text": text,
+                "format": "markdown"
+            }
+            
+            if attachments:
+                payload["attachments"] = attachments
+            
+            logger.info(f"📤 Отправка пользователю {user_id}")
+            
+            response = requests.post(
+                f"{self.api.base_url}/messages",
+                headers={
+                    "Authorization": self.api.token,
+                    "Content-Type": "application/json"
+                },
+                json=payload,
+                timeout=60,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                message_id = None
+                post_link = None
+                try:
+                    result = response.json()
+                    if 'message' in result and isinstance(result['message'], dict):
+                        msg = result['message']
+                        if 'body' in msg and isinstance(msg['body'], dict):
+                            if 'seq' in msg['body']:
+                                message_id = str(msg['body']['seq'])
+                    elif 'seq' in result:
+                        message_id = str(result['seq'])
+                    
+                    if message_id:
+                        post_link = f"https://max.ru/c/{user_id}/{message_id}"
+                    else:
+                        post_link = None
+                except:
+                    post_link = None
+                
+                if not post_link:
+                    post_link = f"https://max.ru/c/{user_id}"
+                
+                logger.info(f"✅ Отправлено пользователю {user_id}, ссылка: {post_link}")
+                return True, post_link
+            else:
+                logger.error(f"❌ Ошибка: {response.status_code}")
+                return False, None
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка: {e}")
+            return False, None
+
     def _parse_metadata(self, metadata_text):
-        """Парсит метаданные из текста после #изъятая."""
         metadata = {}
         if not metadata_text:
             return metadata
         
         fields = {
             'Название': r'Название:\s*(.+)',
-            'Ссылка': r'Ссылка:\s*(.+)',           # Это ВАША ссылка на товар (источник)
+            'Ссылка': r'Ссылка:\s*(.+)',
             'Код предложения': r'Код предложения:\s*(.+)',
             'Цена в лизинге': r'Цена\s*[вВ]\s*лизинге:\s*(.+)',
         }
@@ -224,6 +291,7 @@ class Publisher:
             match = re.search(pattern, metadata_text, re.IGNORECASE)
             if match:
                 metadata[key] = match.group(1).strip()
+                logger.info(f"📝 Найдено поле {key}: {metadata[key][:50]}...")
         
         return metadata
 
@@ -242,6 +310,9 @@ class Publisher:
             logger.info(f"📤 Извлечен chat_id: {chat_id}")
             logger.info(f"📸 Получено {len(image_tokens)} токенов фото")
             
+            metadata = self._parse_metadata(metadata_text)
+            metadata['chat_id'] = chat_id
+            
             success, post_link = self._send_and_get_id(chat_id, ad_text, image_tokens)
             
             if not success:
@@ -251,38 +322,27 @@ class Publisher:
             if not success:
                 return False, "Не удалось отправить сообщение"
             
-            # Парсим метаданные пользователя (там лежит "Ссылка" из info.txt)
-            metadata = self._parse_metadata(metadata_text)
-            metadata['chat_id'] = chat_id
-            
-            # Сохраняем link от MAX отдельно
+            # 🔥 ЯВНО УСТАНАВЛИВАЕМ post_link
             if post_link:
                 metadata['post_link'] = post_link
                 logger.info(f"🔗 Ссылка на пост сохранена: {post_link}")
             else:
                 metadata['post_link'] = ''
+                logger.warning(f"⚠️ Ссылка на пост не получена")
+            
+            # 🔥 ПРОВЕРКА: если в post_link попала ссылка-источник - очищаем
+            if metadata['post_link'] and 'https://max.ru/u/' in metadata['post_link']:
+                logger.error(f"❌ ОШИБКА: В post_link попала ссылка-источник! Очищаем.")
+                metadata['post_link'] = ''
             
             now = datetime.now(self.moscow_tz)
             timestamp = now.timestamp()
             self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, timestamp)
-            
-            # Определяем статус для БД
-            status_db = 'success' if post_link and not post_link.endswith('mid.') else 'pending'
-            self.db.add_publication(user_id, folder_name, chat_id, status=status_db)
-            
-            # Если ссылка временная (на сам канал), кладем в pending ожидания вебхука
-            if status_db == 'pending':
-                pending_key = f"{chat_id}_{folder_name}"
-                self.pending_messages[pending_key] = {
-                    'user_id': user_id,
-                    'folder_name': folder_name,
-                    'chat_id': chat_id,
-                    'metadata': metadata,
-                    'timestamp': timestamp
-                }
-                logger.info(f"📝 Добавлено в pending: {pending_key}. Всего: {len(self.pending_messages)}")
+            self.db.add_publication(user_id, folder_name, chat_id, status='success')
             
             logger.info(f"✅ Папка {folder_name} опубликована")
+            logger.info(f"📊 Ссылка на пост: {metadata['post_link']}")
+            logger.info(f"📊 Ссылка-источник: {metadata.get('Ссылка', 'Нет')}")
             return True, f"✅ Папка {folder_name} опубликована"
             
         except Exception as e:
@@ -298,6 +358,7 @@ class Publisher:
             
             chat_id_str = str(chat_id)
             logger.info(f"📨 ВЕБХУК: chat_id={chat_id_str}, message_id={message_id}")
+            logger.info(f"📊 Всего pending записей: {len(self.pending_messages)}")
             
             found = False
             matching_keys = []
@@ -308,28 +369,67 @@ class Publisher:
                     found = True
             
             if not found:
-                logger.warning(f"⚠️ Нет pending записи для чата {chat_id_str}")
+                logger.warning(f"⚠️ Нет pending записи для chat_id {chat_id_str}")
                 return False
             
             for key in matching_keys:
                 data = self.pending_messages[key]
                 folder_name = data['folder_name']
-                uid = data['user_id']
+                user_id_from_pending = data['user_id']
                 
-                # Собираем правильную ссылку при получении web_id
-                new_link = f"https://max.ru/c/{chat_id_str}/{message_id}"
+                post_link = f"https://max.ru/c/{chat_id_str}/{message_id}"
                 
-                self.db.update_post_link(uid, folder_name, new_link)
-                self.db.update_publication_status(uid, folder_name, 'success')
+                self.db.update_post_link(user_id_from_pending, folder_name, post_link)
+                self.db.update_publication_status(user_id_from_pending, folder_name, 'success')
                 
                 del self.pending_messages[key]
-                logger.info(f"✅ Обновлена ссылка для {folder_name}: {new_link}")
+                logger.info(f"✅ Обновлена ссылка для {folder_name}: {post_link}")
             
             return True
             
         except Exception as e:
             logger.error(f"❌ Ошибка обработки вебхука: {e}")
             return False
+
+    def publish_single_folder(self, user_id, folder_name, ad_text, metadata_text, images_data):
+        try:
+            if self.STOP_FLAG.get(user_id, False):
+                return False, "Остановка пользователем"
+            
+            image_tokens = []
+            max_images = min(len(images_data), 10) if isinstance(images_data, list) else 0
+            
+            for i in range(max_images):
+                if self.STOP_FLAG.get(user_id, False):
+                    return False, "Остановка пользователем"
+                
+                img_data = images_data[i]
+                if not img_data:
+                    continue
+                
+                if isinstance(img_data, dict):
+                    data = img_data.get('data')
+                    if isinstance(data, list):
+                        image_bytes = bytes(data)
+                    elif isinstance(data, bytes):
+                        image_bytes = data
+                    else:
+                        continue
+                else:
+                    image_bytes = img_data
+                
+                token = self.api.upload_file(image_bytes, f"image_{i}.jpg")
+                if token:
+                    image_tokens.append(token)
+                    time.sleep(0.3)
+            
+            return self.publish_folder_with_tokens(
+                user_id, folder_name, ad_text, metadata_text, image_tokens
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка: {e}")
+            return False, str(e)
 
     def stop(self, user_id):
         logger.info(f"⏹️ Остановка для пользователя {user_id}")
