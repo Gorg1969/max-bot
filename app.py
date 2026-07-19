@@ -366,6 +366,28 @@ UPLOAD_PAGE = """
         const reportBtn = document.getElementById('reportBtn');
         const reportStatus = document.getElementById('reportStatus');
 
+        // 🔥 ПЕРЕХВАТЫВАЕМ ВСЕ ОШИБКИ FETCH ДЛЯ ДИАГНОСТИКИ
+        const originalFetch = window.fetch;
+        window.fetch = function(...args) {
+            return originalFetch.apply(this, args).then(async (response) => {
+                const clone = response.clone();
+                const text = await clone.text();
+                
+                const contentType = response.headers.get('content-type');
+                if (contentType && contentType.includes('application/json')) {
+                    try {
+                        JSON.parse(text);
+                    } catch (e) {
+                        console.error('❌ НЕВАЛИДНЫЙ JSON в ответе:', text);
+                        console.error('❌ URL:', response.url);
+                        console.error('❌ Статус:', response.status);
+                    }
+                }
+                
+                return response;
+            });
+        };
+
         document.addEventListener('DOMContentLoaded', function() {
             setTimeout(checkReportStatus, 3000);
         });
@@ -500,14 +522,38 @@ UPLOAD_PAGE = """
             window.open(`/report/${userId}`, '_blank');
         }
 
+        // 🔥 ОБНОВЛЕННАЯ ФУНКЦИЯ С ОБРАБОТКОЙ ОШИБОК JSON
         async function checkReportStatus() {
             try {
                 const response = await fetch(`/report_status/${userId}`);
-                const result = await response.json();
+                const text = await response.text();
                 
-                reportStatus.style.display = 'block';
+                // Удаляем лишний текст до первой {
+                let cleanText = text;
+                const firstBrace = text.indexOf('{');
+                if (firstBrace > 0) {
+                    cleanText = text.substring(firstBrace);
+                    console.log('🧹 Удален лишний текст:', text.substring(0, firstBrace));
+                }
+                
+                let result;
+                try {
+                    result = JSON.parse(cleanText);
+                } catch (parseError) {
+                    console.error('❌ Ошибка парсинга JSON:', parseError);
+                    console.log('📄 Полученный текст:', text);
+                    console.log('📄 Очищенный текст:', cleanText);
+                    
+                    reportStatus.style.display = 'block';
+                    reportStatus.className = 'status error';
+                    reportStatus.textContent = '❌ Ошибка сервера: ' + text.substring(0, 200);
+                    reportBtn.disabled = true;
+                    reportReady = false;
+                    return;
+                }
                 
                 if (result.error) {
+                    reportStatus.style.display = 'block';
                     reportStatus.className = 'status error';
                     reportStatus.textContent = '❌ ' + result.error;
                     reportBtn.disabled = true;
@@ -515,6 +561,7 @@ UPLOAD_PAGE = """
                     return;
                 }
                 
+                reportStatus.style.display = 'block';
                 let statusText = `📊 Всего: ${result.total} | ✅ Готово: ${result.success}`;
                 
                 if (result.pending > 0) {
@@ -562,7 +609,7 @@ UPLOAD_PAGE = """
                 }
                 
             } catch (error) {
-                console.error('Ошибка проверки статуса:', error);
+                console.error('❌ Ошибка проверки статуса:', error);
                 reportStatus.style.display = 'block';
                 reportStatus.className = 'status error';
                 reportStatus.textContent = '❌ Ошибка проверки статуса: ' + error.message;
@@ -579,7 +626,16 @@ UPLOAD_PAGE = """
                     body: JSON.stringify({ user_id: parseInt(userId) })
                 });
                 
-                const result = await response.json();
+                const text = await response.text();
+                
+                // Удаляем лишний текст до первой {
+                let cleanText = text;
+                const firstBrace = text.indexOf('{');
+                if (firstBrace > 0) {
+                    cleanText = text.substring(firstBrace);
+                }
+                
+                const result = JSON.parse(cleanText);
                 
                 if (result.success) {
                     addLog(`✅ ${result.message}`);
@@ -608,7 +664,16 @@ UPLOAD_PAGE = """
                     headers: { 'Content-Type': 'application/json' }
                 });
                 
-                const result = await response.json();
+                const text = await response.text();
+                
+                // Удаляем лишний текст до первой {
+                let cleanText = text;
+                const firstBrace = text.indexOf('{');
+                if (firstBrace > 0) {
+                    cleanText = text.substring(firstBrace);
+                }
+                
+                const result = JSON.parse(cleanText);
                 
                 if (result.success) {
                     showStatus('success', '✅ Данные очищены');
@@ -1273,14 +1338,14 @@ def report_status(user_id):
     try:
         stats = db.get_stats(user_id)
         
-        pending = stats['pending']
-        success = stats['success']
-        failed = stats['errors']
-        total = stats['total']
+        pending = stats.get('pending', 0)
+        success = stats.get('success', 0)
+        failed = stats.get('errors', 0)
+        total = stats.get('total', 0)
         
         ready = pending == 0 and success > 0
         
-        return jsonify({
+        response = jsonify({
             'total': total,
             'pending': pending,
             'success': success,
@@ -1288,10 +1353,14 @@ def report_status(user_id):
             'ready': ready,
             'message': '✅ Отчет готов!' if ready else f'⏳ Ожидание {pending} публикаций...'
         })
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response
         
     except Exception as e:
         logger.error(f"❌ Ошибка проверки статуса: {e}")
-        return jsonify({'error': str(e)}), 500
+        response = jsonify({'error': str(e)})
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response, 500
 
 
 @app.route('/force_update_links', methods=['POST'])
@@ -1301,12 +1370,16 @@ def force_update_links():
         user_id = data.get('user_id')
         
         if not user_id:
-            return jsonify({'success': False, 'message': 'Нет user_id'}), 400
+            response = jsonify({'success': False, 'message': 'Нет user_id'})
+            response.headers['Content-Type'] = 'application/json; charset=utf-8'
+            return response, 400
         
         publications = db.get_publications_with_status(user_id, 'pending')
         
         if not publications:
-            return jsonify({'success': True, 'message': 'Нет pending публикаций'})
+            response = jsonify({'success': True, 'message': 'Нет pending публикаций'})
+            response.headers['Content-Type'] = 'application/json; charset=utf-8'
+            return response
         
         updated = 0
         for pub in publications:
@@ -1319,15 +1392,19 @@ def force_update_links():
                 updated += 1
                 logger.info(f"✅ Принудительно обновлена ссылка для {folder_name}: {post_link}")
         
-        return jsonify({
+        response = jsonify({
             'success': True,
             'message': f'Обновлено {updated} публикаций',
             'updated': updated
         })
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response
         
     except Exception as e:
         logger.error(f"❌ Ошибка принудительного обновления: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
+        response = jsonify({'success': False, 'message': str(e)})
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response, 500
 
 
 @app.route('/clear_user_data/<int:user_id>', methods=['POST'])
@@ -1338,13 +1415,17 @@ def clear_user_data(user_id):
         publisher.pending_messages = {}
         
         logger.info(f"🗑️ Данные пользователя {user_id} очищены")
-        return jsonify({
+        response = jsonify({
             'success': True,
             'message': f'Данные пользователя {user_id} очищены'
         })
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response
     except Exception as e:
         logger.error(f"❌ Ошибка очистки данных: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
+        response = jsonify({'success': False, 'message': str(e)})
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response, 500
 
 
 @app.route('/auto_cleanup/<int:user_id>', methods=['POST'])
@@ -1370,20 +1451,26 @@ def auto_cleanup(user_id):
             logger.info(f"✅ Данные пользователя {user_id} очищены")
         
         threading.Thread(target=delayed_cleanup, daemon=True).start()
-        return jsonify({'success': True, 'message': 'Автоочистка запланирована через 5 минут'})
+        response = jsonify({'success': True, 'message': 'Автоочистка запланирована через 5 минут'})
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response
         
     except Exception as e:
         logger.error(f"❌ Ошибка автоочистки: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
+        response = jsonify({'success': False, 'message': str(e)})
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response, 500
 
 
 @app.route('/webhook_test', methods=['GET'])
 def webhook_test():
-    return jsonify({
+    response = jsonify({
         'status': 'ok',
         'pending_count': len(publisher.pending_messages),
         'pending_keys': list(publisher.pending_messages.keys())
     })
+    response.headers['Content-Type'] = 'application/json; charset=utf-8'
+    return response
 
 
 @app.route('/diagnostic/<int:user_id>')
@@ -1407,25 +1494,33 @@ def diagnostic_log(user_id):
         if not user_diagnostic:
             user_diagnostic = diagnostic_data[-20:]
         
-        return jsonify({
+        response = jsonify({
             'user_id': user_id,
             'total_entries': len(diagnostic_data),
             'user_entries': len(user_diagnostic),
             'diagnostic': user_diagnostic[-50:]
         })
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response
         
     except Exception as e:
         logger.error(f"❌ Ошибка получения диагностики: {e}")
-        return jsonify({'error': str(e)}), 500
+        response = jsonify({'error': str(e)})
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response, 500
 
 
 @app.route('/diagnostic/clear', methods=['POST'])
 def clear_diagnostic_log():
     try:
         publisher.clear_diagnostic_log()
-        return jsonify({'success': True, 'message': 'Диагностический журнал очищен'})
+        response = jsonify({'success': True, 'message': 'Диагностический журнал очищен'})
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response
     except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 500
+        response = jsonify({'success': False, 'message': str(e)})
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response, 500
 
 
 @app.route('/diagnostic/last')
@@ -1433,28 +1528,34 @@ def diagnostic_last():
     try:
         diagnostic_data = publisher.get_diagnostic_log()
         if diagnostic_data:
-            return jsonify({
+            response = jsonify({
                 'success': True,
                 'last_entry': diagnostic_data[-1]
             })
         else:
-            return jsonify({
+            response = jsonify({
                 'success': True,
                 'message': 'Нет диагностических записей',
                 'last_entry': None
             })
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response
     except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 500
+        response = jsonify({'success': False, 'message': str(e)})
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response, 500
 
 
 @app.errorhandler(Exception)
 def handle_all_exceptions(error):
     logger.error(f"Критическая ошибка обработки запроса: {error}", exc_info=True)
-    return jsonify({
+    response = jsonify({
         'success': False,
         'message': 'Внутренняя ошибка сервера',
         'details': str(error)
-    }), 500
+    })
+    response.headers['Content-Type'] = 'application/json; charset=utf-8'
+    return response, 500
 
 
 if __name__ == "__main__":
