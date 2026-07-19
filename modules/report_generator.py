@@ -5,6 +5,7 @@ import shutil
 from datetime import datetime
 import pytz
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +22,17 @@ class ReportGenerator:
     def __init__(self, file_manager, db):
         self.fm = file_manager
         self.db = db
+        self.MAX_WAIT_TIME = 30  # Максимальное время ожидания в секундах
+        self.CHECK_INTERVAL = 1  # Интервал проверки в секундах
     
-    def generate_report(self, user_id):
-        """Генерирует Excel отчет с двумя листами"""
+    def generate_report(self, user_id, wait_for_links=True):
+        """
+        Генерирует Excel отчет с двумя листами.
+        
+        Args:
+            user_id: ID пользователя
+            wait_for_links: Ждать ли появления ссылок
+        """
         try:
             user_folder = self.fm.get_user_folder(user_id)
             publications = self.db.get_publications(user_id)
@@ -31,6 +40,12 @@ class ReportGenerator:
             if not publications:
                 logger.warning(f"⚠️ Нет публикаций для пользователя {user_id}")
                 return None
+            
+            # 🔥 ФИКС: Если нужно ждать ссылки
+            if wait_for_links:
+                self._wait_for_links(user_id, publications)
+                # Обновляем список публикаций после ожидания
+                publications = self.db.get_publications(user_id)
             
             moscow_tz = pytz.timezone('Europe/Moscow')
             success_data = []
@@ -57,10 +72,6 @@ class ReportGenerator:
                     logger.info(f"🔗 Для папки {folder_name} post_link из БД: '{post_link}'")
                 else:
                     logger.warning(f"⚠️ Для папки {folder_name} post_link отсутствует в БД")
-                
-                # НЕ СОЗДАЕМ ФЕЙКОВУЮ ССЫЛКУ!
-                # Оставляем post_link как есть (может быть пустым)
-                # Никакого fallback с chat_id!
                 
                 # Время публикации
                 created_at = pub.get('created_at')
@@ -90,7 +101,6 @@ class ReportGenerator:
                     else:
                         display_date = ''
                     
-                    # Добавляем проверку наличия ссылки
                     success_data.append({
                         '№': index,
                         'Дата': display_date,
@@ -132,6 +142,89 @@ class ReportGenerator:
             import traceback
             traceback.print_exc()
             return None
+    
+    def _wait_for_links(self, user_id, publications):
+        """
+        Ожидает появления ссылок для публикаций со статусом 'pending'
+        
+        Args:
+            user_id: ID пользователя
+            publications: Список публикаций
+        """
+        try:
+            # Находим публикации со статусом 'pending'
+            pending_publications = [p for p in publications if p.get('status') == 'pending']
+            
+            if not pending_publications:
+                logger.info("✅ Нет публикаций в статусе 'pending'")
+                return
+            
+            logger.info(f"⏳ Ожидание ссылок для {len(pending_publications)} публикаций...")
+            
+            waited = 0
+            completed = 0
+            
+            while waited < self.MAX_WAIT_TIME:
+                # Проверяем каждую pending публикацию
+                all_done = True
+                
+                for pub in pending_publications:
+                    folder_name = pub.get('folder_name')
+                    # Проверяем статус в БД
+                    current_pubs = self.db.get_publications(user_id)
+                    current_status = None
+                    
+                    for p in current_pubs:
+                        if p.get('folder_name') == folder_name:
+                            current_status = p.get('status')
+                            break
+                    
+                    if current_status == 'pending':
+                        all_done = False
+                        break
+                    elif current_status == 'success':
+                        completed += 1
+                
+                if all_done:
+                    logger.info(f"✅ Все {len(pending_publications)} публикаций получили ссылки")
+                    break
+                
+                # Ждем
+                time.sleep(self.CHECK_INTERVAL)
+                waited += self.CHECK_INTERVAL
+                
+                # Показываем прогресс
+                if waited % 5 == 0:
+                    logger.info(f"⏳ Ожидание ссылок... {waited}с из {self.MAX_WAIT_TIME}с")
+            
+            if waited >= self.MAX_WAIT_TIME:
+                logger.warning(f"⚠️ Истекло время ожидания ({self.MAX_WAIT_TIME}с) для некоторых публикаций")
+                
+                # Проверяем, какие публикации так и остались без ссылок
+                for pub in pending_publications:
+                    folder_name = pub.get('folder_name')
+                    current_pubs = self.db.get_publications(user_id)
+                    current_status = None
+                    
+                    for p in current_pubs:
+                        if p.get('folder_name') == folder_name:
+                            current_status = p.get('status')
+                            break
+                    
+                    if current_status == 'pending':
+                        logger.warning(f"⚠️ Публикация {folder_name} так и не получила ссылку")
+                        # Обновляем статус на 'failed' с ошибкой
+                        self.db.update_publication_status(
+                            user_id, 
+                            folder_name, 
+                            'failed',
+                            error="Ссылка не получена за отведенное время"
+                        )
+            
+            logger.info(f"✅ Ожидание завершено. Получено {completed} ссылок")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в _wait_for_links: {e}")
     
     def _create_excel_report(self, filepath, success_data, error_data):
         """Создает Excel файл"""
