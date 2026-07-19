@@ -1,4 +1,4 @@
-# app.py - исправленный импорт
+# app.py
 from flask import Flask, request, jsonify, render_template_string, send_file
 import requests
 import logging
@@ -10,7 +10,7 @@ import threading
 import time
 import base64
 from werkzeug.exceptions import ClientDisconnected
-from modules import Database, FileManager, Publisher, ReportGenerator  # ← Убрали WebInterface
+from modules import Database, FileManager, Publisher, ReportGenerator
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -32,6 +32,7 @@ db = Database()
 db.fix_publication_times()
 
 fm = FileManager(DATA_DIR)
+
 
 class APIClient:
     def __init__(self):
@@ -873,8 +874,6 @@ def publish_folder():
         )
         
         if success:
-            # 🔥 ФИКС: Проверяем, что данные сохранились в БД
-            # Даже если ссылка не получена, публикация считается успешной
             return jsonify({'success': True, 'message': message})
         else:
             return jsonify({'success': False, 'message': message}), 500
@@ -895,7 +894,6 @@ def webhook():
         if not data:
             return jsonify({"ok": True}), 200
         
-        # ===== ОБРАБОТКА СОБЫТИЯ message_created =====
         update_type = data.get('update_type')
         
         if update_type == 'message_created':
@@ -906,21 +904,17 @@ def webhook():
             sender = message.get('sender', {})
             body = message.get('body', {})
             
-            # Извлекаем данные
             chat_id = recipient.get('chat_id')
             user_id = sender.get('user_id')
             text = body.get('text', '')
-            message_id = body.get('mid')  # ID сообщения
+            message_id = body.get('mid')
             
-            # 🔥 ФИКС: Приводим chat_id к строке для единообразия
             if chat_id is not None:
                 chat_id = str(chat_id)
             
             logger.info(f"📨 chat_id: {chat_id}, user_id: {user_id}, text: {text}, mid: {message_id}")
             
-            # Если есть user_id и text - это сообщение от пользователя
             if user_id and text:
-                # Обрабатываем команды пользователя
                 if text.strip() == '/start':
                     api.send_message(
                         user_id,
@@ -962,27 +956,20 @@ def webhook():
                         api.send_message(user_id, "❌ Нет данных для отчета.")
                     return jsonify({"ok": True}), 200
             
-            # 🔥 ФИКС: Если есть chat_id и message_id - это ответ от бота
             if chat_id and message_id:
                 logger.info(f"📨 Получен ID сообщения: {message_id} для чата {chat_id}")
-                
-                # 🔥 ФИКС: Передаем user_id если он есть
                 if user_id:
                     publisher.handle_message_created(chat_id, message_id, user_id)
                 else:
-                    # Пытаемся найти user_id в pending_messages
                     publisher.handle_message_created(chat_id, message_id)
-                
                 return jsonify({"ok": True}), 200
             
             return jsonify({"ok": True}), 200
         
-        # ===== ОБРАБОТКА СОБЫТИЯ bot_stopped =====
         if update_type == 'bot_stopped':
             logger.info("📨 Получено событие bot_stopped")
             return jsonify({"ok": True}), 200
         
-        # ===== ОБРАБОТКА ДРУГИХ СОБЫТИЙ =====
         logger.info(f"ℹ️ Получен вебхук с update_type: {update_type}")
         return jsonify({"ok": True}), 200
         
@@ -1089,6 +1076,89 @@ def cleanup_temp():
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
+# ========== НОВЫЕ ЭНДПОИНТЫ ДЛЯ МОНИТОРИНГА ==========
+
+@app.route('/pending_status/<int:user_id>')
+def pending_status(user_id):
+    """Показывает статус pending публикаций"""
+    try:
+        publications = db.get_publications_with_status(user_id, 'pending')
+        
+        result = {
+            'user_id': user_id,
+            'pending_count': len(publications),
+            'publications': []
+        }
+        
+        for pub in publications:
+            folder_name = pub.get('folder_name')
+            metadata = db.get_ad_metadata(user_id, folder_name)
+            post_link = metadata.get('post_link')
+            
+            result['publications'].append({
+                'folder_name': folder_name,
+                'created_at': pub.get('created_at'),
+                'has_link': bool(post_link),
+                'post_link': post_link
+            })
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения статуса: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/force_update_links', methods=['POST'])
+def force_update_links():
+    """
+    Принудительно обновляет ссылки для всех pending публикаций.
+    Используется для тестирования или ручного обновления.
+    """
+    try:
+        data = request.get_json()
+        user_id = data.get('user_id')
+        
+        if not user_id:
+            return jsonify({'success': False, 'message': 'Нет user_id'}), 400
+        
+        publications = db.get_publications_with_status(user_id, 'pending')
+        
+        if not publications:
+            return jsonify({'success': True, 'message': 'Нет pending публикаций'})
+        
+        updated = 0
+        for pub in publications:
+            folder_name = pub.get('folder_name')
+            metadata = db.get_ad_metadata(user_id, folder_name)
+            post_link = metadata.get('post_link')
+            
+            if post_link:
+                db.update_publication_status(user_id, folder_name, 'success')
+                updated += 1
+                logger.info(f"✅ Принудительно обновлена ссылка для {folder_name}: {post_link}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Обновлено {updated} публикаций',
+            'updated': updated
+        })
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка принудительного обновления: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/webhook_test', methods=['GET'])
+def webhook_test():
+    """Тестовый эндпоинт для проверки статуса вебхука"""
+    return jsonify({
+        'status': 'ok',
+        'pending_count': len(publisher.pending_messages),
+        'pending_keys': list(publisher.pending_messages.keys())
+    })
+
+
 @app.errorhandler(Exception)
 def handle_all_exceptions(error):
     logger.error(f"Критическая ошибка обработки запроса: {error}", exc_info=True)
@@ -1104,7 +1174,6 @@ if __name__ == "__main__":
     if TOKEN:
         logger.info(f"✅ Токен найден (первые 10): {TOKEN[:10]}...")
         
-        # Настройка вебхука при запуске
         try:
             webhook_url = "https://maxbot.bothost.tech/webhook"
             headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
