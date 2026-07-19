@@ -25,11 +25,9 @@ class ReportGenerator:
         self.db = db
         self._generating = {}
         self._lock = threading.Lock()
-        # Словарь для отслеживания времени скачивания отчетов
-        self._report_downloads = {}  # user_id -> timestamp
-    
+        self._report_downloads = {}
+
     def generate_report(self, user_id):
-        """Генерирует отчет"""
         with self._lock:
             if user_id in self._generating:
                 elapsed = time.time() - self._generating[user_id]
@@ -40,7 +38,6 @@ class ReportGenerator:
         
         try:
             user_folder = self.fm.get_user_folder(user_id)
-            
             publications = self.db.get_publications(user_id)
             
             if not publications:
@@ -75,11 +72,17 @@ class ReportGenerator:
                 folder_name = pub.get('folder_name', '')
                 chat_id = pub.get('group_id', '')
                 
+                # 🔥 ПОЛУЧАЕМ МЕТАДАННЫЕ
                 metadata = self.db.get_ad_metadata(user_id, folder_name)
+                
+                # 🔥 post_link - это ссылка на пост в MAX (от API)
                 post_link = metadata.get('post_link', '')
                 
+                # 🔥 source_link - это ссылка-источник из info.txt
+                source_link = metadata.get('Ссылка', '')
+                
                 if not post_link:
-                    post_link = f"https://max.ru/c/{chat_id}" if chat_id else '⚠️ Ссылка не найдена'
+                    post_link = f"https://max.ru/c/{chat_id}" if chat_id else '⚠️ Ссылка не получена'
                 
                 created_at = pub.get('created_at')
                 if created_at:
@@ -111,8 +114,8 @@ class ReportGenerator:
                     '№': index,
                     'Дата': display_date,
                     'Время публикации (МСК)': time_str,
-                    'Ссылка на пост': post_link,
-                    'Ссылка (источник)': metadata.get('Ссылка', ''),
+                    'Ссылка на пост': post_link,           # 🔥 Ссылка на пост в MAX
+                    'Ссылка (источник)': source_link,      # 🔥 Ссылка-источник из info.txt
                     'Название': metadata.get('Название', ''),
                     'Код предложения': metadata.get('Код предложения', ''),
                     'Цена в лизинге': metadata.get('Цена в лизинге', ''),
@@ -158,18 +161,15 @@ class ReportGenerator:
                 if user_id in self._generating:
                     del self._generating[user_id]
             return None
-    
+
     def mark_report_downloaded(self, user_id):
-        """Отмечает, что отчет был скачан"""
         self._report_downloads[user_id] = time.time()
         logger.info(f"📥 Отмечено скачивание отчета для {user_id}")
         
-        # Запускаем таймер очистки через 30 секунд после скачивания
         def cleanup_after_download():
-            time.sleep(30)  # 30 секунд после скачивания
+            time.sleep(30)
             logger.info(f"🧹 Автоочистка данных для {user_id} после скачивания отчета")
             self.db.clear_user_data(user_id)
-            # Также очищаем файлы пользователя
             user_folder = self.fm.get_user_folder(user_id)
             if os.path.exists(user_folder):
                 for item in os.listdir(user_folder):
@@ -185,7 +185,7 @@ class ReportGenerator:
                 del self._report_downloads[user_id]
         
         threading.Thread(target=cleanup_after_download, daemon=True).start()
-    
+
     def _create_excel_report(self, filepath, success_data):
         try:
             wb = Workbook()
@@ -231,10 +231,10 @@ class ReportGenerator:
                     
                     if key in ['№', 'Дата', 'Время публикации (МСК)']:
                         cell.alignment = text_alignment_center
-                    elif key == 'Ссылка на пост' and value and not value.startswith('⚠️'):
+                    elif key in ['Ссылка на пост', 'Ссылка (источник)'] and value and not value.startswith('⚠️'):
                         cell.font = link_font
                         cell.alignment = text_alignment_left
-                    elif key == 'Ссылка на пост' and value.startswith('⚠️'):
+                    elif key in ['Ссылка на пост', 'Ссылка (источник)'] and value.startswith('⚠️'):
                         cell.font = Font(color="FF0000", size=10, name="Calibri")
                         cell.alignment = text_alignment_left
                     else:
@@ -261,7 +261,7 @@ class ReportGenerator:
         except Exception as e:
             logger.error(f"❌ Ошибка создания Excel: {e}")
             raise
-    
+
     def _create_csv_report(self, filepath, success_data):
         try:
             with open(filepath, 'w', encoding='utf-8-sig', newline='') as f:
@@ -283,7 +283,7 @@ class ReportGenerator:
         except Exception as e:
             logger.error(f"❌ Ошибка создания CSV: {e}")
             raise
-    
+
     def cleanup_user_data(self, user_id, keep_report=True):
         try:
             user_folder = self.fm.get_user_folder(user_id)
