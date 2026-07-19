@@ -49,16 +49,18 @@ class ReportGenerator:
                 # Получаем метаданные из БД
                 metadata = self.db.get_ad_metadata(user_id, folder_name)
                 
-                # ===== ЧИТАЕМ post_link ИЗ МЕТАДАННЫХ =====
+                # Читаем post_link из метаданных
                 post_link = metadata.get('post_link', '')
                 
                 # Логируем для отладки
-                logger.info(f"🔗 Для папки {folder_name} post_link из БД: '{post_link}'")
+                if post_link:
+                    logger.info(f"🔗 Для папки {folder_name} post_link из БД: '{post_link}'")
+                else:
+                    logger.warning(f"⚠️ Для папки {folder_name} post_link отсутствует в БД")
                 
-                # Если ссылки нет, используем fallback
-                if not post_link and chat_id:
-                    post_link = f"https://max.ru/c/{chat_id}"
-                    logger.warning(f"⚠️ Ссылка для {folder_name} не найдена в БД, используем fallback")
+                # НЕ СОЗДАЕМ ФЕЙКОВУЮ ССЫЛКУ!
+                # Оставляем post_link как есть (может быть пустым)
+                # Никакого fallback с chat_id!
                 
                 # Время публикации
                 created_at = pub.get('created_at')
@@ -88,11 +90,12 @@ class ReportGenerator:
                     else:
                         display_date = ''
                     
+                    # Добавляем проверку наличия ссылки
                     success_data.append({
                         '№': index,
                         'Дата': display_date,
                         'Время публикации (МСК)': time_str,
-                        'Ссылка на пост': post_link,
+                        'Ссылка на пост': post_link if post_link else '⚠️ Ссылка не получена',
                         'Ссылка (источник)': metadata.get('Ссылка', ''),
                         'Название': metadata.get('Название', ''),
                         'Код предложения': metadata.get('Код предложения', ''),
@@ -179,8 +182,11 @@ class ReportGenerator:
                     
                     if key in ['№', 'Дата', 'Время публикации (МСК)']:
                         cell.alignment = text_alignment_center
-                    elif key in ['Ссылка на пост', 'Ссылка (источник)'] and value:
+                    elif key in ['Ссылка на пост', 'Ссылка (источник)'] and value and not value.startswith('⚠️'):
                         cell.font = link_font
+                        cell.alignment = text_alignment_left
+                    elif key == 'Ссылка на пост' and value.startswith('⚠️'):
+                        cell.font = Font(color="FF0000", size=10, name="Calibri")
                         cell.alignment = text_alignment_left
                     else:
                         cell.font = text_font
