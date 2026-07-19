@@ -56,8 +56,8 @@ class Publisher:
 
     def _send_and_get_id(self, chat_id, text, image_tokens):
         """
-        Отправляет сообщение в чат и получает ID.
-        ВАЖНО: при отсутствии ID возвращает None, НЕ заглушку!
+        Отправляет сообщение в чат и получает ID из ответа API.
+        С ДЕТАЛЬНЫМ ЛОГИРОВАНИЕМ ВСЕГО ОТВЕТА
         """
         try:
             if not self.api.token:
@@ -82,6 +82,7 @@ class Publisher:
             chat_id_for_api = chat_id_str if chat_id_str.startswith('-') else f"-{chat_id_str}"
             
             logger.info(f"📤 Отправка в чат {chat_id_for_api} с {len(attachments)} фото")
+            logger.info(f"📤 Payload: {json.dumps(payload, ensure_ascii=False)[:500]}")
             
             response = requests.post(
                 f"{self.api.base_url}/messages?chat_id={chat_id_for_api}",
@@ -94,51 +95,105 @@ class Publisher:
                 verify=False
             )
             
+            # ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ ОТВЕТА
+            logger.info(f"📨 Статус ответа: {response.status_code}")
+            logger.info(f"📨 Заголовки ответа: {dict(response.headers)}")
+            logger.info(f"📨 Тело ответа (первые 1000 символов): {response.text[:1000]}")
+            
             if response.status_code == 200:
                 message_id = None
                 post_link = None
                 
                 try:
                     result = response.json()
-                    logger.info(f"📨 Ответ API: {json.dumps(result, indent=2)}")
+                    logger.info(f"📨 Распарсенный JSON: {json.dumps(result, indent=2, ensure_ascii=False)}")
                     
-                    # Ищем ID в ответе
+                    # ПРОБУЕМ ВСЕ ВОЗМОЖНЫЕ МЕСТА ДЛЯ ID
                     if isinstance(result, dict):
+                        # Вариант 1: data.id
                         if 'data' in result and isinstance(result['data'], dict):
                             if 'id' in result['data']:
                                 message_id = result['data']['id']
+                                logger.info(f"✅ Найден ID в data.id: {message_id}")
                             elif 'message_id' in result['data']:
                                 message_id = result['data']['message_id']
+                                logger.info(f"✅ Найден ID в data.message_id: {message_id}")
+                            elif 'post_id' in result['data']:
+                                message_id = result['data']['post_id']
+                                logger.info(f"✅ Найден ID в data.post_id: {message_id}")
                         
+                        # Вариант 2: прямой id
                         if not message_id and 'id' in result:
                             message_id = result['id']
+                            logger.info(f"✅ Найден ID в id: {message_id}")
                         
+                        # Вариант 3: message_id
                         if not message_id and 'message_id' in result:
                             message_id = result['message_id']
+                            logger.info(f"✅ Найден ID в message_id: {message_id}")
                         
+                        # Вариант 4: mid
                         if not message_id and 'mid' in result:
                             message_id = result['mid']
+                            logger.info(f"✅ Найден ID в mid: {message_id}")
+                        
+                        # Вариант 5: post_id
+                        if not message_id and 'post_id' in result:
+                            message_id = result['post_id']
+                            logger.info(f"✅ Найден ID в post_id: {message_id}")
+                        
+                        # Вариант 6: result.data.mid
+                        if not message_id and 'data' in result and isinstance(result['data'], dict):
+                            if 'mid' in result['data']:
+                                message_id = result['data']['mid']
+                                logger.info(f"✅ Найден ID в data.mid: {message_id}")
                     
-                    # ЕСЛИ ID НЕ НАЙДЕН - ВОЗВРАЩАЕМ None, А НЕ ЗАГЛУШКУ!
+                    # ЕСЛИ ID НАЙДЕН - СОЗДАЕМ ССЫЛКУ
                     if message_id:
                         post_link = f"https://max.ru/c/{chat_id_str}/{message_id}"
-                        logger.info(f"🔗 Получен ID: {message_id}, ссылка: {post_link}")
+                        logger.info(f"🔗 Ссылка создана: {post_link}")
                         return True, post_link
                     else:
-                        # ❌ НЕ СОЗДАЕМ ЗАГЛУШКУ!
-                        logger.warning(f"⚠️ ID не найден в ответе для чата {chat_id_str}")
-                        logger.warning(f"⚠️ Ответ: {response.text[:200]}")
+                        # ID НЕ НАЙДЕН - ПРОВЕРЯЕМ LOCATION
+                        location = response.headers.get('Location', '')
+                        if location:
+                            logger.info(f"📍 Location заголовок: {location}")
+                            # Пробуем извлечь ID из Location
+                            match = re.search(r'/(\d+)$', location)
+                            if match:
+                                message_id = match.group(1)
+                                post_link = f"https://max.ru/c/{chat_id_str}/{message_id}"
+                                logger.info(f"✅ Найден ID в Location: {message_id}, ссылка: {post_link}")
+                                return True, post_link
+                        
+                        # СОВСЕМ НЕТ ID
+                        logger.warning(f"⚠️ ID НЕ НАЙДЕН в ответе API!")
+                        logger.warning(f"⚠️ Полный ответ: {response.text}")
+                        
                         return True, None  # Успех, но без ID
                         
+                except json.JSONDecodeError as e:
+                    logger.error(f"❌ Ошибка парсинга JSON: {e}")
+                    logger.error(f"❌ Ответ не является JSON: {response.text[:500]}")
+                    return True, None
                 except Exception as e:
-                    logger.error(f"❌ Ошибка парсинга: {e}")
+                    logger.error(f"❌ Ошибка обработки ответа: {e}")
+                    import traceback
+                    traceback.print_exc()
                     return True, None
             else:
-                logger.error(f"❌ Ошибка: {response.status_code} - {response.text}")
+                logger.error(f"❌ Ошибка: {response.status_code}")
+                logger.error(f"❌ Тело ошибки: {response.text[:500]}")
                 return False, None
                 
+        except requests.exceptions.Timeout:
+            logger.error("❌ Таймаут при отправке")
+            return False, None
+        except requests.exceptions.ConnectionError:
+            logger.error("❌ Ошибка соединения")
+            return False, None
         except Exception as e:
-            logger.error(f"❌ Ошибка отправки: {e}")
+            logger.error(f"❌ Неизвестная ошибка: {e}")
             import traceback
             traceback.print_exc()
             return False, None
@@ -228,7 +283,6 @@ class Publisher:
     def publish_folder_with_tokens(self, user_id, folder_name, ad_text, metadata_text, image_tokens):
         """
         Публикует папку с уже загруженными токенами фото.
-        Сохраняет в pending ДО получения ID.
         """
         try:
             if self.STOP_FLAG.get(user_id, False):
