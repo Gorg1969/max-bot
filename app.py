@@ -1,4 +1,4 @@
-# app.py
+# app.py - исправленный импорт
 from flask import Flask, request, jsonify, render_template_string, send_file
 import requests
 import logging
@@ -10,8 +10,7 @@ import threading
 import time
 import base64
 from werkzeug.exceptions import ClientDisconnected
-from modules import Database, FileManager, Publisher, WebInterface
-from modules.report_generator import ReportGenerator
+from modules import Database, FileManager, Publisher, ReportGenerator  # ← Убрали WebInterface
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -33,7 +32,6 @@ db = Database()
 db.fix_publication_times()
 
 fm = FileManager(DATA_DIR)
-
 
 class APIClient:
     def __init__(self):
