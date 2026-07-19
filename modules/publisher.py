@@ -115,36 +115,23 @@ class Publisher:
                     
                     # 🔥 ИЩЕМ ID ВО ВСЕХ ВОЗМОЖНЫХ МЕСТАХ
                     if isinstance(result, dict):
-                        # Вариант 1: message.body.mid (основной)
+                        # Вариант 1: message.body.mid (основной) - используем ПОЛНЫЙ mid
                         if 'message' in result and isinstance(result['message'], dict):
                             msg = result['message']
                             if 'body' in msg and isinstance(msg['body'], dict):
                                 if 'mid' in msg['body']:
-                                    mid = msg['body']['mid']
-                                    # Убираем префикс "mid." если он есть
-                                    if mid.startswith('mid.'):
-                                        message_id = mid[4:]  # Убираем "mid."
-                                    else:
-                                        message_id = mid
+                                    message_id = msg['body']['mid']  # Сохраняем ПОЛНОСТЬЮ, включая "mid."
                                     logger.info(f"✅ Найден ID в message.body.mid: {message_id}")
                         
                         # Вариант 2: data.mid
                         if not message_id and 'data' in result and isinstance(result['data'], dict):
                             if 'mid' in result['data']:
-                                mid = result['data']['mid']
-                                if mid.startswith('mid.'):
-                                    message_id = mid[4:]
-                                else:
-                                    message_id = mid
+                                message_id = result['data']['mid']
                                 logger.info(f"✅ Найден ID в data.mid: {message_id}")
                         
                         # Вариант 3: прямые поля
                         if not message_id and 'mid' in result:
-                            mid = result['mid']
-                            if mid.startswith('mid.'):
-                                message_id = mid[4:]
-                            else:
-                                message_id = mid
+                            message_id = result['mid']
                             logger.info(f"✅ Найден ID в mid: {message_id}")
                         
                         # Вариант 4: message_id
@@ -162,7 +149,7 @@ class Publisher:
                         location = response.headers.get('Location', '')
                         if location:
                             logger.info(f"📍 Location: {location}")
-                            match = re.search(r'/([a-fA-F0-9]+)$', location)
+                            match = re.search(r'/([a-fA-F0-9.]+)$', location)
                             if match:
                                 message_id = match.group(1)
                                 logger.info(f"✅ Найден ID в Location: {message_id}")
@@ -266,24 +253,12 @@ class Publisher:
                         msg = result['message']
                         if 'body' in msg and isinstance(msg['body'], dict):
                             if 'mid' in msg['body']:
-                                mid = msg['body']['mid']
-                                if mid.startswith('mid.'):
-                                    message_id = mid[4:]
-                                else:
-                                    message_id = mid
+                                message_id = msg['body']['mid']
                     elif 'data' in result and isinstance(result['data'], dict):
                         if 'mid' in result['data']:
-                            mid = result['data']['mid']
-                            if mid.startswith('mid.'):
-                                message_id = mid[4:]
-                            else:
-                                message_id = mid
+                            message_id = result['data']['mid']
                     elif 'mid' in result:
-                        mid = result['mid']
-                        if mid.startswith('mid.'):
-                            message_id = mid[4:]
-                        else:
-                            message_id = mid
+                        message_id = result['mid']
                     
                     if message_id:
                         post_link = f"https://max.ru/c/{user_id}/{message_id}"
