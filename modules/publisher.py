@@ -22,8 +22,8 @@ class Publisher:
         self.FOLDER_TIMEOUT = 120
         self.STOP_FLAG = {}
         self.moscow_tz = pytz.timezone('Europe/Moscow')
-        # Словарь для хранения временных данных до получения вебхука
-        self.pending_messages = {}  # key: chat_id -> {user_id, folder_name, metadata}
+        # 🔥 Словарь для хранения временных данных ДО получения вебхука
+        self.pending_messages = {}  # key: chat_id -> {user_id, folder_name, metadata, timestamp}
 
     def extract_chat_id_from_folder(self, folder_name):
         """
@@ -56,8 +56,8 @@ class Publisher:
 
     def _send_and_get_id(self, chat_id, text, image_tokens):
         """
-        Отправляет сообщение в чат и получает ID.
-        Исправленная версия с улучшенным парсингом ответа.
+        Отправляет сообщение в чат.
+        ВОЗВРАЩАЕТ ID ТОЛЬКО ЕСЛИ ОН ЕСТЬ В ОТВЕТЕ.
         """
         try:
             if not self.api.token:
@@ -78,7 +78,6 @@ class Publisher:
             if attachments:
                 payload["attachments"] = attachments
             
-            # Правильно обрабатываем chat_id
             chat_id_str = str(chat_id)
             chat_id_for_api = chat_id_str if chat_id_str.startswith('-') else f"-{chat_id_str}"
             
@@ -96,7 +95,6 @@ class Publisher:
             )
             
             if response.status_code == 200:
-                # Улучшенный парсинг ответа
                 message_id = None
                 post_link = None
                 
@@ -104,45 +102,32 @@ class Publisher:
                     result = response.json()
                     logger.info(f"📨 Ответ API: {json.dumps(result, indent=2)}")
                     
-                    # Пробуем разные варианты получения ID
+                    # Пробуем найти ID в ответе
                     if isinstance(result, dict):
-                        # Вариант 1: data.id
                         if 'data' in result and isinstance(result['data'], dict):
                             if 'id' in result['data']:
                                 message_id = result['data']['id']
                             elif 'message_id' in result['data']:
                                 message_id = result['data']['message_id']
-                            elif 'post_id' in result['data']:
-                                message_id = result['data']['post_id']
                         
-                        # Вариант 2: прямой id
                         if not message_id and 'id' in result:
                             message_id = result['id']
                         
-                        # Вариант 3: message_id
                         if not message_id and 'message_id' in result:
                             message_id = result['message_id']
                         
-                        # Вариант 4: post_id
-                        if not message_id and 'post_id' in result:
-                            message_id = result['post_id']
-                        
-                        # Вариант 5: вложенный в message
-                        if not message_id and 'message' in result and isinstance(result['message'], dict):
-                            if 'id' in result['message']:
-                                message_id = result['message']['id']
-                
-                    # Формируем ссылку ТОЛЬКО с реальным ID
+                        if not message_id and 'mid' in result:
+                            message_id = result['mid']
+                    
+                    # Если ID найден - сразу формируем ссылку
                     if message_id:
-                        # Используем ОРИГИНАЛЬНЫЙ chat_id (без изменений)
                         post_link = f"https://max.ru/c/{chat_id_str}/{message_id}"
                         logger.info(f"🔗 Получен ID из API: {message_id}, ссылка: {post_link}")
                         return True, post_link
                     else:
-                        # НЕТ ID - НЕ создаем фейковую ссылку!
-                        logger.warning(f"⚠️ API не вернул ID для чата {chat_id_str}")
-                        # Возвращаем успех, но без ссылки
-                        return True, None
+                        # ID НЕ найден - сообщение отправлено, но ID будет позже
+                        logger.info(f"📨 Сообщение отправлено, но ID будет получен через вебхук")
+                        return True, None  # Успех, но без ID
                         
                 except Exception as e:
                     logger.error(f"❌ Ошибка парсинга ответа: {e}")
@@ -193,7 +178,6 @@ class Publisher:
             )
             
             if response.status_code == 200:
-                # Пробуем получить ID
                 message_id = None
                 post_link = None
                 try:
@@ -241,7 +225,10 @@ class Publisher:
         return metadata
 
     def publish_folder_with_tokens(self, user_id, folder_name, ad_text, metadata_text, image_tokens):
-        """Публикует папку с уже загруженными токенами фото"""
+        """
+        Публикует папку с уже загруженными токенами фото.
+        🔥 КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Сохраняет в pending ДО получения ID.
+        """
         try:
             if self.STOP_FLAG.get(user_id, False):
                 logger.info(f"⏹️ Пропускаем папку {folder_name} - остановка")
@@ -267,49 +254,47 @@ class Publisher:
             if not success:
                 return False, "Не удалось отправить сообщение"
             
-            # Сохраняем метаданные
+            # Парсим метаданные
             metadata = self._parse_metadata(metadata_text)
-            
-            # Сохраняем ссылку ТОЛЬКО если она есть
-            if post_link:
-                metadata['post_link'] = post_link
-                logger.info(f"🔗 Сохранена ссылка: {post_link}")
-            else:
-                # Если ссылки нет, сохраняем только chat_id
-                logger.warning(f"⚠️ Ссылка не получена для {folder_name}, сохраняем только chat_id")
-                metadata['post_link'] = ''  # Явно устанавливаем пустую строку
-            
-            # Сохраняем chat_id в метаданных
             metadata['chat_id'] = chat_id
             
-            # Время публикации
-            now = datetime.now(self.moscow_tz)
-            timestamp = now.timestamp()
-            
-            # Сохраняем в БД
-            self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, timestamp)
-            self.db.add_publication(user_id, folder_name, chat_id, status='pending')
-            
-            # Сохраняем в pending только если есть post_link
+            # 🔥 ЕСЛИ ССЫЛКА ПОЛУЧЕНА СРАЗУ
             if post_link:
+                metadata['post_link'] = post_link
+                logger.info(f"🔗 Ссылка получена сразу: {post_link}")
+                
+                # Сохраняем в БД с ссылкой
+                now = datetime.now(self.moscow_tz)
+                timestamp = now.timestamp()
+                self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, timestamp)
+                self.db.add_publication(user_id, folder_name, chat_id, status='success')
+                
+                logger.info(f"✅ Папка {folder_name} опубликована, ссылка сохранена")
+                return True, f"✅ Папка {folder_name} опубликована"
+            
+            # 🔥 ЕСЛИ ССЫЛКА НЕ ПОЛУЧЕНА - ЖДЕМ ВЕБХУК
+            else:
+                logger.info(f"⏳ Ссылка не получена сразу, ожидаем вебхук для {folder_name}")
+                
+                # Сохраняем в БД с пустой ссылкой (pending)
+                now = datetime.now(self.moscow_tz)
+                timestamp = now.timestamp()
+                self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, timestamp)
+                self.db.add_publication(user_id, folder_name, chat_id, status='pending')
+                
+                # 🔥 СОХРАНЯЕМ В PENDING ДЛЯ ВЕБХУКА
                 pending_key = f"{chat_id}_{folder_name}"
                 self.pending_messages[pending_key] = {
                     'user_id': user_id,
                     'folder_name': folder_name,
                     'chat_id': chat_id,
                     'metadata': metadata,
-                    'timestamp': timestamp,
-                    'post_link': post_link
+                    'timestamp': timestamp
                 }
-                logger.info(f"📝 Добавлено в pending: chat_id={chat_id}, folder={folder_name}")
-            else:
-                # Если ссылки нет, сразу обновляем статус
-                self.db.update_publication_status(user_id, folder_name, 'success', 
-                                                error="Ссылка не получена, но сообщение отправлено")
-                logger.warning(f"⚠️ Папка {folder_name} опубликована, но ссылка не получена")
-            
-            logger.info(f"✅ Папка {folder_name} опубликована в чат {chat_id}")
-            return True, f"✅ Папка {folder_name} опубликована в чат {chat_id}"
+                logger.info(f"📝 Добавлено в pending: {pending_key}")
+                logger.info(f"📊 Всего pending записей: {len(self.pending_messages)}")
+                
+                return True, f"✅ Папка {folder_name} опубликована, ожидаем подтверждение"
             
         except Exception as e:
             logger.error(f"❌ Ошибка публикации {folder_name}: {e}")
@@ -320,40 +305,51 @@ class Publisher:
     def handle_message_created(self, chat_id, message_id, user_id=None):
         """
         Обрабатывает событие message_created из вебхука.
-        Обновляет ссылку в БД, если найден pending.
+        🔥 ОБНОВЛЯЕТ ССЫЛКУ В БД.
         """
         try:
             if not chat_id or not message_id:
                 logger.warning(f"⚠️ Неполные данные: chat_id={chat_id}, message_id={message_id}")
                 return False
             
-            logger.info(f"📨 Обработка message_created: chat_id={chat_id}, message_id={message_id}")
+            chat_id_str = str(chat_id)
+            logger.info(f"📨 Обработка вебхука: chat_id={chat_id_str}, message_id={message_id}")
+            logger.info(f"📊 Всего pending записей: {len(self.pending_messages)}")
             
-            # Ищем соответствующую запись в pending_messages
+            # 🔥 ИЩЕМ В PENDING ПО chat_id
             found = False
-            for key, data in list(self.pending_messages.items()):
-                if data['chat_id'] == chat_id:
-                    folder_name = data['folder_name']
-                    user_id_from_pending = data['user_id']
-                    
-                    # Формируем полную ссылку с настоящим ID
-                    chat_id_str = str(chat_id)
-                    post_link = f"https://max.ru/c/{chat_id_str}/{message_id}"
-                    
-                    # ОБНОВЛЯЕМ ССЫЛКУ В БД
-                    self.db.update_post_link(user_id_from_pending, folder_name, post_link)
-                    self.db.update_publication_status(user_id_from_pending, folder_name, 'success')
-                    
-                    # Удаляем из pending
-                    del self.pending_messages[key]
-                    
-                    logger.info(f"✅ ОБНОВЛЕНО! Для {folder_name} получена ссылка: {post_link}")
+            matching_keys = []
+            
+            for key, data in self.pending_messages.items():
+                if data['chat_id'] == chat_id_str:
+                    matching_keys.append(key)
                     found = True
-                    break
+                    logger.info(f"✅ Найдена pending запись: {key}")
             
             if not found:
-                logger.info(f"ℹ️ Нет pending записи для chat_id {chat_id}, message_id {message_id}")
+                logger.warning(f"⚠️ Нет pending записи для chat_id {chat_id_str}")
+                logger.info(f"📊 Содержимое pending: {list(self.pending_messages.keys())}")
+                return False
             
+            # 🔥 ОБНОВЛЯЕМ ВСЕ НАЙДЕННЫЕ ЗАПИСИ
+            for key in matching_keys:
+                data = self.pending_messages[key]
+                folder_name = data['folder_name']
+                user_id_from_pending = data['user_id']
+                
+                # Формируем полную ссылку
+                post_link = f"https://max.ru/c/{chat_id_str}/{message_id}"
+                
+                # 🔥 ОБНОВЛЯЕМ ССЫЛКУ В БД
+                self.db.update_post_link(user_id_from_pending, folder_name, post_link)
+                self.db.update_publication_status(user_id_from_pending, folder_name, 'success')
+                
+                # Удаляем из pending
+                del self.pending_messages[key]
+                
+                logger.info(f"✅ ОБНОВЛЕНО! Для {folder_name} получена ссылка: {post_link}")
+            
+            logger.info(f"✅ Обработано {len(matching_keys)} записей")
             return True
             
         except Exception as e:
