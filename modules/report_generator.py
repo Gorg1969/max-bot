@@ -25,12 +25,11 @@ class ReportGenerator:
         self.db = db
         self._generating = {}
         self._lock = threading.Lock()
+        # Словарь для отслеживания времени скачивания отчетов
+        self._report_downloads = {}  # user_id -> timestamp
     
     def generate_report(self, user_id):
-        """
-        Генерирует отчет ТОЛЬКО по запросу пользователя.
-        НЕ ждет вебхуки - использует текущие данные из БД.
-        """
+        """Генерирует отчет"""
         with self._lock:
             if user_id in self._generating:
                 elapsed = time.time() - self._generating[user_id]
@@ -42,7 +41,6 @@ class ReportGenerator:
         try:
             user_folder = self.fm.get_user_folder(user_id)
             
-            # Получаем все публикации
             publications = self.db.get_publications(user_id)
             
             if not publications:
@@ -51,7 +49,6 @@ class ReportGenerator:
                     del self._generating[user_id]
                 return None
             
-            # Фильтруем успешные
             success_publications = [p for p in publications if p.get('status') == 'success']
             pending_publications = [p for p in publications if p.get('status') == 'pending']
             error_publications = [p for p in publications if p.get('status') != 'success' and p.get('status') != 'pending']
@@ -60,7 +57,6 @@ class ReportGenerator:
             
             if pending_publications:
                 logger.warning(f"⚠️ {len(pending_publications)} публикаций все еще в статусе 'pending'")
-                logger.info("💡 Подождите несколько минут или нажмите 'Обновить'")
             
             if not success_publications:
                 logger.warning(f"⚠️ Нет успешных публикаций для {user_id}")
@@ -83,7 +79,6 @@ class ReportGenerator:
                 post_link = metadata.get('post_link', '')
                 
                 if not post_link:
-                    logger.warning(f"⚠️ Для {folder_name} нет ссылки, хотя статус 'success'")
                     post_link = f"https://max.ru/c/{chat_id}" if chat_id else '⚠️ Ссылка не найдена'
                 
                 created_at = pub.get('created_at')
@@ -124,7 +119,6 @@ class ReportGenerator:
                 })
                 index += 1
             
-            # Добавляем pending в предупреждение
             if pending_publications:
                 success_data.append({})
                 success_data.append({
@@ -150,7 +144,6 @@ class ReportGenerator:
                 self._create_csv_report(report_path, success_data)
             
             logger.info(f"📊 Отчет создан: {report_path}")
-            self.cleanup_user_data(user_id, keep_report=True)
             
             with self._lock:
                 del self._generating[user_id]
@@ -165,6 +158,33 @@ class ReportGenerator:
                 if user_id in self._generating:
                     del self._generating[user_id]
             return None
+    
+    def mark_report_downloaded(self, user_id):
+        """Отмечает, что отчет был скачан"""
+        self._report_downloads[user_id] = time.time()
+        logger.info(f"📥 Отмечено скачивание отчета для {user_id}")
+        
+        # Запускаем таймер очистки через 30 секунд после скачивания
+        def cleanup_after_download():
+            time.sleep(30)  # 30 секунд после скачивания
+            logger.info(f"🧹 Автоочистка данных для {user_id} после скачивания отчета")
+            self.db.clear_user_data(user_id)
+            # Также очищаем файлы пользователя
+            user_folder = self.fm.get_user_folder(user_id)
+            if os.path.exists(user_folder):
+                for item in os.listdir(user_folder):
+                    item_path = os.path.join(user_folder, item)
+                    if os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+                    elif not item.startswith('Отчет_'):
+                        try:
+                            os.remove(item_path)
+                        except:
+                            pass
+            if user_id in self._report_downloads:
+                del self._report_downloads[user_id]
+        
+        threading.Thread(target=cleanup_after_download, daemon=True).start()
     
     def _create_excel_report(self, filepath, success_data):
         try:
@@ -190,7 +210,6 @@ class ReportGenerator:
             )
             link_font = Font(color="0563C1", underline="single", size=10, name="Calibri")
             
-            # Заголовок
             title = ws.cell(row=1, column=1, value="Отчет по публикациям")
             title.font = Font(bold=True, size=16, name="Calibri", color="1A1A2E")
             title.alignment = Alignment(horizontal="center", vertical="center")
@@ -277,7 +296,10 @@ class ReportGenerator:
                     if os.path.isdir(item_path):
                         shutil.rmtree(item_path)
                     elif not item.startswith('Отчет_'):
-                        os.remove(item_path)
+                        try:
+                            os.remove(item_path)
+                        except:
+                            pass
             else:
                 shutil.rmtree(user_folder)
                 os.makedirs(user_folder, exist_ok=True)
