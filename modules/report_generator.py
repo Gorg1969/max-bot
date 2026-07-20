@@ -28,6 +28,10 @@ class ReportGenerator:
         self._report_downloads = {}
 
     def generate_report(self, user_id):
+        """
+        Генерирует отчет ИЗ ТОГО, ЧТО УЖЕ ЕСТЬ в БД.
+        НЕ ЖДЕТ все публикации.
+        """
         with self._lock:
             if user_id in self._generating:
                 elapsed = time.time() - self._generating[user_id]
@@ -38,6 +42,8 @@ class ReportGenerator:
         
         try:
             user_folder = self.fm.get_user_folder(user_id)
+            
+            # 🔥 ПОЛУЧАЕМ ВСЕ ПУБЛИКАЦИИ (не только успешные)
             publications = self.db.get_publications(user_id)
             
             if not publications:
@@ -46,20 +52,18 @@ class ReportGenerator:
                     del self._generating[user_id]
                 return None
             
+            # Разделяем по статусам
             success_publications = [p for p in publications if p.get('status') == 'success']
             pending_publications = [p for p in publications if p.get('status') == 'pending']
             error_publications = [p for p in publications if p.get('status') != 'success' and p.get('status') != 'pending']
             
             logger.info(f"📊 Статистика: {len(success_publications)} успешных, {len(pending_publications)} ожидают, {len(error_publications)} с ошибками")
             
-            if pending_publications:
-                logger.warning(f"⚠️ {len(pending_publications)} публикаций все еще в статусе 'pending'")
-            
+            # 🔥 ЕСЛИ НЕТ УСПЕШНЫХ - СОЗДАЕМ ОТЧЕТ С ПРЕДУПРЕЖДЕНИЕМ
             if not success_publications:
                 logger.warning(f"⚠️ Нет успешных публикаций для {user_id}")
-                with self._lock:
-                    del self._generating[user_id]
-                return None
+                # Создаем отчет с сообщением
+                return self._create_empty_report(user_id, pending_publications, error_publications)
             
             moscow_tz = pytz.timezone('Europe/Moscow')
             success_data = []
@@ -72,13 +76,9 @@ class ReportGenerator:
                 folder_name = pub.get('folder_name', '')
                 chat_id = pub.get('group_id', '')
                 
-                # 🔥 ПОЛУЧАЕМ МЕТАДАННЫЕ
                 metadata = self.db.get_ad_metadata(user_id, folder_name)
                 
-                # 🔥 post_link - это ссылка на пост в MAX (от API)
                 post_link = metadata.get('post_link', '')
-                
-                # 🔥 source_link - это ссылка-источник из info.txt
                 source_link = metadata.get('Ссылка', '')
                 
                 if not post_link:
@@ -114,23 +114,37 @@ class ReportGenerator:
                     '№': index,
                     'Дата': display_date,
                     'Время публикации (МСК)': time_str,
-                    'Ссылка на пост': post_link,           # 🔥 Ссылка на пост в MAX
-                    'Ссылка (источник)': source_link,      # 🔥 Ссылка-источник из info.txt
+                    'Ссылка на пост': post_link,
+                    'Ссылка (источник)': source_link,
                     'Название': metadata.get('Название', ''),
                     'Код предложения': metadata.get('Код предложения', ''),
                     'Цена в лизинге': metadata.get('Цена в лизинге', ''),
                 })
                 index += 1
             
+            # 🔥 ДОБАВЛЯЕМ PENDING И ОШИБКИ В ОТЧЕТ
             if pending_publications:
                 success_data.append({})
                 success_data.append({
-                    '№': '⚠️',
+                    '№': '⏳',
                     'Дата': '',
                     'Время публикации (МСК)': '',
-                    'Ссылка на пост': f'⚠️ {len(pending_publications)} публикаций ожидают ссылки',
-                    'Ссылка (источник)': '',
-                    'Название': 'Подождите несколько минут',
+                    'Ссылка на пост': f'⏳ {len(pending_publications)} публикаций ожидают ссылки',
+                    'Ссылка (источник)': 'Подождите несколько минут',
+                    'Название': 'Обновите страницу и проверьте статус',
+                    'Код предложения': '',
+                    'Цена в лизинге': '',
+                })
+            
+            if error_publications:
+                success_data.append({})
+                success_data.append({
+                    '№': '❌',
+                    'Дата': '',
+                    'Время публикации (МСК)': '',
+                    'Ссылка на пост': f'❌ {len(error_publications)} публикаций с ошибками',
+                    'Ссылка (источник)': 'Проверьте логи',
+                    'Название': 'Попробуйте загрузить заново',
                     'Код предложения': '',
                     'Цена в лизинге': '',
                 })
@@ -160,6 +174,40 @@ class ReportGenerator:
             with self._lock:
                 if user_id in self._generating:
                     del self._generating[user_id]
+            return None
+
+    def _create_empty_report(self, user_id, pending_publications, error_publications):
+        """Создает отчет с сообщением, если нет успешных публикаций"""
+        try:
+            user_folder = self.fm.get_user_folder(user_id)
+            
+            empty_data = [{
+                '№': '⚠️',
+                'Дата': '',
+                'Время публикации (МСК)': '',
+                'Ссылка на пост': 'Нет успешных публикаций',
+                'Ссылка (источник)': '',
+                'Название': f'{len(pending_publications)} ожидают, {len(error_publications)} с ошибками',
+                'Код предложения': 'Попробуйте позже',
+                'Цена в лизинге': '',
+            }]
+            
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            report_filename = f"Отчет_{timestamp}.xlsx"
+            report_path = os.path.join(user_folder, report_filename)
+            
+            if EXCEL_AVAILABLE:
+                self._create_excel_report(report_path, empty_data)
+            else:
+                report_filename = f"Отчет_{timestamp}.csv"
+                report_path = os.path.join(user_folder, report_filename)
+                self._create_csv_report(report_path, empty_data)
+            
+            logger.info(f"📊 Пустой отчет создан: {report_path}")
+            return report_path
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания пустого отчета: {e}")
             return None
 
     def mark_report_downloaded(self, user_id):
@@ -231,11 +279,8 @@ class ReportGenerator:
                     
                     if key in ['№', 'Дата', 'Время публикации (МСК)']:
                         cell.alignment = text_alignment_center
-                    elif key in ['Ссылка на пост', 'Ссылка (источник)'] and value and not value.startswith('⚠️'):
+                    elif key in ['Ссылка на пост', 'Ссылка (источник)'] and value and not value.startswith(('⚠️', '⏳', '❌')):
                         cell.font = link_font
-                        cell.alignment = text_alignment_left
-                    elif key in ['Ссылка на пост', 'Ссылка (источник)'] and value.startswith('⚠️'):
-                        cell.font = Font(color="FF0000", size=10, name="Calibri")
                         cell.alignment = text_alignment_left
                     else:
                         cell.font = text_font
