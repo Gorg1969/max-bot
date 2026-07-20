@@ -388,7 +388,7 @@ UPLOAD_PAGE = """
             });
         };
 
-        document.addEventListener('DOMContentLoaded', function() {
+        document.addEventListener('ContentLoaded', function() {
             setTimeout(checkReportStatus, 3000);
         });
 
@@ -1210,9 +1210,9 @@ def webhook():
                         user_id,
                         "🏠 **Главное меню**\n\n"
                         "🌐 **Загрузить папку:**\n"
-                        f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
+                        f"🔗 http://91.227.68.137:3000/upload?user_id={user_id}\n\n"
                         "📊 **Получить отчет:**\n"
-                        f"🔗 https://maxbot.bothost.tech/report/{user_id}\n\n"
+                        f"🔗 http://91.227.68.137:3000/report/{user_id}\n\n"
                         "⏹ **Остановить публикацию:** `/stop`\n\n"
                         "📋 **Инструкция:**\n"
                         "1. Подготовьте папки с объявлениями\n"
@@ -1236,7 +1236,7 @@ def webhook():
                     report_path = report_gen.generate_report(user_id)
                     if report_path:
                         filename = os.path.basename(report_path)
-                        download_url = f"https://maxbot.bothost.tech/download_report/{user_id}/{filename}"
+                        download_url = f"http://91.227.68.137:3000/download_report/{user_id}/{filename}"
                         api.send_message(
                             user_id,
                             f"📊 **Отчет создан!**\n\n"
@@ -1325,7 +1325,8 @@ def setup_webhook():
     if not token:
         return "❌ Токен не найден", 400
     
-    webhook_url = "https://maxbot.bothost.tech/webhook"
+    # 🔥 НОВЫЙ АДРЕС ВЕБХУКА!
+    webhook_url = "http://91.227.68.137:3000/webhook"
     headers = {"Authorization": token, "Content-Type": "application/json"}
     
     try:
@@ -1604,7 +1605,8 @@ if __name__ == "__main__":
         logger.info(f"✅ Токен найден (первые 10): {TOKEN[:10]}...")
         
         try:
-            webhook_url = "https://maxbot.bothost.tech/webhook"
+            # 🔥 НОВЫЙ АДРЕС ВЕБХУКА ПРИ ЗАПУСКЕ!
+            webhook_url = "http://91.227.68.137:3000/webhook"
             headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
             payload = {
                 "url": webhook_url,
