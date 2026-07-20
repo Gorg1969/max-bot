@@ -773,48 +773,72 @@ UPLOAD_PAGE = """
             });
         }
 
+        // 🔥 ИСПРАВЛЕННАЯ ФУНКЦИЯ С ПОВТОРНЫМИ ПОПЫТКАМИ И ТАЙМАУТОМ
         async function uploadSinglePhoto(file, folderName) {
-            try {
-                let compressed;
+            const maxRetries = 3;
+            let attempt = 0;
+            
+            while (attempt < maxRetries) {
                 try {
-                    compressed = await compressImage(file, 600, 600, 0.5);
-                } catch (e) {
-                    addLog(`⚠️ Не удалось сжать ${file.name}, пробуем оригинал`);
-                    compressed = file;
+                    let compressed;
+                    try {
+                        compressed = await compressImage(file, 600, 600, 0.5);
+                    } catch (e) {
+                        addLog(`⚠️ Не удалось сжать ${file.name}, пробуем оригинал`);
+                        compressed = file;
+                    }
+                    
+                    addLog(`📤 Загрузка фото ${file.name} (${(compressed.size/1024).toFixed(0)}KB)...`);
+                    
+                    const formData = new FormData();
+                    formData.append('photo', compressed);
+                    formData.append('user_id', userId);
+                    formData.append('folder_name', folderName);
+                    
+                    // Добавляем таймаут для fetch
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 секунд
+                    
+                    const response = await fetch('/upload_photo', {
+                        method: 'POST',
+                        body: formData,
+                        signal: controller.signal
+                    });
+                    
+                    clearTimeout(timeoutId);
+                    
+                    const contentType = response.headers.get('content-type');
+                    if (!contentType || !contentType.includes('application/json')) {
+                        const text = await response.text();
+                        addLog(`❌ Сервер вернул не JSON: ${text.substring(0, 100)}`);
+                        throw new Error('Невалидный ответ сервера');
+                    }
+                    
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        addLog(`✅ Фото ${file.name} загружено`);
+                        return result.token;
+                    } else {
+                        throw new Error(result.message || 'Неизвестная ошибка');
+                    }
+                } catch (error) {
+                    attempt++;
+                    if (error.name === 'AbortError') {
+                        addLog(`⏰ Таймаут загрузки ${file.name}, попытка ${attempt}/${maxRetries}`);
+                    } else {
+                        addLog(`❌ Ошибка загрузки ${file.name}: ${error.message}, попытка ${attempt}/${maxRetries}`);
+                    }
+                    
+                    if (attempt >= maxRetries) {
+                        addLog(`❌ ${file.name}: не удалось загрузить после ${maxRetries} попыток`);
+                        return null;
+                    }
+                    
+                    await new Promise(r => setTimeout(r, 2000));
                 }
-                
-                addLog(`📤 Загрузка фото ${file.name} (${(compressed.size/1024).toFixed(0)}KB)...`);
-                
-                const formData = new FormData();
-                formData.append('photo', compressed);
-                formData.append('user_id', userId);
-                formData.append('folder_name', folderName);
-                
-                const response = await fetch('/upload_photo', {
-                    method: 'POST',
-                    body: formData
-                });
-                
-                const contentType = response.headers.get('content-type');
-                if (!contentType || !contentType.includes('application/json')) {
-                    const text = await response.text();
-                    addLog(`❌ Сервер вернул не JSON: ${text.substring(0, 100)}`);
-                    return null;
-                }
-                
-                const result = await response.json();
-                
-                if (result.success) {
-                    addLog(`✅ Фото ${file.name} загружено`);
-                    return result.token;
-                } else {
-                    addLog(`❌ Ошибка загрузки ${file.name}: ${result.message}`);
-                    return null;
-                }
-            } catch (error) {
-                addLog(`❌ Ошибка загрузки ${file.name}: ${error.message}`);
-                return null;
             }
+            return null;
         }
 
         async function prepareFolderData(folderName, files) {
@@ -839,6 +863,9 @@ UPLOAD_PAGE = """
                 .slice(0, 10);
             
             const imageTokens = [];
+            let uploadedPhotos = 0;
+            const totalPhotos = imageFiles.length;
+            
             for (const img of imageFiles) {
                 if (isStopped) {
                     break;
@@ -847,6 +874,9 @@ UPLOAD_PAGE = """
                 if (token) {
                     imageTokens.push(token);
                 }
+                uploadedPhotos++;
+                const photoPercent = Math.round((uploadedPhotos / totalPhotos) * 100);
+                addLog(`📸 Прогресс фото: ${uploadedPhotos}/${totalPhotos} (${photoPercent}%)`);
                 await new Promise(r => setTimeout(r, 300));
             }
             
@@ -1068,6 +1098,10 @@ def upload_photo():
         else:
             logger.error(f"❌ Не удалось загрузить фото {photo.filename}")
             return jsonify({'success': False, 'message': 'Не удалось загрузить фото'}), 500
+        
+    except ClientDisconnected as e:
+        logger.warning(f"⚠️ Клиент разорвал соединение при загрузке фото")
+        return jsonify({'success': False, 'message': 'Соединение прервано'}), 400
         
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки фото: {e}")
@@ -1544,6 +1578,12 @@ def diagnostic_last():
         response = jsonify({'success': False, 'message': str(e)})
         response.headers['Content-Type'] = 'application/json; charset=utf-8'
         return response, 500
+
+
+@app.errorhandler(ClientDisconnected)
+def handle_client_disconnected(e):
+    logger.warning(f"⚠️ Клиент разорвал соединение: {e}")
+    return jsonify({'success': False, 'message': 'Соединение прервано'}), 400
 
 
 @app.errorhandler(Exception)
