@@ -1,18 +1,17 @@
-# modules/publisher.py
+# modules/publisher.py - исправленная версия
 import logging
 import os
+import time
 import re
 import requests
 import threading
 import json
 import uuid
 import base64
-import time
 from datetime import datetime
 import pytz
 
 logger = logging.getLogger(__name__)
-
 
 class Publisher:
     def __init__(self, api, file_manager, db):
@@ -23,8 +22,6 @@ class Publisher:
         self.publish_threads = {}
         self.FOLDER_TIMEOUT = 120
         self.STOP_FLAG = {}
-        self.PAUSE_FLAG = {}
-        self.PAUSE_CONDITION = {}
         self.moscow_tz = pytz.timezone('Europe/Moscow')
         self.pending_messages = {}
         self.diagnostic_log = []
@@ -47,7 +44,6 @@ class Publisher:
         return None
 
     def _seq_to_max_id(self, seq: int) -> str:
-        """Преобразует числовой seq в короткий хэш MAX."""
         try:
             seq_bytes = int(seq).to_bytes(8, byteorder='big')
             encoded = base64.urlsafe_b64encode(seq_bytes).decode('utf-8').rstrip('=')
@@ -57,7 +53,6 @@ class Publisher:
             return str(seq)
 
     def _send_and_get_id(self, chat_id, text, image_tokens):
-        """Отправляет сообщение в чат и возвращает ссылку на пост."""
         try:
             if not self.api.token:
                 return False, None
@@ -232,18 +227,6 @@ class Publisher:
             if self.STOP_FLAG.get(user_id, False):
                 return False, "Остановка пользователем"
             
-            # Проверяем паузу
-            while self.PAUSE_FLAG.get(user_id, False):
-                logger.info(f"⏸️ Пауза для пользователя {user_id}, ожидаем...")
-                if self.PAUSE_CONDITION.get(user_id):
-                    with self.PAUSE_CONDITION[user_id]:
-                        self.PAUSE_CONDITION[user_id].wait()
-                else:
-                    time.sleep(0.5)
-                
-                if self.STOP_FLAG.get(user_id, False):
-                    return False, "Остановка пользователем"
-            
             chat_id = self.extract_chat_id_from_folder(folder_name)
             
             if not chat_id:
@@ -263,12 +246,16 @@ class Publisher:
             if not success:
                 return False, "Не удалось отправить сообщение"
             
-            if post_link and '/c/' in post_link:
+            if post_link:
                 metadata['post_link'] = post_link
                 logger.info(f"🔗 Ссылка на пост сохранена: {post_link}")
             else:
                 metadata['post_link'] = ''
-                logger.warning(f"⚠️ Ссылка на пост не получена или некорректна")
+                logger.warning(f"⚠️ Ссылка на пост не получена")
+            
+            if metadata['post_link'] and 'https://max.ru/u/' in metadata['post_link']:
+                logger.error(f"❌ ОШИБКА: В post_link попала ссылка-источник! Очищаем.")
+                metadata['post_link'] = ''
             
             now = datetime.now(self.moscow_tz)
             timestamp = now.timestamp()
@@ -277,8 +264,8 @@ class Publisher:
             
             logger.info(f"✅ Папка {folder_name} опубликована")
             
-            if metadata.get('post_link'):
-                return True, f"✅ Папка {folder_name} опубликована, ссылка: {metadata['post_link']}"
+            if post_link:
+                return True, f"✅ Папка {folder_name} опубликована, ссылка: {post_link}"
             else:
                 return True, f"✅ Папка {folder_name} опубликована"
             
@@ -288,22 +275,50 @@ class Publisher:
             traceback.print_exc()
             return False, str(e)
 
+    def handle_message_created(self, chat_id, message_id, user_id=None):
+        try:
+            if not chat_id or not message_id:
+                return False
+            
+            chat_id_str = str(chat_id)
+            logger.info(f"📨 ВЕБХУК: chat_id={chat_id_str}, message_id={message_id}")
+            logger.info(f"📊 Всего pending записей: {len(self.pending_messages)}")
+            
+            found = False
+            matching_keys = []
+            
+            for key, data in self.pending_messages.items():
+                if data['chat_id'] == chat_id_str:
+                    matching_keys.append(key)
+                    found = True
+            
+            if not found:
+                logger.warning(f"⚠️ Нет pending записи для chat_id {chat_id_str}")
+                return False
+            
+            for key in matching_keys:
+                data = self.pending_messages[key]
+                folder_name = data['folder_name']
+                user_id_from_pending = data['user_id']
+                
+                post_link = f"https://max.ru/c/{chat_id_str}/{message_id}"
+                
+                self.db.update_post_link(user_id_from_pending, folder_name, post_link)
+                self.db.update_publication_status(user_id_from_pending, folder_name, 'success')
+                
+                del self.pending_messages[key]
+                logger.info(f"✅ Обновлена ссылка для {folder_name}: {post_link}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки вебхука: {e}")
+            return False
+
     def publish_single_folder(self, user_id, folder_name, ad_text, metadata_text, images_data):
         try:
             if self.STOP_FLAG.get(user_id, False):
                 return False, "Остановка пользователем"
-            
-            # Проверяем паузу
-            while self.PAUSE_FLAG.get(user_id, False):
-                logger.info(f"⏸️ Пауза для пользователя {user_id}, ожидаем...")
-                if self.PAUSE_CONDITION.get(user_id):
-                    with self.PAUSE_CONDITION[user_id]:
-                        self.PAUSE_CONDITION[user_id].wait()
-                else:
-                    time.sleep(0.5)
-                
-                if self.STOP_FLAG.get(user_id, False):
-                    return False, "Остановка пользователем"
             
             image_tokens = []
             max_images = min(len(images_data), 10) if isinstance(images_data, list) else 0
@@ -311,16 +326,6 @@ class Publisher:
             for i in range(max_images):
                 if self.STOP_FLAG.get(user_id, False):
                     return False, "Остановка пользователем"
-                
-                while self.PAUSE_FLAG.get(user_id, False):
-                    if self.PAUSE_CONDITION.get(user_id):
-                        with self.PAUSE_CONDITION[user_id]:
-                            self.PAUSE_CONDITION[user_id].wait()
-                    else:
-                        time.sleep(0.5)
-                    
-                    if self.STOP_FLAG.get(user_id, False):
-                        return False, "Остановка пользователем"
                 
                 img_data = images_data[i]
                 if not img_data:
@@ -340,8 +345,7 @@ class Publisher:
                 token = self.api.upload_file(image_bytes, f"image_{i}.jpg")
                 if token:
                     image_tokens.append(token)
-                else:
-                    logger.warning(f"⚠️ Не удалось загрузить фото {i}")
+                    time.sleep(0.3)
             
             return self.publish_folder_with_tokens(
                 user_id, folder_name, ad_text, metadata_text, image_tokens
@@ -349,41 +353,11 @@ class Publisher:
             
         except Exception as e:
             logger.error(f"❌ Ошибка: {e}")
-            import traceback
-            traceback.print_exc()
             return False, str(e)
 
-    def pause(self, user_id):
-        """Ставит публикацию на паузу"""
-        logger.info(f"⏸️ Пауза для пользователя {user_id}")
-        self.PAUSE_FLAG[user_id] = True
-        if user_id not in self.PAUSE_CONDITION:
-            self.PAUSE_CONDITION[user_id] = threading.Condition()
-        return True
-
-    def resume(self, user_id):
-        """Возобновляет публикацию"""
-        logger.info(f"▶️ Возобновление для пользователя {user_id}")
-        self.PAUSE_FLAG[user_id] = False
-        if user_id in self.PAUSE_CONDITION:
-            with self.PAUSE_CONDITION[user_id]:
-                self.PAUSE_CONDITION[user_id].notify_all()
-        return True
-
-    def is_paused(self, user_id):
-        """Проверяет, на паузе ли публикация"""
-        return self.PAUSE_FLAG.get(user_id, False)
-
     def stop(self, user_id):
-        """Останавливает публикацию"""
         logger.info(f"⏹️ Остановка для пользователя {user_id}")
         self.STOP_FLAG[user_id] = True
-        self.PAUSE_FLAG[user_id] = False
-        
-        # Пробуждаем ожидающие потоки
-        if user_id in self.PAUSE_CONDITION:
-            with self.PAUSE_CONDITION[user_id]:
-                self.PAUSE_CONDITION[user_id].notify_all()
         
         try:
             user_folder = self.fm.get_user_folder(user_id)
@@ -394,11 +368,11 @@ class Publisher:
         except Exception as e:
             logger.error(f"❌ Ошибка удаления: {e}")
         
-        def reset_flags():
+        def reset_stop_flag():
             time.sleep(5)
             self.STOP_FLAG[user_id] = False
         
-        threading.Thread(target=reset_flags, daemon=True).start()
+        threading.Thread(target=reset_stop_flag, daemon=True).start()
         return True
 
     def is_running(self, user_id):
