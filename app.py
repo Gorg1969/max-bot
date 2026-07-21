@@ -154,7 +154,7 @@ class APIClient:
         self.token = TOKEN
         self.base_url = BASE_URL
         self.session = requests.Session()
-        self.session.verify = False  # ОТКЛЮЧАЕМ SSL
+        self.session.verify = False
 
     def send_message(self, user_id, text, attachments=None):
         if not self.token:
@@ -1315,6 +1315,7 @@ def publication_status():
 @app.route('/webhook', methods=['GET', 'POST'])
 @safe_response
 def webhook():
+    # GET запрос для проверки
     if request.method == 'GET':
         webhook_url = os.environ.get("WEBHOOK_URL", "https://maxbot.bothost.tech")
         return jsonify({
@@ -1325,35 +1326,60 @@ def webhook():
     
     try:
         data = request.get_json()
-        logger.info(f"📩 ПОЛУЧЕН ВЕБХУК: {data}")
+        logger.info(f"📩 ПОЛУЧЕН ВЕБХУК: {json.dumps(data, ensure_ascii=False, indent=2)[:500]}")
         
         if not data:
             return jsonify({"ok": True}), 200
         
         update_type = data.get('update_type')
         
+        # Обработка сообщений
         if update_type == 'message_created':
             logger.info("📨 Получено событие message_created")
             message = data.get('message', {})
-            recipient = message.get('recipient', {})
+            
+            # Получаем информацию об отправителе
             sender = message.get('sender', {})
+            recipient = message.get('recipient', {})
             body = message.get('body', {})
             
-            chat_id = recipient.get('chat_id')
+            # Получаем user_id из разных возможных мест
             user_id = sender.get('user_id')
+            if not user_id:
+                # Пробуем получить из других полей
+                user_id = message.get('user_id')
+            if not user_id:
+                user_id = recipient.get('user_id')
+            
+            # Получаем chat_id
+            chat_id = recipient.get('chat_id')
+            if chat_id is not None:
+                chat_id = str(chat_id)
+            
+            # Получаем текст сообщения
             text = body.get('text', '')
             message_id = body.get('mid')
             
-            if chat_id is not None:
-                chat_id = str(chat_id)
-            else:
-                logger.warning("⚠️ Вебхук без chat_id")
-                return jsonify({"ok": True}), 200
+            # Логируем все данные для отладки
+            logger.info(f"📨 user_id: {user_id}, chat_id: {chat_id}, text: {text[:100] if text else ''}")
+            logger.info(f"📨 Полные данные: sender={sender}, recipient={recipient}")
             
-            logger.info(f"📨 chat_id: {chat_id}, user_id: {user_id}, text: {text[:50] if text else ''}")
+            # Если нет user_id, но есть chat_id, пробуем получить user_id из сообщения
+            if not user_id and chat_id:
+                # Пробуем найти user_id в других полях
+                if 'user' in message:
+                    user_id = message.get('user', {}).get('id')
+                elif 'from' in message:
+                    user_id = message.get('from', {}).get('id')
             
+            # Если есть user_id и текст
             if user_id and text:
-                if text.strip() == '/start':
+                text_clean = text.strip()
+                logger.info(f"📨 Обработка команды: '{text_clean}' от user_id={user_id}")
+                
+                # Обработка команды /start
+                if text_clean == '/start':
+                    logger.info(f"🏠 Команда /start от {user_id}")
                     api.send_message(
                         user_id,
                         "🏠 **Главное меню**\n\n"
@@ -1369,15 +1395,18 @@ def webhook():
                     )
                     return jsonify({"ok": True}), 200
                 
-                if text.strip() == '/stop':
+                # Обработка команды /stop
+                if text_clean == '/stop':
+                    logger.info(f"⏹ Команда /stop от {user_id}")
                     if publication_state.get('is_running') or publication_state.get('is_paused'):
                         stop_publication()
                     publisher.stop(user_id)
                     api.send_message(user_id, "⏹️ **Публикация остановлена!**")
                     return jsonify({"ok": True}), 200
                 
-                if text.strip() == '/stat':
-                    logger.info(f"📊 Запрос статистики для {user_id}")
+                # Обработка команды /stat
+                if text_clean == '/stat':
+                    logger.info(f"📊 Команда /stat от {user_id}")
                     try:
                         stats = db.get_stats(user_id)
                         message = (
@@ -1393,7 +1422,9 @@ def webhook():
                         api.send_message(user_id, f"❌ Ошибка: {str(e)}")
                     return jsonify({"ok": True}), 200
                 
-                if text.strip() == '/report':
+                # Обработка команды /report
+                if text_clean == '/report':
+                    logger.info(f"📊 Команда /report от {user_id}")
                     api.send_message(user_id, "📊 Создаю отчет...")
                     report_path = report_gen.generate_report(user_id)
                     if report_path:
@@ -1403,7 +1434,39 @@ def webhook():
                     else:
                         api.send_message(user_id, "❌ Нет данных для отчета.")
                     return jsonify({"ok": True}), 200
+                
+                # Обработка команды /help
+                if text_clean == '/help':
+                    logger.info(f"❓ Команда /help от {user_id}")
+                    api.send_message(
+                        user_id,
+                        "📋 **Доступные команды:**\n\n"
+                        "/start - Главное меню\n"
+                        "/stop - Остановить публикацию\n"
+                        "/stat - Статистика\n"
+                        "/report - Создать отчет\n"
+                        "/help - Эта справка"
+                    )
+                    return jsonify({"ok": True}), 200
+                
+                # Если сообщение не является командой, но содержит текст
+                logger.info(f"ℹ️ Получено текстовое сообщение от {user_id}: {text_clean[:50]}")
+                
+                # Отправляем подсказку, если сообщение не распознано
+                if not text_clean.startswith('/'):
+                    api.send_message(
+                        user_id,
+                        f"ℹ️ Я получил ваше сообщение.\n\n"
+                        f"📋 Используйте команды:\n"
+                        f"/start - Главное меню\n"
+                        f"/stop - Остановить публикацию\n"
+                        f"/stat - Статистика\n"
+                        f"/report - Создать отчет\n"
+                        f"/help - Справка"
+                    )
+                    return jsonify({"ok": True}), 200
             
+            # Обработка если есть chat_id, но нет user_id
             if chat_id and message_id:
                 logger.info(f"📨 Получен ID: {message_id} для чата {chat_id}")
                 if user_id:
@@ -1412,17 +1475,21 @@ def webhook():
                     publisher.handle_message_created(chat_id, message_id)
                 return jsonify({"ok": True}), 200
             
+            # Если ничего не подошло
+            logger.warning(f"⚠️ Не удалось обработать сообщение: {data}")
             return jsonify({"ok": True}), 200
         
+        # Обработка других типов событий
         if update_type in ['bot_stopped', 'bot_started']:
             logger.info(f"📨 Получено событие {update_type}")
             return jsonify({"ok": True}), 200
         
+        # Неизвестный тип обновления
         logger.info(f"ℹ️ Вебхук с update_type: {update_type}")
         return jsonify({"ok": True}), 200
         
     except Exception as e:
-        logger.error(f"❌ ОШИБКА В ВЕБХУКЕ: {e}")
+        logger.error(f"❌ ОШИБКА В ВЕБХУКЕ: {e}", exc_info=True)
         return jsonify({"ok": False}), 500
 
 
