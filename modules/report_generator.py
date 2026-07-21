@@ -30,7 +30,7 @@ class ReportGenerator:
     def generate_report(self, user_id):
         """
         Генерирует отчет ИЗ ТОГО, ЧТО УЖЕ ЕСТЬ в БД.
-        НЕ ЖДЕТ все публикации.
+        НЕ ЖДЕТ все публикации. Работает в ЛЮБОЙ момент.
         """
         with self._lock:
             if user_id in self._generating:
@@ -43,7 +43,7 @@ class ReportGenerator:
         try:
             user_folder = self.fm.get_user_folder(user_id)
             
-            # ПОЛУЧАЕМ ВСЕ ПУБЛИКАЦИИ
+            # ПОЛУЧАЕМ ВСЕ ПУБЛИКАЦИИ из БД
             publications = self.db.get_publications(user_id)
             
             if not publications:
@@ -55,7 +55,7 @@ class ReportGenerator:
             # Разделяем по статусам
             success_publications = [p for p in publications if p.get('status') == 'success']
             pending_publications = [p for p in publications if p.get('status') == 'pending']
-            error_publications = [p for p in publications if p.get('status') != 'success' and p.get('status') != 'pending']
+            error_publications = [p for p in publications if p.get('status') not in ['success', 'pending']]
             
             logger.info(f"📊 Статистика: {len(success_publications)} успешных, {len(pending_publications)} ожидают, {len(error_publications)} с ошибками")
             
