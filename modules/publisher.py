@@ -7,6 +7,7 @@ import threading
 import json
 import uuid
 import base64
+import time
 from datetime import datetime
 import pytz
 
@@ -30,13 +31,16 @@ class Publisher:
         if not folder_name:
             return None
         
+        # Ищем chat_id в имени папки (формат: "1 -123456789" или "1 -1234567890")
         match = re.search(r'(-?\d{10,})', folder_name)
         if match:
             chat_id = match.group(1)
+            # Если chat_id не начинается с '-', добавляем
             if not chat_id.startswith('-') and len(chat_id) >= 10:
                 chat_id = f"-{chat_id}"
             return chat_id
         
+        # Альтернативный поиск
         match = re.search(r'(\d{10,})', folder_name)
         if match:
             return f"-{match.group(1)}"
@@ -92,7 +96,8 @@ class Publisher:
                     "Content-Type": "application/json"
                 },
                 json=payload,
-                timeout=60
+                timeout=60,
+                verify=False
             )
             
             logger.info(f"📨 СТАТУС ОТВЕТА: {response.status_code}")
@@ -102,7 +107,7 @@ class Publisher:
                     result = response.json()
                     logger.info(f"📨 ПОЛНЫЙ JSON ОТВЕТА: {json.dumps(result, indent=2, ensure_ascii=False)}")
                     
-                    # 🔥 ИЩЕМ SEQ
+                    # Ищем SEQ
                     seq = None
                     if isinstance(result, dict):
                         if 'message' in result and isinstance(result['message'], dict):
@@ -117,7 +122,6 @@ class Publisher:
                             logger.info(f"✅ Найден seq в корне: {seq}")
                     
                     if seq:
-                        # 🔥 КОНВЕРТИРУЕМ SEQ В КОРОТКИЙ ХЭШ MAX
                         encoded_id = self._seq_to_max_id(seq)
                         post_link = f"https://max.ru/c/{chat_id_str}/{encoded_id}"
                         logger.info(f"🔗 Ссылка на пост создана: {post_link}")
@@ -175,7 +179,8 @@ class Publisher:
                     "Content-Type": "application/json"
                 },
                 json=payload,
-                timeout=60
+                timeout=60,
+                verify=False
             )
             
             if response.status_code == 200:
@@ -354,9 +359,12 @@ class Publisher:
                 else:
                     image_bytes = img_data
                 
+                # Загружаем файл через API
                 token = self.api.upload_file(image_bytes, f"image_{i}.jpg")
                 if token:
                     image_tokens.append(token)
+                else:
+                    logger.warning(f"⚠️ Не удалось загрузить фото {i}")
             
             return self.publish_folder_with_tokens(
                 user_id, folder_name, ad_text, metadata_text, image_tokens
@@ -364,6 +372,8 @@ class Publisher:
             
         except Exception as e:
             logger.error(f"❌ Ошибка: {e}")
+            import traceback
+            traceback.print_exc()
             return False, str(e)
 
     def stop(self, user_id):
