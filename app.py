@@ -1,28 +1,44 @@
 # app.py
-from flask import Flask, request, jsonify, render_template_string, send_file
-import requests
-import logging
 import os
-import shutil
-import urllib3
-import json
-import threading
-import time
-import base64
-import signal
 import sys
-from werkzeug.exceptions import ClientDisconnected
+import time
+import json
+import base64
+import shutil
+import threading
+import signal
+import logging
+from datetime import datetime
+from functools import wraps
+from html import escape
+
+import requests
+import urllib3
+from flask import Flask, request, jsonify, render_template_string, send_file, abort
+from werkzeug.exceptions import ClientDisconnected, BadRequest
+from werkzeug.middleware.proxy_fix import ProxyFix
+
 from modules import Database, FileManager, Publisher, ReportGenerator
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# Безопасное отключение предупреждений только в продакшене
+if os.environ.get("ENVIRONMENT") == "production":
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+else:
+    # В разработке оставляем предупреждения
+    pass
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
+# ========== КОНФИГУРАЦИЯ ==========
 TOKEN = os.environ.get("MAX_TOKEN") or os.environ.get("MAX_BOT_TOKEN") or os.environ.get("TOKEN")
 BASE_URL = "https://platform-api2.max.ru"
 DATA_DIR = "/app/data"
@@ -30,37 +46,111 @@ DATA_DIR = "/app/data"
 if not TOKEN:
     logger.error("❌ ТОКЕН НЕ НАЙДЕН!")
 
+# ========== ИНИЦИАЛИЗАЦИЯ ==========
 db = Database()
 db.fix_publication_times()
 fm = FileManager(DATA_DIR)
 
-# ========== СОСТОЯНИЕ ПУБЛИКАЦИИ ==========
-publication_state = {
-    'is_running': False,
-    'is_paused': False,
-    'should_stop': False,
-    'current_index': 0,
-    'total_folders': 0,
-    'results': [],
-    'user_id': None,
-    'delay': 30,
-    'published_folders': [],
-    'failed_folders': [],
-}
+# ========== СОСТОЯНИЕ ПУБЛИКАЦИИ С ПЕРСИСТЕНТНОСТЬЮ ==========
+class PublicationState:
+    """Потокобезопасное состояние публикации с сохранением"""
+    
+    def __init__(self, state_file='/app/data/publication_state.json'):
+        self.state_file = state_file
+        self._lock = threading.RLock()
+        self._data = {
+            'is_running': False,
+            'is_paused': False,
+            'should_stop': False,
+            'current_index': 0,
+            'total_folders': 0,
+            'results': [],
+            'user_id': None,
+            'delay': 30,
+            'started_at': None,
+            'updated_at': None
+        }
+        self._load_state()
+    
+    def _load_state(self):
+        """Загружает состояние из файла"""
+        try:
+            if os.path.exists(self.state_file):
+                with open(self.state_file, 'r', encoding='utf-8') as f:
+                    saved = json.load(f)
+                    # Восстанавливаем только безопасные поля
+                    for key in ['is_running', 'is_paused', 'should_stop', 
+                               'current_index', 'total_folders', 'user_id', 'delay']:
+                        if key in saved:
+                            self._data[key] = saved[key]
+                    logger.info(f"📂 Состояние загружено: {self._data}")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось загрузить состояние: {e}")
+    
+    def _save_state(self):
+        """Сохраняет состояние в файл"""
+        try:
+            os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
+            with open(self.state_file, 'w', encoding='utf-8') as f:
+                json.dump(self._data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения состояния: {e}")
+    
+    def get(self, key, default=None):
+        with self._lock:
+            return self._data.get(key, default)
+    
+    def set(self, key, value):
+        with self._lock:
+            self._data[key] = value
+            self._data['updated_at'] = time.time()
+            self._save_state()
+    
+    def update(self, **kwargs):
+        with self._lock:
+            for key, value in kwargs.items():
+                if key in self._data:
+                    self._data[key] = value
+            self._data['updated_at'] = time.time()
+            self._save_state()
+    
+    def get_all(self):
+        with self._lock:
+            return self._data.copy()
+    
+    def reset(self):
+        with self._lock:
+            self._data = {
+                'is_running': False,
+                'is_paused': False,
+                'should_stop': False,
+                'current_index': 0,
+                'total_folders': 0,
+                'results': [],
+                'user_id': None,
+                'delay': 30,
+                'started_at': None,
+                'updated_at': time.time()
+            }
+            self._save_state()
+    
+    def add_result(self, folder, success, message):
+        with self._lock:
+            self._data['results'].append({
+                'folder': folder,
+                'success': success,
+                'message': message,
+                'timestamp': time.time()
+            })
+            # Ограничиваем количество результатов
+            if len(self._data['results']) > 1000:
+                self._data['results'] = self._data['results'][-500:]
+            self._save_state()
 
-@app.before_request
-def before_request():
-    request.start_time = time.time()
+# Глобальный экземпляр состояния
+publication_state = PublicationState()
 
-@app.after_request
-def after_request(response):
-    if hasattr(request, 'start_time'):
-        elapsed = time.time() - request.start_time
-        if elapsed > 25:
-            logger.warning(f"⚠️ Медленный запрос: {elapsed:.2f}с")
-    return response
-
-
+# ========== API КЛИЕНТ ==========
 class APIClient:
     def __init__(self):
         self.token = TOKEN
@@ -80,7 +170,7 @@ class APIClient:
                     params={"user_id": user_id},
                     json=payload,
                     timeout=30,
-                    verify=False
+                    verify=False if os.environ.get("ENVIRONMENT") == "production" else True
                 )
                 if response.status_code == 200:
                     return True
@@ -101,7 +191,7 @@ class APIClient:
                 headers={"Authorization": self.token, "Content-Type": "application/json"},
                 json=payload,
                 timeout=30,
-                verify=False
+                verify=False if os.environ.get("ENVIRONMENT") == "production" else True
             )
             return response.status_code == 200
         except Exception as e:
@@ -119,7 +209,7 @@ class APIClient:
                     headers={"Authorization": self.token},
                     params={"type": "image"},
                     timeout=30,
-                    verify=False
+                    verify=False if os.environ.get("ENVIRONMENT") == "production" else True
                 )
                 if response.status_code != 200:
                     logger.error(f"❌ Попытка {attempt+1}: {response.status_code}")
@@ -141,7 +231,7 @@ class APIClient:
                     upload_url,
                     files=files,
                     timeout=60,
-                    verify=False
+                    verify=False if os.environ.get("ENVIRONMENT") == "production" else True
                 )
                 if upload_response.status_code != 200:
                     logger.error(f"❌ Ошибка загрузки: {upload_response.status_code}")
@@ -179,15 +269,38 @@ api = APIClient()
 publisher = Publisher(api, fm, db)
 report_gen = ReportGenerator(fm, db)
 
-# ========== УПРОЩЁННАЯ HTML СТРАНИЦА ==========
+# ========== ДЕКОРАТОР БЕЗОПАСНОСТИ ==========
+def safe_response(f):
+    """Декоратор для безопасной обработки ответов"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        try:
+            return f(*args, **kwargs)
+        except ClientDisconnected:
+            return jsonify({'success': False, 'message': 'Соединение прервано'}), 400
+        except BadRequest as e:
+            logger.warning(f"⚠️ Bad request: {e}")
+            return jsonify({'success': False, 'message': 'Некорректный запрос'}), 400
+        except Exception as e:
+            logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
+            # В продакшене не показываем детали
+            if os.environ.get("ENVIRONMENT") == "production":
+                return jsonify({'success': False, 'message': 'Внутренняя ошибка сервера'}), 500
+            else:
+                return jsonify({'success': False, 'message': str(e)}), 500
+    return decorated_function
+
+# ========== HTML СТРАНИЦА ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Загрузка объявлений</title>
     <style>
-        body { font-family: Arial; max-width: 900px; margin: 30px auto; padding: 20px; background: #f0f2f5; }
+        * { box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; max-width: 900px; margin: 30px auto; padding: 20px; background: #f0f2f5; }
         .container { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
         h1 { color: #1a1a2e; margin-top: 0; }
         .drop-zone { border: 3px dashed #4a90d9; padding: 50px 20px; margin: 20px 0; border-radius: 12px; background: #f8f9fa; text-align: center; cursor: pointer; transition: 0.3s; }
@@ -452,7 +565,6 @@ UPLOAD_PAGE = """
     function displayFiles(files) {
         fileListContent.innerHTML = '';
         
-        // Группируем файлы по папкам
         const folders = new Map();
         files.forEach(f => {
             const relPath = f.webkitRelativePath || f.name;
@@ -695,7 +807,6 @@ UPLOAD_PAGE = """
         logDiv.textContent = '';
         addLog('🚀 Начинаем обработку...');
         
-        // Группируем файлы по папкам
         const folders = new Map();
         selectedFiles.forEach(file => {
             const relPath = file.webkitRelativePath || file.name;
@@ -717,7 +828,6 @@ UPLOAD_PAGE = """
         let errorCount = 0;
         
         for (let i = 0; i < folderNames.length; i++) {
-            // Проверяем состояние
             try {
                 const statusResponse = await fetch('/publication_status');
                 const statusData = await statusResponse.json();
@@ -777,7 +887,6 @@ UPLOAD_PAGE = """
                 addLog(`❌ ${folderName}: ошибка`);
             }
             
-            // Проверяем, не нужно ли остановиться
             try {
                 const statusResponse = await fetch('/publication_status');
                 const statusData = await statusResponse.json();
@@ -955,6 +1064,7 @@ UPLOAD_PAGE = """
 # ========== МАРШРУТЫ ==========
 
 @app.route('/', methods=['GET', 'POST'])
+@safe_response
 def index():
     if request.method == 'POST':
         return webhook()
@@ -962,11 +1072,13 @@ def index():
 
 
 @app.route('/upload', methods=['GET'])
+@safe_response
 def upload_page():
     return render_template_string(UPLOAD_PAGE)
 
 
 @app.route('/upload_photo', methods=['POST'])
+@safe_response
 def upload_photo():
     try:
         photo = request.files.get('photo')
@@ -977,6 +1089,13 @@ def upload_photo():
             return jsonify({'success': False, 'message': 'Нет фото'}), 400
         if not user_id:
             return jsonify({'success': False, 'message': 'Нет user_id'}), 400
+        
+        # Проверяем размер фото
+        photo.seek(0, os.SEEK_END)
+        size = photo.tell()
+        photo.seek(0)
+        if size > 20 * 1024 * 1024:  # 20MB
+            return jsonify({'success': False, 'message': 'Фото слишком большое'}), 400
         
         image_bytes = photo.read()
         logger.info(f"📸 Загрузка фото {photo.filename}, размер: {len(image_bytes)} байт")
@@ -992,13 +1111,12 @@ def upload_photo():
         return jsonify({'success': False, 'message': 'Соединение прервано'}), 400
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки фото: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
+        return jsonify({'success': False, 'message': 'Ошибка загрузки фото'}), 500
 
 
 @app.route('/publish_folder', methods=['POST'])
+@safe_response
 def publish_folder():
-    global publication_state
-    
     try:
         data = request.get_json()
         user_id = data.get('user_id')
@@ -1012,77 +1130,85 @@ def publish_folder():
         if publication_state.get('should_stop'):
             return jsonify({'success': False, 'message': 'Публикация остановлена'}), 409
         
-        if not publication_state['is_running']:
-            publication_state['is_running'] = True
-            publication_state['is_paused'] = False
-            publication_state['should_stop'] = False
-            publication_state['user_id'] = user_id
-            publication_state['delay'] = delay
-            publication_state['current_index'] = 0
-            publication_state['total_folders'] = 0
-            publication_state['results'] = []
+        # Запускаем публикацию в фоновом потоке, чтобы не блокировать запрос
+        def publish_in_background():
+            try:
+                # Проверяем состояние
+                if publication_state.get('should_stop'):
+                    return
+                
+                if not publication_state.get('is_running'):
+                    publication_state.update(
+                        is_running=True,
+                        is_paused=False,
+                        should_stop=False,
+                        user_id=user_id,
+                        delay=delay,
+                        current_index=0,
+                        started_at=time.time()
+                    )
+                
+                if publication_state.get('is_paused'):
+                    return
+                
+                if publication_state.get('should_stop'):
+                    return
+                
+                folder_name = folder_data.get('folderName')
+                ad_text = folder_data.get('adText')
+                metadata_text = folder_data.get('metadataText')
+                image_tokens = folder_data.get('imageTokens', [])
+                
+                logger.info(f"📦 Папка: {folder_name} от {user_id}, задержка: {delay}с")
+                
+                success, message = publisher.publish_folder_with_tokens(
+                    user_id, folder_name, ad_text, metadata_text, image_tokens
+                )
+                
+                publication_state.add_result(folder_name, success, message)
+                publication_state.set('current_index', publication_state.get('current_index', 0) + 1)
+                
+                if publication_state.get('should_stop'):
+                    logger.info(f"⏹ Остановка после папки {folder_name}")
+                    return
+                
+                if delay > 0 and success:
+                    logger.info(f"⏱️ Задержка {delay} сек")
+                    # Разбиваем задержку на интервалы для проверки остановки
+                    for _ in range(delay):
+                        if publication_state.get('should_stop') or publication_state.get('is_paused'):
+                            break
+                        time.sleep(1)
+                        
+            except Exception as e:
+                logger.error(f"❌ Ошибка в фоновой публикации: {e}")
         
-        if publication_state['is_paused']:
-            return jsonify({'success': False, 'message': 'Публикация на паузе'}), 409
+        # Запускаем в фоновом потоке
+        thread = threading.Thread(target=publish_in_background, daemon=True)
+        thread.start()
         
-        if publication_state.get('should_stop'):
-            return jsonify({'success': False, 'message': 'Публикация остановлена'}), 409
-        
-        folder_name = folder_data.get('folderName')
-        ad_text = folder_data.get('adText')
-        metadata_text = folder_data.get('metadataText')
-        image_tokens = folder_data.get('imageTokens', [])
-        
-        logger.info(f"📦 Папка: {folder_name} от {user_id}, задержка: {delay}с")
-        
-        success, message = publisher.publish_folder_with_tokens(
-            user_id, folder_name, ad_text, metadata_text, image_tokens
-        )
-        
-        publication_state['current_index'] += 1
-        publication_state['results'].append({
-            'folder': folder_name,
-            'success': success,
-            'message': message
+        return jsonify({
+            'success': True,
+            'message': 'Публикация запущена в фоне',
+            'folder': folder_data.get('folderName')
         })
-        
-        if publication_state.get('should_stop'):
-            logger.info(f"⏹ Остановка после папки {folder_name}")
-            return jsonify({
-                'success': success,
-                'message': f'Остановлено после {folder_name}',
-                'stopped': True
-            })
-        
-        if delay > 0 and success:
-            logger.info(f"⏱️ Задержка {delay} сек")
-            for _ in range(delay):
-                if publication_state.get('should_stop') or publication_state.get('is_paused'):
-                    break
-                time.sleep(1)
-        
-        if success:
-            return jsonify({'success': True, 'message': message})
-        else:
-            return jsonify({'success': False, 'message': message}), 500
         
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
+        return jsonify({'success': False, 'message': 'Ошибка публикации'}), 500
 
 
 @app.route('/pause_publication', methods=['POST'])
+@safe_response
 def pause_publication():
-    global publication_state
-    
-    if not publication_state['is_running']:
+    if not publication_state.get('is_running'):
         return jsonify({'success': False, 'message': 'Нет активной публикации'}), 400
     
-    if publication_state['is_paused']:
+    if publication_state.get('is_paused'):
         return jsonify({'success': False, 'message': 'Уже на паузе'}), 400
     
-    publication_state['is_paused'] = True
-    logger.info(f"⏸ ПАУЗА: публикация остановлена для {publication_state['user_id']}")
+    publication_state.set('is_paused', True)
+    logger.info(f"⏸ ПАУЗА: публикация остановлена для {publication_state.get('user_id')}")
     
     return jsonify({
         'success': True,
@@ -1093,18 +1219,17 @@ def pause_publication():
 
 
 @app.route('/resume_publication', methods=['POST'])
+@safe_response
 def resume_publication():
-    global publication_state
-    
-    if not publication_state['is_paused']:
+    if not publication_state.get('is_paused'):
         return jsonify({'success': False, 'message': 'Публикация не на паузе'}), 400
     
     if publication_state.get('should_stop'):
         return jsonify({'success': False, 'message': 'Публикация остановлена'}), 400
     
-    publication_state['is_paused'] = False
-    publication_state['is_running'] = True
-    logger.info(f"▶ ПРОДОЛЖЕНИЕ: публикация возобновлена для {publication_state['user_id']}")
+    publication_state.set('is_paused', False)
+    publication_state.set('is_running', True)
+    logger.info(f"▶ ПРОДОЛЖЕНИЕ: публикация возобновлена для {publication_state.get('user_id')}")
     
     return jsonify({
         'success': True,
@@ -1115,10 +1240,9 @@ def resume_publication():
 
 
 @app.route('/stop_publication', methods=['POST'])
+@safe_response
 def stop_publication():
-    global publication_state
-    
-    if not publication_state['is_running'] and not publication_state['is_paused']:
+    if not publication_state.get('is_running') and not publication_state.get('is_paused'):
         if publication_state.get('results'):
             user_id = publication_state.get('user_id')
             if user_id:
@@ -1135,9 +1259,9 @@ def stop_publication():
         return jsonify({'success': False, 'message': 'Нет активной публикации'}), 400
     
     user_id = publication_state.get('user_id')
-    publication_state['should_stop'] = True
-    publication_state['is_running'] = False
-    publication_state['is_paused'] = False
+    publication_state.set('should_stop', True)
+    publication_state.set('is_running', False)
+    publication_state.set('is_paused', False)
     
     logger.info(f"⏹ СТОП: публикация завершена для {user_id}")
     
@@ -1167,36 +1291,43 @@ def stop_publication():
         except Exception as e:
             logger.error(f"❌ Ошибка создания отчета: {e}")
     
+    results = publication_state.get('results', [])
     result = {
         'success': True,
         'message': '⏹ Публикация остановлена, отчёт создан',
         'report_url': report_url,
-        'processed': len(publication_state.get('results', [])),
-        'success_count': len([r for r in publication_state.get('results', []) if r.get('success')]),
-        'error_count': len([r for r in publication_state.get('results', []) if not r.get('success')])
+        'processed': len(results),
+        'success_count': len([r for r in results if r.get('success')]),
+        'error_count': len([r for r in results if not r.get('success')])
     }
     
-    publication_state['should_stop'] = False
+    # Не сбрасываем should_stop сразу, чтобы дать завершиться фоновым задачам
+    def reset_state():
+        time.sleep(10)
+        publication_state.set('should_stop', False)
+    
+    threading.Thread(target=reset_state, daemon=True).start()
     
     return jsonify(result)
 
 
 @app.route('/publication_status', methods=['GET'])
+@safe_response
 def publication_status():
-    global publication_state
-    
+    state = publication_state.get_all()
     return jsonify({
-        'is_running': publication_state['is_running'],
-        'is_paused': publication_state['is_paused'],
-        'should_stop': publication_state.get('should_stop', False),
-        'current_index': publication_state.get('current_index', 0),
-        'total_folders': publication_state.get('total_folders', 0),
-        'user_id': publication_state.get('user_id'),
-        'results_count': len(publication_state.get('results', []))
+        'is_running': state.get('is_running', False),
+        'is_paused': state.get('is_paused', False),
+        'should_stop': state.get('should_stop', False),
+        'current_index': state.get('current_index', 0),
+        'total_folders': state.get('total_folders', 0),
+        'user_id': state.get('user_id'),
+        'results_count': len(state.get('results', []))
     })
 
 
 @app.route('/webhook', methods=['GET', 'POST'])
+@safe_response
 def webhook():
     if request.method == 'GET':
         webhook_url = os.environ.get("WEBHOOK_URL", "https://maxbot.bothost.tech")
@@ -1227,10 +1358,14 @@ def webhook():
             text = body.get('text', '')
             message_id = body.get('mid')
             
+            # Проверяем наличие chat_id
             if chat_id is not None:
                 chat_id = str(chat_id)
+            else:
+                logger.warning("⚠️ Вебхук без chat_id")
+                return jsonify({"ok": True}), 200
             
-            logger.info(f"📨 chat_id: {chat_id}, user_id: {user_id}, text: {text}")
+            logger.info(f"📨 chat_id: {chat_id}, user_id: {user_id}, text: {text[:50] if text else ''}")
             
             if user_id and text:
                 if text.strip() == '/start':
@@ -1250,7 +1385,7 @@ def webhook():
                     return jsonify({"ok": True}), 200
                 
                 if text.strip() == '/stop':
-                    if publication_state['is_running'] or publication_state['is_paused']:
+                    if publication_state.get('is_running') or publication_state.get('is_paused'):
                         stop_publication()
                     publisher.stop(user_id)
                     api.send_message(user_id, "⏹️ **Публикация остановлена!**")
@@ -1307,6 +1442,7 @@ def webhook():
 
 
 @app.route('/setup_webhook', methods=['GET', 'POST'])
+@safe_response
 def setup_webhook():
     token = request.args.get('token') or TOKEN
     if not token:
@@ -1326,7 +1462,7 @@ def setup_webhook():
             headers=headers,
             json=payload,
             timeout=30,
-            verify=False
+            verify=False if os.environ.get("ENVIRONMENT") == "production" else True
         )
         
         if r.status_code == 200:
@@ -1342,13 +1478,16 @@ def setup_webhook():
 
 
 @app.route('/report/<int:user_id>')
+@safe_response
 def report_page(user_id):
     report_path = report_gen.generate_report(user_id)
     if not report_path:
         return "❌ Нет данных для отчета", 404
     
     filename = os.path.basename(report_path)
-    download_url = f"/download_report/{user_id}/{filename}"
+    # Экранируем filename для безопасности
+    safe_filename = escape(filename)
+    download_url = f"/download_report/{user_id}/{safe_filename}"
     
     return f"""
     <html>
@@ -1363,25 +1502,30 @@ def report_page(user_id):
 
 
 @app.route('/download_report/<int:user_id>/<path:filename>')
+@safe_response
 def download_report(user_id, filename):
     try:
+        # Проверяем, что filename безопасен
+        if '..' in filename or '/' in filename or '\\' in filename:
+            abort(400, "Некорректное имя файла")
+        
         user_folder = fm.get_user_folder(user_id)
         file_path = os.path.join(user_folder, filename)
         
         if not os.path.exists(file_path):
-            return "❌ Файл не найден", 404
+            abort(404, "Файл не найден")
         
         report_gen.mark_report_downloaded(user_id)
         return send_file(file_path, as_attachment=True, download_name=filename, conditional=True)
         
     except Exception as e:
         logger.error(f"❌ Ошибка скачивания: {e}")
-        return str(e), 500
+        abort(500, "Ошибка скачивания файла")
 
 
 @app.route('/health')
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "timestamp": time.time()}
 
 
 @app.route('/status')
@@ -1390,6 +1534,7 @@ def status():
 
 
 @app.route('/report_status/<int:user_id>')
+@safe_response
 def report_status(user_id):
     try:
         stats = db.get_stats(user_id)
@@ -1410,10 +1555,11 @@ def report_status(user_id):
         
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'Ошибка получения статуса'}), 500
 
 
 @app.route('/force_report/<int:user_id>', methods=['POST'])
+@safe_response
 def force_report(user_id):
     """Принудительное создание отчета для пользователя"""
     try:
@@ -1435,11 +1581,12 @@ def force_report(user_id):
         logger.error(f"❌ Ошибка создания отчета: {e}")
         return jsonify({
             'success': False,
-            'message': str(e)
+            'message': 'Ошибка создания отчета'
         }), 500
 
 
 @app.route('/force_update_links', methods=['POST'])
+@safe_response
 def force_update_links():
     try:
         data = request.get_json()
@@ -1464,10 +1611,11 @@ def force_update_links():
         
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
+        return jsonify({'success': False, 'message': 'Ошибка обновления'}), 500
 
 
 @app.route('/clear_user_data/<int:user_id>', methods=['POST'])
+@safe_response
 def clear_user_data(user_id):
     try:
         db.clear_user_data(user_id)
@@ -1477,10 +1625,11 @@ def clear_user_data(user_id):
         return jsonify({'success': True, 'message': f'Данные {user_id} очищены'})
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
+        return jsonify({'success': False, 'message': 'Ошибка очистки'}), 500
 
 
 @app.route('/auto_cleanup/<int:user_id>', methods=['POST'])
+@safe_response
 def auto_cleanup(user_id):
     try:
         def delayed_cleanup():
@@ -1500,20 +1649,18 @@ def auto_cleanup(user_id):
                             pass
             publisher.clear_diagnostic_log()
             publisher.pending_messages = {}
-            global publication_state
-            publication_state['is_running'] = False
-            publication_state['is_paused'] = False
-            publication_state['should_stop'] = False
+            publication_state.reset()
         
         threading.Thread(target=delayed_cleanup, daemon=True).start()
         return jsonify({'success': True, 'message': 'Автоочистка через 5 минут'})
         
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
+        return jsonify({'success': False, 'message': 'Ошибка'}), 500
 
 
 @app.route('/cleanup_temp', methods=['POST'])
+@safe_response
 def cleanup_temp():
     try:
         temp_dir = os.path.join(DATA_DIR, 'temp')
@@ -1523,10 +1670,11 @@ def cleanup_temp():
             return jsonify({'success': True, 'message': 'Временные файлы очищены'})
         return jsonify({'success': True, 'message': 'Нет временных файлов'})
     except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 500
+        return jsonify({'success': False, 'message': 'Ошибка очистки'}), 500
 
 
 @app.route('/webhook_test', methods=['GET'])
+@safe_response
 def webhook_test():
     return jsonify({
         'status': 'ok',
@@ -1536,6 +1684,7 @@ def webhook_test():
 
 
 @app.route('/diagnostic/<int:user_id>')
+@safe_response
 def diagnostic_log(user_id):
     try:
         diagnostic_data = publisher.get_diagnostic_log()
@@ -1545,16 +1694,18 @@ def diagnostic_log(user_id):
             'diagnostic': diagnostic_data[-50:]
         })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'Ошибка получения диагностики'}), 500
 
 
 @app.route('/diagnostic/clear', methods=['POST'])
+@safe_response
 def clear_diagnostic_log():
     publisher.clear_diagnostic_log()
     return jsonify({'success': True, 'message': 'Диагностика очищена'})
 
 
 @app.route('/diagnostic/last')
+@safe_response
 def diagnostic_last():
     diagnostic_data = publisher.get_diagnostic_log()
     return jsonify({
@@ -1569,14 +1720,30 @@ def handle_client_disconnected(e):
     return jsonify({'success': False, 'message': 'Соединение прервано'}), 400
 
 
+@app.errorhandler(404)
+def handle_not_found(e):
+    return jsonify({'success': False, 'message': 'Ресурс не найден'}), 404
+
+
+@app.errorhandler(405)
+def handle_method_not_allowed(e):
+    return jsonify({'success': False, 'message': 'Метод не разрешен'}), 405
+
+
 @app.errorhandler(Exception)
 def handle_all_exceptions(error):
     logger.error(f"Критическая ошибка: {error}", exc_info=True)
-    return jsonify({
-        'success': False,
-        'message': 'Внутренняя ошибка сервера',
-        'details': str(error)
-    }), 500
+    # В продакшене не показываем детали
+    if os.environ.get("ENVIRONMENT") == "production":
+        return jsonify({
+            'success': False,
+            'message': 'Внутренняя ошибка сервера'
+        }), 500
+    else:
+        return jsonify({
+            'success': False,
+            'message': str(error)
+        }), 500
 
 
 if __name__ == "__main__":
@@ -1604,7 +1771,7 @@ if __name__ == "__main__":
                 headers=headers,
                 json=payload,
                 timeout=10,
-                verify=False
+                verify=False if os.environ.get("ENVIRONMENT") == "production" else True
             )
             
             if r.status_code == 200:
