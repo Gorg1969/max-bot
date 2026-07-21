@@ -43,7 +43,7 @@ class ReportGenerator:
         try:
             user_folder = self.fm.get_user_folder(user_id)
             
-            # 🔥 ПОЛУЧАЕМ ВСЕ ПУБЛИКАЦИИ (не только успешные)
+            # ПОЛУЧАЕМ ВСЕ ПУБЛИКАЦИИ
             publications = self.db.get_publications(user_id)
             
             if not publications:
@@ -59,10 +59,9 @@ class ReportGenerator:
             
             logger.info(f"📊 Статистика: {len(success_publications)} успешных, {len(pending_publications)} ожидают, {len(error_publications)} с ошибками")
             
-            # 🔥 ЕСЛИ НЕТ УСПЕШНЫХ - СОЗДАЕМ ОТЧЕТ С ПРЕДУПРЕЖДЕНИЕМ
+            # ЕСЛИ НЕТ УСПЕШНЫХ - СОЗДАЕМ ОТЧЕТ С ПРЕДУПРЕЖДЕНИЕМ
             if not success_publications:
                 logger.warning(f"⚠️ Нет успешных публикаций для {user_id}")
-                # Создаем отчет с сообщением
                 return self._create_empty_report(user_id, pending_publications, error_publications)
             
             moscow_tz = pytz.timezone('Europe/Moscow')
@@ -122,7 +121,7 @@ class ReportGenerator:
                 })
                 index += 1
             
-            # 🔥 ДОБАВЛЯЕМ PENDING И ОШИБКИ В ОТЧЕТ
+            # ДОБАВЛЯЕМ PENDING И ОШИБКИ В ОТЧЕТ
             if pending_publications:
                 success_data.append({})
                 success_data.append({
