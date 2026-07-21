@@ -1064,7 +1064,6 @@ UPLOAD_PAGE = """
 
 # ========== МАРШРУТЫ ==========
 
-# 🔥 ГЛАВНОЕ ИЗМЕНЕНИЕ: Добавляем поддержку POST на корневой URL
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
@@ -1179,8 +1178,17 @@ def publish_folder():
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
-@app.route('/webhook', methods=['POST'])
+@app.route('/webhook', methods=['GET', 'POST'])  # ← Добавляем поддержку GET
 def webhook():
+    # Если это GET-запрос — просто проверяем доступность
+    if request.method == 'GET':
+        return jsonify({
+            "status": "ok",
+            "message": "Webhook is ready",
+            "webhook_url": os.environ.get("WEBHOOK_URL", "http://91.227.68.137:3000/webhook")
+        }), 200
+    
+    # Основной POST-обработчик
     try:
         data = request.get_json()
         logger.info(f"📩 ПОЛУЧЕН ВЕБХУК: {data}")
@@ -1209,6 +1217,7 @@ def webhook():
             logger.info(f"📨 chat_id: {chat_id}, user_id: {user_id}, text: {text}, mid: {message_id}")
             
             if user_id and text:
+                # Обработка команды /start
                 if text.strip() == '/start':
                     api.send_message(
                         user_id,
@@ -1225,6 +1234,7 @@ def webhook():
                     )
                     return jsonify({"ok": True}), 200
                 
+                # Обработка команды /stop
                 if text.strip() == '/stop':
                     publisher.stop(user_id)
                     api.send_message(
@@ -1235,6 +1245,28 @@ def webhook():
                     )
                     return jsonify({"ok": True}), 200
                 
+                # 🔥 ОБРАБОТКА КОМАНДЫ /stat
+                if text.strip() == '/stat':
+                    logger.info(f"📊 Запрос статистики для пользователя {user_id}")
+                    try:
+                        stats = db.get_stats(user_id)
+                        logger.info(f"📊 Получена статистика: {stats}")
+                        
+                        message = (
+                            "📊 **Статистика публикаций**\n\n"
+                            f"📦 Всего папок: {stats.get('total', 0)}\n"
+                            f"✅ Успешно: {stats.get('success', 0)}\n"
+                            f"⏳ В обработке: {stats.get('pending', 0)}\n"
+                            f"❌ Ошибок: {stats.get('errors', 0)}\n"
+                        )
+                        api.send_message(user_id, message)
+                        logger.info(f"✅ Статистика отправлена пользователю {user_id}")
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка получения статистики: {e}")
+                        api.send_message(user_id, f"❌ Ошибка получения статистики: {str(e)}")
+                    return jsonify({"ok": True}), 200
+                
+                # Обработка команды /report
                 if text.strip() == '/report':
                     api.send_message(user_id, "📊 Создаю отчет...")
                     report_path = report_gen.generate_report(user_id)
@@ -1248,19 +1280,6 @@ def webhook():
                         )
                     else:
                         api.send_message(user_id, "❌ Нет данных для отчета.")
-                    return jsonify({"ok": True}), 200
-                
-                # 🔥 ОБРАБОТКА КОМАНДЫ СТАТ
-                if text.strip() == '/stat':
-                    stats = db.get_stats(user_id)
-                    message = (
-                        "📊 **Статистика публикаций**\n\n"
-                        f"📦 Всего папок: {stats.get('total', 0)}\n"
-                        f"✅ Успешно: {stats.get('success', 0)}\n"
-                        f"⏳ В обработке: {stats.get('pending', 0)}\n"
-                        f"❌ Ошибок: {stats.get('errors', 0)}\n"
-                    )
-                    api.send_message(user_id, message)
                     return jsonify({"ok": True}), 200
             
             if chat_id and message_id:
@@ -1342,8 +1361,8 @@ def setup_webhook():
     if not token:
         return "❌ Токен не найден", 400
     
-    # 🔥 НОВЫЙ АДРЕС ВЕБХУКА!
-    webhook_url = "http://91.227.68.137:3000/webhook"
+    # 🔥 БЕРЁМ URL ИЗ ПЕРЕМЕННОЙ ИЛИ ИСПОЛЬЗУЕМ ЗНАЧЕНИЕ ПО УМОЛЧАНИЮ
+    webhook_url = os.environ.get("WEBHOOK_URL", "http://91.227.68.137:3000/webhook")
     headers = {"Authorization": token, "Content-Type": "application/json"}
     
     try:
@@ -1618,17 +1637,25 @@ def handle_all_exceptions(error):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
+    
     if TOKEN:
         logger.info(f"✅ Токен найден (первые 10): {TOKEN[:10]}...")
         
+        # 🔥 БЕРЁМ URL ИЗ ПЕРЕМЕННОЙ ОКРУЖЕНИЯ
+        webhook_url = os.environ.get(
+            "WEBHOOK_URL", 
+            "http://91.227.68.137:3000/webhook"  # значение по умолчанию
+        )
+        
+        logger.info(f"🔗 Настройка вебхука на: {webhook_url}")
+        
         try:
-            # 🔥 НОВЫЙ АДРЕС ВЕБХУКА ПРИ ЗАПУСКЕ!
-            webhook_url = "http://91.227.68.137:3000/webhook"
             headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
             payload = {
                 "url": webhook_url,
                 "update_types": ["message_created", "bot_started", "bot_stopped"]
             }
+            
             r = requests.post(
                 "https://platform-api2.max.ru/subscriptions",
                 headers=headers,
@@ -1636,11 +1663,14 @@ if __name__ == "__main__":
                 timeout=10,
                 verify=False
             )
+            
             if r.status_code == 200:
                 logger.info(f"✅ Вебхук настроен при запуске: {webhook_url}")
             else:
-                logger.warning(f"⚠️ Не удалось настроить вебхук: {r.status_code}")
+                logger.warning(f"⚠️ Не удалось настроить вебхук: {r.status_code} - {r.text}")
         except Exception as e:
             logger.warning(f"⚠️ Ошибка настройки вебхука при запуске: {e}")
+    else:
+        logger.error("❌ Токен не найден! Вебхук не настроен.")
     
     app.run(host='0.0.0.0', port=port, threaded=True)
