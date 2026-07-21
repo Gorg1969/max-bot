@@ -157,7 +157,7 @@ UPLOAD_PAGE = """
     <meta charset="UTF-8">
     <title>Загрузка объявлений</title>
     <style>
-        body { font-family: Arial; max-width: 800px; margin: 50px auto; padding: 20px; background: #f5f5f5; }
+        body { font-family: Arial; max-width: 900px; margin: 50px auto; padding: 20px; background: #f5f5f5; }
         .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
         h1 { color: #333; margin-top: 0; }
         .drop-zone { border: 2px dashed #007bff; padding: 40px; margin: 20px 0; border-radius: 10px; background: #f8f9fa; text-align: center; cursor: pointer; transition: all 0.3s; }
@@ -173,23 +173,52 @@ UPLOAD_PAGE = """
         .btn-success:hover { background: #218838; }
         .btn-danger { background: #dc3545; color: white; }
         .btn-danger:hover { background: #c82333; }
+        .btn-warning { background: #ffc107; color: #333; }
+        .btn-warning:hover { background: #e0a800; }
+        .btn-secondary { background: #6c757d; color: white; }
+        .btn-secondary:hover { background: #5a6268; }
+        .btn-info { background: #17a2b8; color: white; }
+        .btn-info:hover { background: #138496; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
         .status { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
         .status.success { background: #d4edda; color: #155724; display: block; border-left: 4px solid #28a745; }
         .status.error { background: #f8d7da; color: #721c24; display: block; border-left: 4px solid #dc3545; }
         .status.info { background: #d1ecf1; color: #0c5460; display: block; border-left: 4px solid #17a2b8; }
         .status.warning { background: #fff3cd; color: #856404; display: block; border-left: 4px solid #ffc107; }
+        .status.paused { background: #e2e3e5; color: #383d41; display: block; border-left: 4px solid #6c757d; }
         .file-list { text-align: left; margin: 20px 0; padding: 0; list-style: none; }
         .file-list li { background: #f8f9fa; padding: 10px 15px; margin: 5px 0; border-radius: 5px; border-left: 3px solid #007bff; display: flex; justify-content: space-between; align-items: center; }
         .file-list li .count { background: #007bff; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
+        .file-list li.done { border-left-color: #28a745; background: #f0fff4; }
+        .file-list li.done .count { background: #28a745; }
+        .file-list li.error { border-left-color: #dc3545; background: #fff5f5; }
+        .file-list li.error .count { background: #dc3545; }
+        .file-list li.paused { border-left-color: #ffc107; background: #fffbf0; }
+        .file-list li.paused .count { background: #ffc107; color: #333; }
+        .file-list li .status-badge { font-size: 12px; padding: 2px 8px; border-radius: 12px; }
+        .file-list li .status-badge.done { background: #28a745; color: white; }
+        .file-list li .status-badge.error { background: #dc3545; color: white; }
+        .file-list li .status-badge.pending { background: #ffc107; color: #333; }
+        .file-list li .status-badge.paused { background: #6c757d; color: white; }
         .progress-bar { width: 100%; height: 25px; background: #e9ecef; border-radius: 10px; overflow: hidden; margin: 10px 0; display: none; }
         .progress-bar .progress { height: 100%; background: linear-gradient(90deg, #28a745, #20c997); transition: width 0.3s; width: 0%; display: flex; align-items: center; justify-content: center; color: white; font-size: 12px; font-weight: bold; }
+        .progress-bar.paused .progress { background: linear-gradient(90deg, #6c757d, #adb5bd); }
         .instructions { background: #fff3cd; padding: 15px 20px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107; }
         .instructions code { background: #f8f9fa; padding: 2px 8px; border-radius: 3px; font-size: 14px; color: #d63384; }
         #log { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; font-family: 'Courier New', monospace; font-size: 12px; max-height: 300px; overflow-y: auto; margin: 20px 0; display: none; white-space: pre-wrap; line-height: 1.5; }
         .button-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px; }
+        .control-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px; padding: 15px; background: #f8f9fa; border-radius: 10px; border: 1px solid #dee2e6; }
         .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
         .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; }
         .report-section { margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 10px; border: 1px solid #dee2e6; text-align: center; }
+        .stats { display: flex; gap: 20px; justify-content: center; margin: 15px 0; flex-wrap: wrap; }
+        .stats .stat-item { background: white; padding: 10px 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .stats .stat-item .number { font-size: 24px; font-weight: bold; }
+        .stats .stat-item .label { font-size: 12px; color: #666; }
+        .stats .stat-item.success .number { color: #28a745; }
+        .stats .stat-item.error .number { color: #dc3545; }
+        .stats .stat-item.pending .number { color: #ffc107; }
+        .stats .stat-item.total .number { color: #007bff; }
     </style>
 </head>
 <body>
@@ -218,9 +247,20 @@ UPLOAD_PAGE = """
         <div id="fileList" style="display:none;">
             <div class="selected-info" id="selectedInfo"></div>
             <ul class="file-list" id="fileListContent"></ul>
-            <div class="button-group">
-                <button class="btn btn-success" onclick="uploadFolder()">🚀 Загрузить</button>
-                <button class="btn btn-danger" onclick="clearFiles()">🗑️ Очистить</button>
+            
+            <div class="stats" id="stats" style="display:none;">
+                <div class="stat-item total"><span class="number" id="statTotal">0</span><br><span class="label">Всего</span></div>
+                <div class="stat-item success"><span class="number" id="statSuccess">0</span><br><span class="label">✅ Успешно</span></div>
+                <div class="stat-item pending"><span class="number" id="statPending">0</span><br><span class="label">⏳ Ожидают</span></div>
+                <div class="stat-item error"><span class="number" id="statError">0</span><br><span class="label">❌ Ошибки</span></div>
+            </div>
+            
+            <div class="control-group">
+                <button class="btn btn-success" id="btnStart" onclick="startPublish()">🚀 Старт</button>
+                <button class="btn btn-warning" id="btnPause" onclick="togglePause()" disabled>⏸️ Пауза</button>
+                <button class="btn btn-danger" id="btnStop" onclick="stopPublish()" disabled>⏹️ Стоп</button>
+                <button class="btn btn-secondary" onclick="clearFiles()">🗑️ Очистить</button>
+                <button class="btn btn-info" onclick="getReport()">📊 Отчет</button>
             </div>
         </div>
         
@@ -233,7 +273,7 @@ UPLOAD_PAGE = """
         
         <div class="report-section">
             <button class="btn btn-primary" onclick="getReport()">📊 Скачать отчет</button>
-            <p style="margin-top: 10px; color: #666; font-size: 14px;">После публикации всех папок</p>
+            <p style="margin-top: 10px; color: #666; font-size: 14px;">Отчет создается в любое время на основе уже опубликованных папок</p>
         </div>
         
         <div class="footer">⚡ MAX Bot | Загрузка объявлений</div>
@@ -244,7 +284,13 @@ UPLOAD_PAGE = """
         const userId = urlParams.get('user_id') || 151296248;
         
         let selectedFiles = [];
-        let isProcessing = false;
+        let isPublishing = false;
+        let isPaused = false;
+        let isStopped = false;
+        let currentIndex = 0;
+        let folderResults = [];
+        let totalFolders = 0;
+        let pollInterval = null;
         
         const dropZone = document.getElementById('dropZone');
         const folderInput = document.getElementById('folderInput');
@@ -255,12 +301,21 @@ UPLOAD_PAGE = """
         const logDiv = document.getElementById('log');
         const progressBar = document.getElementById('progressBar');
         const progress = document.getElementById('progress');
+        const statsDiv = document.getElementById('stats');
+        
+        const btnStart = document.getElementById('btnStart');
+        const btnPause = document.getElementById('btnPause');
+        const btnStop = document.getElementById('btnStop');
 
         dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
         dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('dragover'); });
         dropZone.addEventListener('drop', (e) => {
             e.preventDefault();
             dropZone.classList.remove('dragover');
+            if (isPublishing) {
+                showStatus('warning', '⚠️ Сначала остановите или завершите публикацию');
+                return;
+            }
             const items = e.dataTransfer.items;
             const files = [];
             for (let item of items) {
@@ -278,6 +333,10 @@ UPLOAD_PAGE = """
         });
 
         folderInput.addEventListener('change', (e) => {
+            if (isPublishing) {
+                showStatus('warning', '⚠️ Сначала остановите или завершите публикацию');
+                return;
+            }
             const files = Array.from(e.target.files);
             if (files.length > 0) {
                 selectedFiles = files;
@@ -303,43 +362,121 @@ UPLOAD_PAGE = """
 
         function displayFiles(files) {
             fileListContent.innerHTML = '';
-            const folders = new Set();
-            const fileCount = {};
+            const folders = new Map();
             
             files.forEach(f => {
                 const parts = f.webkitRelativePath.split('/');
                 if (parts.length >= 2) {
                     const folder = parts[0] + '/' + parts[1];
-                    folders.add(folder);
-                    if (!fileCount[folder]) fileCount[folder] = 0;
-                    fileCount[folder]++;
+                    if (!folders.has(folder)) {
+                        folders.set(folder, { files: [], count: 0 });
+                    }
+                    folders.get(folder).files.push(f);
+                    folders.get(folder).count++;
                 }
             });
             
-            const sortedFolders = Array.from(folders).sort();
+            const sortedFolders = Array.from(folders.keys()).sort();
+            totalFolders = sortedFolders.length;
+            folderResults = sortedFolders.map(name => ({ name, status: 'pending' }));
             
-            sortedFolders.forEach(folder => {
+            sortedFolders.forEach((folder, index) => {
+                const data = folders.get(folder);
                 const li = document.createElement('li');
-                const count = fileCount[folder] || 0;
+                li.id = 'folder-' + index;
                 const displayName = folder.includes('/') ? folder.split('/')[1] : folder;
-                li.innerHTML = `<span>📁 <strong>${displayName}</strong></span><span class="count">${count} файлов</span>`;
+                li.innerHTML = `
+                    <span>📁 <strong>${displayName}</strong></span>
+                    <span>
+                        <span class="count">${data.count} файлов</span>
+                        <span class="status-badge pending" id="badge-${index}">⏳ ожидает</span>
+                    </span>
+                `;
                 fileListContent.appendChild(li);
             });
             
             selectedInfo.textContent = `✅ Выбрано ${sortedFolders.length} папок, всего ${files.length} файлов`;
             fileList.style.display = 'block';
-            showStatus('info', '📦 Нажмите "Загрузить" для отправки');
+            statsDiv.style.display = 'flex';
+            updateStats();
+            showStatus('info', '📦 Нажмите "Старт" для начала публикации');
+            
+            btnStart.disabled = false;
+            btnPause.disabled = true;
+            btnStop.disabled = true;
+        }
+
+        function updateStats() {
+            const total = folderResults.length;
+            const success = folderResults.filter(r => r.status === 'success').length;
+            const errors = folderResults.filter(r => r.status === 'error').length;
+            const pending = folderResults.filter(r => r.status === 'pending' || r.status === 'processing').length;
+            
+            document.getElementById('statTotal').textContent = total;
+            document.getElementById('statSuccess').textContent = success;
+            document.getElementById('statError').textContent = errors;
+            document.getElementById('statPending').textContent = pending;
+        }
+
+        function updateFolderStatus(index, status, message) {
+            const badge = document.getElementById('badge-' + index);
+            const li = document.getElementById('folder-' + index);
+            if (!badge || !li) return;
+            
+            li.className = '';
+            if (status === 'success') {
+                li.classList.add('done');
+                badge.className = 'status-badge done';
+                badge.textContent = '✅ готово';
+            } else if (status === 'error') {
+                li.classList.add('error');
+                badge.className = 'status-badge error';
+                badge.textContent = '❌ ' + (message || 'ошибка');
+            } else if (status === 'processing') {
+                badge.className = 'status-badge pending';
+                badge.textContent = '⏳ публикуется...';
+            } else if (status === 'paused') {
+                li.classList.add('paused');
+                badge.className = 'status-badge paused';
+                badge.textContent = '⏸️ на паузе';
+            } else {
+                badge.className = 'status-badge pending';
+                badge.textContent = '⏳ ожидает';
+            }
+            
+            if (status !== 'paused') {
+                folderResults[index].status = status;
+            }
+            updateStats();
         }
 
         function clearFiles() {
+            if (isPublishing) {
+                showStatus('warning', '⚠️ Сначала остановите публикацию');
+                return;
+            }
             selectedFiles = [];
             fileList.style.display = 'none';
+            statsDiv.style.display = 'none';
             statusDiv.style.display = 'none';
             progressBar.style.display = 'none';
+            progressBar.className = 'progress-bar';
             logDiv.style.display = 'none';
             progress.style.width = '0%';
             progress.textContent = '0%';
             folderInput.value = '';
+            folderResults = [];
+            currentIndex = 0;
+            isPaused = false;
+            isStopped = false;
+            btnStart.disabled = true;
+            btnPause.disabled = true;
+            btnStop.disabled = true;
+            btnPause.textContent = '⏸️ Пауза';
+            if (pollInterval) {
+                clearInterval(pollInterval);
+                pollInterval = null;
+            }
         }
 
         function addLog(message) {
@@ -377,7 +514,7 @@ UPLOAD_PAGE = """
             
             const imageFiles = files
                 .filter(f => f.type && f.type.startsWith('image/'))
-                .slice(0, 3);
+                .slice(0, 10);
             
             const images = [];
             for (const img of imageFiles) {
@@ -388,7 +525,6 @@ UPLOAD_PAGE = """
                         data: Array.from(new Uint8Array(arrayBuffer)),
                         type: img.type || 'image/jpeg'
                     });
-                    addLog(`✅ Фото ${img.name} преобразовано`);
                 } catch (e) {
                     addLog(`⚠️ Ошибка чтения ${img.name}: ${e.message}`);
                 }
@@ -403,26 +539,7 @@ UPLOAD_PAGE = """
             };
         }
 
-        async function uploadFolder() {
-            if (selectedFiles.length === 0) {
-                showStatus('error', '❌ Выберите папку для загрузки');
-                return;
-            }
-            
-            if (isProcessing) {
-                addLog('⚠️ Обработка уже выполняется, подождите...');
-                return;
-            }
-            
-            isProcessing = true;
-            
-            showStatus('info', '⏳ Подготовка данных...');
-            progressBar.style.display = 'block';
-            progress.style.width = '0%';
-            progress.textContent = '0%';
-            logDiv.textContent = '';
-            addLog('🚀 Начинаем обработку...');
-            
+        function getFolders() {
             const folders = {};
             selectedFiles.forEach(file => {
                 const pathParts = file.webkitRelativePath.split('/');
@@ -434,38 +551,103 @@ UPLOAD_PAGE = """
                     folders[folderName].push(file);
                 }
             });
+            return folders;
+        }
+
+        async function startPublish() {
+            if (selectedFiles.length === 0) {
+                showStatus('error', '❌ Выберите папку для загрузки');
+                return;
+            }
             
+            if (isPublishing) {
+                addLog('⚠️ Публикация уже выполняется');
+                return;
+            }
+            
+            // Если была пауза, возобновляем
+            if (isPaused) {
+                resumePublish();
+                return;
+            }
+            
+            // Новая публикация
+            isPublishing = true;
+            isPaused = false;
+            isStopped = false;
+            currentIndex = 0;
+            
+            // Сбрасываем статусы
+            folderResults.forEach((r, i) => {
+                r.status = 'pending';
+                updateFolderStatus(i, 'pending');
+            });
+            
+            btnStart.disabled = true;
+            btnPause.disabled = false;
+            btnStop.disabled = false;
+            btnStart.textContent = '⏳ Идет...';
+            
+            showStatus('info', '⏳ Начинаем публикацию...');
+            progressBar.style.display = 'block';
+            progressBar.className = 'progress-bar';
+            progress.style.width = '0%';
+            progress.textContent = '0%';
+            logDiv.textContent = '';
+            addLog('🚀 Начинаем публикацию...');
+            
+            const folders = getFolders();
             const folderNames = Object.keys(folders);
-            const totalFolders = folderNames.length;
+            totalFolders = folderNames.length;
             
             addLog(`📁 Найдено ${totalFolders} папок`);
-            showStatus('info', `⏳ Подготовка 0/${totalFolders} папок...`);
             
-            let uploadedFolders = 0;
-            let failedFolders = 0;
-            const results = [];
-            
-            for (let i = 0; i < folderNames.length; i++) {
-                const folderName = folderNames[i];
+            // Запускаем процесс
+            await publishNext(folders, folderNames);
+        }
+
+        async function publishNext(folders, folderNames) {
+            while (currentIndex < folderNames.length) {
+                // Проверяем стоп
+                if (isStopped) {
+                    addLog('⏹️ Публикация остановлена пользователем');
+                    showStatus('warning', '⏹️ Публикация остановлена');
+                    finishPublish();
+                    return;
+                }
+                
+                // Проверяем паузу
+                if (isPaused) {
+                    addLog('⏸️ Публикация на паузе');
+                    showStatus('paused', '⏸️ Публикация на паузе. Нажмите "Старт" для продолжения');
+                    progressBar.className = 'progress-bar paused';
+                    btnStart.disabled = false;
+                    btnStart.textContent = '▶️ Продолжить';
+                    btnPause.disabled = true;
+                    return;
+                }
+                
+                const folderName = folderNames[currentIndex];
                 const files = folders[folderName];
                 
-                const percent = Math.round((i / totalFolders) * 100);
+                const percent = Math.round((currentIndex / totalFolders) * 100);
                 progress.style.width = percent + '%';
-                progress.textContent = `${i}/${totalFolders}`;
-                showStatus('info', `⏳ Подготовка ${i+1}/${totalFolders}: ${folderName}`);
+                progress.textContent = `${currentIndex}/${totalFolders}`;
+                showStatus('info', `⏳ Публикация ${currentIndex+1}/${totalFolders}: ${folderName}`);
+                
+                updateFolderStatus(currentIndex, 'processing');
+                addLog(`📤 ${currentIndex+1}/${totalFolders}: ${folderName}...`);
                 
                 try {
-                    addLog(`📤 Подготовка ${i+1}/${totalFolders}: ${folderName}...`);
                     const folderData = await prepareFolderData(folderName, files);
                     
                     if (!folderData) {
                         addLog(`⚠️ Пропускаем ${folderName}: нет текстового файла`);
-                        failedFolders++;
-                        results.push(`❌ ${folderName}: нет текстового файла`);
+                        folderResults[currentIndex].status = 'error';
+                        updateFolderStatus(currentIndex, 'error', 'нет текста');
+                        currentIndex++;
                         continue;
                     }
-                    
-                    addLog(`📤 Отправка ${i+1}/${totalFolders}: ${folderName} (${folderData.images.length} фото)`);
                     
                     const response = await fetch('/publish_folder', {
                         method: 'POST',
@@ -479,49 +661,118 @@ UPLOAD_PAGE = """
                     const result = await response.json();
                     
                     if (result.success) {
-                        uploadedFolders++;
                         addLog(`✅ ${folderName}: опубликовано`);
-                        results.push(`✅ ${folderName}: успешно`);
+                        folderResults[currentIndex].status = 'success';
+                        updateFolderStatus(currentIndex, 'success');
                     } else {
-                        failedFolders++;
                         addLog(`❌ ${folderName}: ${result.message}`);
-                        results.push(`❌ ${folderName}: ${result.message}`);
+                        folderResults[currentIndex].status = 'error';
+                        updateFolderStatus(currentIndex, 'error', result.message);
                     }
                     
                 } catch (error) {
-                    failedFolders++;
                     addLog(`❌ ${folderName}: ошибка - ${error.message}`);
-                    results.push(`❌ ${folderName}: ${error.message}`);
+                    folderResults[currentIndex].status = 'error';
+                    updateFolderStatus(currentIndex, 'error', error.message);
                 }
                 
-                await new Promise(r => setTimeout(r, 500));
+                currentIndex++;
+                updateStats();
+                await new Promise(r => setTimeout(r, 300));
             }
+            
+            // Все папки обработаны
+            finishPublish();
+        }
+
+        function togglePause() {
+            if (isPublishing && !isPaused) {
+                isPaused = true;
+                btnPause.textContent = '⏸️ Пауза...';
+                btnPause.disabled = true;
+                addLog('⏸️ Пауза запрошена...');
+            }
+        }
+
+        function resumePublish() {
+            if (!isPaused) return;
+            
+            isPaused = false;
+            btnStart.disabled = true;
+            btnStart.textContent = '⏳ Идет...';
+            btnPause.disabled = false;
+            btnPause.textContent = '⏸️ Пауза';
+            progressBar.className = 'progress-bar';
+            
+            addLog('▶️ Возобновляем публикацию...');
+            showStatus('info', '▶️ Публикация возобновлена');
+            
+            const folders = getFolders();
+            const folderNames = Object.keys(folders);
+            publishNext(folders, folderNames);
+        }
+
+        function stopPublish() {
+            if (!isPublishing) return;
+            
+            if (confirm('⏹️ Остановить публикацию? Все опубликованные папки останутся в отчете.')) {
+                isStopped = true;
+                isPaused = false;
+                btnStop.disabled = true;
+                addLog('⏹️ Остановка публикации...');
+                showStatus('warning', '⏹️ Публикация останавливается...');
+            }
+        }
+
+        function finishPublish() {
+            isPublishing = false;
+            isPaused = false;
+            isStopped = false;
             
             progress.style.width = '100%';
             progress.textContent = `${totalFolders}/${totalFolders}`;
             
-            if (failedFolders === 0) {
-                showStatus('success', `✅ Загружено ${uploadedFolders} папок!`);
-                addLog(`✅ ВСЕ ${uploadedFolders} папок загружены!`);
-            } else {
-                showStatus('warning', `⚠️ Загружено ${uploadedFolders} папок, ${failedFolders} с ошибками`);
-                addLog(`⚠️ Загружено ${uploadedFolders} папок, ${failedFolders} с ошибками`);
+            const success = folderResults.filter(r => r.status === 'success').length;
+            const errors = folderResults.filter(r => r.status === 'error').length;
+            const total = folderResults.length;
+            
+            if (errors === 0 && total > 0) {
+                showStatus('success', `✅ Все ${total} папок опубликованы!`);
+                addLog(`✅ ВСЕ ${total} папок опубликованы!`);
+            } else if (total > 0) {
+                showStatus('warning', `⚠️ Опубликовано ${success} папок, ${errors} с ошибками`);
+                addLog(`⚠️ Опубликовано ${success} папок, ${errors} с ошибками`);
             }
             
-            if (results.length > 0) {
-                addLog('\\n📋 Детали:');
-                results.slice(0, 20).forEach(r => addLog(r));
-                if (results.length > 20) {
-                    addLog(`... и еще ${results.length - 20} папок`);
-                }
-            }
+            btnStart.disabled = false;
+            btnStart.textContent = '🚀 Старт';
+            btnPause.disabled = true;
+            btnPause.textContent = '⏸️ Пауза';
+            btnStop.disabled = true;
             
-            if (uploadedFolders > 0) {
+            if (success > 0) {
                 addLog(`\\n📊 Скачать отчет: /report/${userId}`);
+                showStatus('success', `✅ Опубликовано ${success} папок! Нажмите "Отчет" для скачивания`);
             }
             
-            isProcessing = false;
+            updateStats();
         }
+
+        // Проверка статуса публикации (для восстановления после перезагрузки)
+        async function checkPublishStatus() {
+            try {
+                const response = await fetch(`/publish_status/${userId}`);
+                const data = await response.json();
+                if (data.is_running) {
+                    showStatus('info', '⏳ Публикация уже выполняется...');
+                }
+            } catch (e) {
+                // Игнорируем
+            }
+        }
+        
+        // Запускаем проверку при загрузке
+        // checkPublishStatus();
     </script>
 </body>
 </html>
@@ -568,6 +819,28 @@ def publish_folder():
         logger.error(f"❌ Ошибка: {e}")
         return jsonify({'success': False, 'message': str(e)}), 500
 
+@app.route('/publish_status/<int:user_id>')
+def publish_status(user_id):
+    return jsonify({
+        'is_running': publisher.is_running(user_id),
+        'is_paused': publisher.is_paused(user_id)
+    })
+
+@app.route('/pause_publish/<int:user_id>', methods=['POST'])
+def pause_publish(user_id):
+    publisher.pause(user_id)
+    return jsonify({'success': True, 'message': 'Публикация на паузе'})
+
+@app.route('/resume_publish/<int:user_id>', methods=['POST'])
+def resume_publish(user_id):
+    publisher.resume(user_id)
+    return jsonify({'success': True, 'message': 'Публикация возобновлена'})
+
+@app.route('/stop_publish/<int:user_id>', methods=['POST'])
+def stop_publish(user_id):
+    publisher.stop(user_id)
+    return jsonify({'success': True, 'message': 'Публикация остановлена'})
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -599,17 +872,29 @@ def webhook():
                 f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
                 "📊 **Получить отчет:**\n"
                 f"🔗 https://maxbot.bothost.tech/report/{user_id}\n\n"
-                "⏹ **Остановить публикацию:** `/stop`\n\n"
+                "⏹ **Остановить публикацию:** `/stop`\n"
+                "⏸ **Пауза:** `/pause`\n"
+                "▶️ **Продолжить:** `/resume`\n\n"
                 "📋 **Инструкция:**\n"
                 "1. Подготовьте папки с объявлениями\n"
                 "2. Используйте разделитель #изъятая\n"
-                "3. Фото до 3 шт на объявление"
+                "3. Фото до 10 шт на объявление"
             )
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/stop':
             publisher.stop(user_id)
-            api.send_message(user_id, "⏹️ **Публикация остановлена!**\n\n✅ Все процессы остановлены\n🗑️ Временные файлы удалены")
+            api.send_message(user_id, "⏹️ **Публикация остановлена!**\n\n✅ Все процессы остановлены\n📊 Отчет доступен по команде /report")
+            return jsonify({"ok": True}), 200
+        
+        if text and text.strip() == '/pause':
+            publisher.pause(user_id)
+            api.send_message(user_id, "⏸️ **Публикация на паузе!**\n\n▶️ Для продолжения используйте /resume")
+            return jsonify({"ok": True}), 200
+        
+        if text and text.strip() == '/resume':
+            publisher.resume(user_id)
+            api.send_message(user_id, "▶️ **Публикация возобновлена!**")
             return jsonify({"ok": True}), 200
         
         if text and text.strip() == '/report':
