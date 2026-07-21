@@ -408,6 +408,7 @@ UPLOAD_PAGE = """
             <button class="btn btn-primary" id="reportBtn" onclick="getReport()" disabled>📊 Скачать отчет</button>
             <button class="btn btn-info" onclick="checkReportStatus()">🔄 Проверить статус</button>
             <button class="btn btn-warning" onclick="forceUpdateLinks()">🔄 Обновить ссылки</button>
+            <button class="btn btn-success" onclick="setupWebhook()">🔗 Настроить вебхук</button>
         </div>
         <div id="reportStatus" style="margin-top: 10px; padding: 10px; border-radius: 5px; display: none;"></div>
         <p style="margin-top: 10px; color: #666; font-size: 14px;">После публикации подождите 1-2 минуты, затем нажмите "Проверить статус"</p>
@@ -417,6 +418,7 @@ UPLOAD_PAGE = """
 </div>
 
 <script>
+    // ===== КОНСТАНТЫ =====
     const userId = 151296248;
     let selectedFiles = [];
     let isProcessing = false;
@@ -907,6 +909,17 @@ UPLOAD_PAGE = """
             showStatus('error', '❌ ' + error.message);
         }
     }
+    
+    // ===== ВЕБХУК =====
+    async function setupWebhook() {
+        try {
+            const response = await fetch('/setup_webhook');
+            const result = await response.text();
+            showStatus('info', result);
+        } catch (error) {
+            showStatus('error', '❌ Ошибка настройки вебхука: ' + error.message);
+        }
+    }
 </script>
 </body>
 </html>
@@ -1162,8 +1175,7 @@ def webhook():
                 
                 if text.strip() == '/stop':
                     # Останавливаем публикацию через API
-                    pub_status = publication_status()
-                    if pub_status.get('is_running'):
+                    if publication_state['is_running']:
                         stop_publication()
                     publisher.stop(user_id)
                     api.send_message(user_id, "⏹️ **Публикация остановлена!**")
@@ -1211,6 +1223,10 @@ def webhook():
             logger.info("📨 Получено событие bot_stopped")
             return jsonify({"ok": True}), 200
         
+        if update_type == 'bot_started':
+            logger.info("📨 Получено событие bot_started")
+            return jsonify({"ok": True}), 200
+        
         logger.info(f"ℹ️ Вебхук с update_type: {update_type}")
         return jsonify({"ok": True}), 200
         
@@ -1225,7 +1241,11 @@ def setup_webhook():
     if not token:
         return "❌ Токен не найден", 400
     
-    webhook_url = os.environ.get("WEBHOOK_URL", "https://maxbot.bothost.tech")
+    webhook_url = os.environ.get("WEBHOOK_URL")
+    if not webhook_url:
+        webhook_url = "https://maxbot.bothost.tech"
+        logger.warning("⚠️ WEBHOOK_URL не задан, использую значение по умолчанию")
+    
     headers = {"Authorization": token, "Content-Type": "application/json"}
     
     try:
@@ -1471,7 +1491,11 @@ if __name__ == "__main__":
     if TOKEN:
         logger.info(f"✅ Токен найден (первые 10): {TOKEN[:10]}...")
         
-        webhook_url = os.environ.get("WEBHOOK_URL", "https://maxbot.bothost.tech")
+        webhook_url = os.environ.get("WEBHOOK_URL")
+        if not webhook_url:
+            webhook_url = "https://maxbot.bothost.tech"
+            logger.warning("⚠️ WEBHOOK_URL не задан, использую значение по умолчанию")
+        
         logger.info(f"🔗 Настройка вебхука на: {webhook_url}")
         
         try:
