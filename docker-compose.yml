@@ -1,4 +1,4 @@
-# docker-compose.yml - ПРАВИЛЬНО!
+# docker-compose.yml - ИСПРАВЛЕННАЯ ВЕРСИЯ!
 version: '3.8'
 
 services:
@@ -9,8 +9,9 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - TOKEN=${TOKEN} 
+      - TOKEN=${TOKEN}
       - PORT=3000
+      - WEBHOOK_URL=http://91.227.68.137:3000/webhook
     restart: always
     volumes:
       - ./data:/app/data
