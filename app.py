@@ -388,7 +388,7 @@ UPLOAD_PAGE = """
             });
         };
 
-        document.addEventListener('ContentLoaded', function() {
+        document.addEventListener('DOMContentLoaded', function() {
             setTimeout(checkReportStatus, 3000);
         });
 
@@ -1064,9 +1064,13 @@ UPLOAD_PAGE = """
 
 # ========== МАРШРУТЫ ==========
 
-@app.route('/')
+# 🔥 ГЛАВНОЕ ИЗМЕНЕНИЕ: Добавляем поддержку POST на корневой URL
+@app.route('/', methods=['GET', 'POST'])
 def index():
-    return "🤖 MAX Bot is running!"
+    if request.method == 'POST':
+        # Если пришел POST на корень — обрабатываем как вебхук
+        return webhook()
+    return "🤖 MAX Bot is running! Webhook endpoint: /webhook"
 
 
 @app.route('/upload', methods=['GET'])
@@ -1244,6 +1248,19 @@ def webhook():
                         )
                     else:
                         api.send_message(user_id, "❌ Нет данных для отчета.")
+                    return jsonify({"ok": True}), 200
+                
+                # 🔥 ОБРАБОТКА КОМАНДЫ СТАТ
+                if text.strip() == '/stat':
+                    stats = db.get_stats(user_id)
+                    message = (
+                        "📊 **Статистика публикаций**\n\n"
+                        f"📦 Всего папок: {stats.get('total', 0)}\n"
+                        f"✅ Успешно: {stats.get('success', 0)}\n"
+                        f"⏳ В обработке: {stats.get('pending', 0)}\n"
+                        f"❌ Ошибок: {stats.get('errors', 0)}\n"
+                    )
+                    api.send_message(user_id, message)
                     return jsonify({"ok": True}), 200
             
             if chat_id and message_id:
