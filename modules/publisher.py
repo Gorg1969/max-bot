@@ -1,7 +1,6 @@
 # modules/publisher.py
 import logging
 import os
-import time
 import re
 import requests
 import threading
@@ -12,6 +11,7 @@ from datetime import datetime
 import pytz
 
 logger = logging.getLogger(__name__)
+
 
 class Publisher:
     def __init__(self, api, file_manager, db):
@@ -92,8 +92,7 @@ class Publisher:
                     "Content-Type": "application/json"
                 },
                 json=payload,
-                timeout=60,
-                verify=False
+                timeout=60
             )
             
             logger.info(f"📨 СТАТУС ОТВЕТА: {response.status_code}")
@@ -176,8 +175,7 @@ class Publisher:
                     "Content-Type": "application/json"
                 },
                 json=payload,
-                timeout=60,
-                verify=False
+                timeout=60
             )
             
             if response.status_code == 200:
@@ -258,15 +256,16 @@ class Publisher:
                 return False, "Не удалось отправить сообщение"
             
             if post_link:
-                metadata['post_link'] = post_link
-                logger.info(f"🔗 Ссылка на пост сохранена: {post_link}")
+                # Защита от попадания служебных ссылок (/u/) в поле поста
+                if '/c/' in post_link:
+                    metadata['post_link'] = post_link
+                    logger.info(f"🔗 Ссылка на пост сохранена: {post_link}")
+                else:
+                    metadata['post_link'] = ''
+                    logger.warning(f"⚠️ Обнаружена некорректная ссылка ({post_link}), очищаем.")
             else:
                 metadata['post_link'] = ''
                 logger.warning(f"⚠️ Ссылка на пост не получена")
-            
-            if metadata['post_link'] and 'https://max.ru/u/' in metadata['post_link']:
-                logger.error(f"❌ ОШИБКА: В post_link попала ссылка-источник! Очищаем.")
-                metadata['post_link'] = ''
             
             now = datetime.now(self.moscow_tz)
             timestamp = now.timestamp()
@@ -275,8 +274,8 @@ class Publisher:
             
             logger.info(f"✅ Папка {folder_name} опубликована")
             
-            if post_link:
-                return True, f"✅ Папка {folder_name} опубликована, ссылка: {post_link}"
+            if metadata.get('post_link'):
+                return True, f"✅ Папка {folder_name} опубликована, ссылка: {metadata['post_link']}"
             else:
                 return True, f"✅ Папка {folder_name} опубликована"
             
@@ -324,6 +323,8 @@ class Publisher:
             
         except Exception as e:
             logger.error(f"❌ Ошибка обработки вебхука: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     def publish_single_folder(self, user_id, folder_name, ad_text, metadata_text, images_data):
@@ -356,7 +357,6 @@ class Publisher:
                 token = self.api.upload_file(image_bytes, f"image_{i}.jpg")
                 if token:
                     image_tokens.append(token)
-                    time.sleep(0.3)
             
             return self.publish_folder_with_tokens(
                 user_id, folder_name, ad_text, metadata_text, image_tokens
