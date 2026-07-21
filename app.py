@@ -20,12 +20,12 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from modules import Database, FileManager, Publisher, ReportGenerator
 
-# Безопасное отключение предупреждений только в продакшене
-if os.environ.get("ENVIRONMENT") == "production":
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-else:
-    # В разработке оставляем предупреждения
-    pass
+# ПОЛНОЕ ОТКЛЮЧЕНИЕ SSL ПРОВЕРКИ ДЛЯ ВСЕХ ЗАПРОСОВ
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Создаем сессию с отключенной проверкой SSL
+session = requests.Session()
+session.verify = False
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")
@@ -78,7 +78,6 @@ class PublicationState:
             if os.path.exists(self.state_file):
                 with open(self.state_file, 'r', encoding='utf-8') as f:
                     saved = json.load(f)
-                    # Восстанавливаем только безопасные поля
                     for key in ['is_running', 'is_paused', 'should_stop', 
                                'current_index', 'total_folders', 'user_id', 'delay']:
                         if key in saved:
@@ -142,7 +141,6 @@ class PublicationState:
                 'message': message,
                 'timestamp': time.time()
             })
-            # Ограничиваем количество результатов
             if len(self._data['results']) > 1000:
                 self._data['results'] = self._data['results'][-500:]
             self._save_state()
@@ -155,6 +153,8 @@ class APIClient:
     def __init__(self):
         self.token = TOKEN
         self.base_url = BASE_URL
+        self.session = requests.Session()
+        self.session.verify = False  # ОТКЛЮЧАЕМ SSL
 
     def send_message(self, user_id, text, attachments=None):
         if not self.token:
@@ -164,17 +164,16 @@ class APIClient:
                 payload = {"text": text, "format": "markdown"}
                 if attachments:
                     payload["attachments"] = attachments
-                response = requests.post(
+                response = self.session.post(
                     f"{self.base_url}/messages",
                     headers={"Authorization": self.token, "Content-Type": "application/json"},
                     params={"user_id": user_id},
                     json=payload,
-                    timeout=30,
-                    verify=False if os.environ.get("ENVIRONMENT") == "production" else True
+                    timeout=30
                 )
                 if response.status_code == 200:
                     return True
-                logger.error(f"❌ Попытка {attempt+1}: {response.text}")
+                logger.error(f"❌ Попытка {attempt+1}: {response.text[:200]}")
                 time.sleep(1 * (attempt + 1))
             except Exception as e:
                 logger.error(f"❌ Попытка {attempt+1}: {e}")
@@ -186,12 +185,11 @@ class APIClient:
             return False
         try:
             payload = {"chat_id": chat_id, "text": text, "format": "markdown"}
-            response = requests.post(
+            response = self.session.post(
                 f"{self.base_url}/messages",
                 headers={"Authorization": self.token, "Content-Type": "application/json"},
                 json=payload,
-                timeout=30,
-                verify=False if os.environ.get("ENVIRONMENT") == "production" else True
+                timeout=30
             )
             return response.status_code == 200
         except Exception as e:
@@ -204,12 +202,11 @@ class APIClient:
             return None
         for attempt in range(3):
             try:
-                response = requests.post(
+                response = self.session.post(
                     f"{self.base_url}/uploads",
                     headers={"Authorization": self.token},
                     params={"type": "image"},
-                    timeout=30,
-                    verify=False if os.environ.get("ENVIRONMENT") == "production" else True
+                    timeout=30
                 )
                 if response.status_code != 200:
                     logger.error(f"❌ Попытка {attempt+1}: {response.status_code}")
@@ -227,11 +224,10 @@ class APIClient:
                     time.sleep(2)
                     continue
                 files = {'data': (filename, image_bytes, 'image/jpeg')}
-                upload_response = requests.post(
+                upload_response = self.session.post(
                     upload_url,
                     files=files,
-                    timeout=60,
-                    verify=False if os.environ.get("ENVIRONMENT") == "production" else True
+                    timeout=60
                 )
                 if upload_response.status_code != 200:
                     logger.error(f"❌ Ошибка загрузки: {upload_response.status_code}")
@@ -283,11 +279,7 @@ def safe_response(f):
             return jsonify({'success': False, 'message': 'Некорректный запрос'}), 400
         except Exception as e:
             logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
-            # В продакшене не показываем детали
-            if os.environ.get("ENVIRONMENT") == "production":
-                return jsonify({'success': False, 'message': 'Внутренняя ошибка сервера'}), 500
-            else:
-                return jsonify({'success': False, 'message': str(e)}), 500
+            return jsonify({'success': False, 'message': 'Внутренняя ошибка сервера'}), 500
     return decorated_function
 
 # ========== HTML СТРАНИЦА ==========
@@ -1090,11 +1082,10 @@ def upload_photo():
         if not user_id:
             return jsonify({'success': False, 'message': 'Нет user_id'}), 400
         
-        # Проверяем размер фото
         photo.seek(0, os.SEEK_END)
         size = photo.tell()
         photo.seek(0)
-        if size > 20 * 1024 * 1024:  # 20MB
+        if size > 20 * 1024 * 1024:
             return jsonify({'success': False, 'message': 'Фото слишком большое'}), 400
         
         image_bytes = photo.read()
@@ -1130,10 +1121,8 @@ def publish_folder():
         if publication_state.get('should_stop'):
             return jsonify({'success': False, 'message': 'Публикация остановлена'}), 409
         
-        # Запускаем публикацию в фоновом потоке, чтобы не блокировать запрос
         def publish_in_background():
             try:
-                # Проверяем состояние
                 if publication_state.get('should_stop'):
                     return
                 
@@ -1174,7 +1163,6 @@ def publish_folder():
                 
                 if delay > 0 and success:
                     logger.info(f"⏱️ Задержка {delay} сек")
-                    # Разбиваем задержку на интервалы для проверки остановки
                     for _ in range(delay):
                         if publication_state.get('should_stop') or publication_state.get('is_paused'):
                             break
@@ -1183,7 +1171,6 @@ def publish_folder():
             except Exception as e:
                 logger.error(f"❌ Ошибка в фоновой публикации: {e}")
         
-        # Запускаем в фоновом потоке
         thread = threading.Thread(target=publish_in_background, daemon=True)
         thread.start()
         
@@ -1301,7 +1288,6 @@ def stop_publication():
         'error_count': len([r for r in results if not r.get('success')])
     }
     
-    # Не сбрасываем should_stop сразу, чтобы дать завершиться фоновым задачам
     def reset_state():
         time.sleep(10)
         publication_state.set('should_stop', False)
@@ -1358,7 +1344,6 @@ def webhook():
             text = body.get('text', '')
             message_id = body.get('mid')
             
-            # Проверяем наличие chat_id
             if chat_id is not None:
                 chat_id = str(chat_id)
             else:
@@ -1462,7 +1447,7 @@ def setup_webhook():
             headers=headers,
             json=payload,
             timeout=30,
-            verify=False if os.environ.get("ENVIRONMENT") == "production" else True
+            verify=False
         )
         
         if r.status_code == 200:
@@ -1485,7 +1470,6 @@ def report_page(user_id):
         return "❌ Нет данных для отчета", 404
     
     filename = os.path.basename(report_path)
-    # Экранируем filename для безопасности
     safe_filename = escape(filename)
     download_url = f"/download_report/{user_id}/{safe_filename}"
     
@@ -1505,7 +1489,6 @@ def report_page(user_id):
 @safe_response
 def download_report(user_id, filename):
     try:
-        # Проверяем, что filename безопасен
         if '..' in filename or '/' in filename or '\\' in filename:
             abort(400, "Некорректное имя файла")
         
@@ -1561,7 +1544,6 @@ def report_status(user_id):
 @app.route('/force_report/<int:user_id>', methods=['POST'])
 @safe_response
 def force_report(user_id):
-    """Принудительное создание отчета для пользователя"""
     try:
         report_path = report_gen.generate_report(user_id)
         if report_path:
@@ -1733,17 +1715,10 @@ def handle_method_not_allowed(e):
 @app.errorhandler(Exception)
 def handle_all_exceptions(error):
     logger.error(f"Критическая ошибка: {error}", exc_info=True)
-    # В продакшене не показываем детали
-    if os.environ.get("ENVIRONMENT") == "production":
-        return jsonify({
-            'success': False,
-            'message': 'Внутренняя ошибка сервера'
-        }), 500
-    else:
-        return jsonify({
-            'success': False,
-            'message': str(error)
-        }), 500
+    return jsonify({
+        'success': False,
+        'message': 'Внутренняя ошибка сервера'
+    }), 500
 
 
 if __name__ == "__main__":
@@ -1771,7 +1746,7 @@ if __name__ == "__main__":
                 headers=headers,
                 json=payload,
                 timeout=10,
-                verify=False if os.environ.get("ENVIRONMENT") == "production" else True
+                verify=False
             )
             
             if r.status_code == 200:
