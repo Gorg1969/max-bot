@@ -10,8 +10,7 @@ import threading
 import time
 import base64
 from werkzeug.exceptions import ClientDisconnected
-from modules import Database, FileManager, Publisher, WebInterface
-from modules.report_generator import ReportGenerator
+from modules import Database, FileManager, Publisher, ReportGenerator
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
