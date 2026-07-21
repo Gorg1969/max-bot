@@ -36,13 +36,16 @@ fm = FileManager(DATA_DIR)
 
 # ========== СОСТОЯНИЕ ПУБЛИКАЦИИ ==========
 publication_state = {
-    'is_paused': False,
     'is_running': False,
+    'is_paused': False,
+    'should_stop': False,
     'current_index': 0,
     'total_folders': 0,
     'results': [],
     'user_id': None,
-    'delay': 30
+    'delay': 30,
+    'published_folders': [],
+    'failed_folders': [],
 }
 
 @app.before_request
@@ -304,6 +307,7 @@ UPLOAD_PAGE = """
         <div class="button-group" style="justify-content: center;">
             <button class="btn btn-primary" id="reportBtn" onclick="getReport()" disabled>📊 Скачать отчет</button>
             <button class="btn btn-info" onclick="checkReportStatus()">🔄 Проверить статус</button>
+            <button class="btn btn-danger" onclick="forceReport()" id="forceReportBtn">📊 Принудительный отчет</button>
         </div>
         <div id="reportStatus"></div>
         <p style="margin-top: 10px; color: #666; font-size: 14px;">После публикации нажмите "Проверить статус"</p>
@@ -347,22 +351,42 @@ UPLOAD_PAGE = """
     // DROP ZONE
     dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
     dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('dragover'); });
-    dropZone.addEventListener('drop', (e) => {
+    
+    dropZone.addEventListener('drop', async (e) => {
         e.preventDefault();
         dropZone.classList.remove('dragover');
-        const items = e.dataTransfer.items;
-        const files = [];
-        for (let item of items) {
-            if (item.kind === 'file') {
-                const entry = item.webkitGetAsEntry();
-                if (entry && entry.isDirectory) {
-                    readDirectory(entry, files, '');
+        
+        try {
+            const items = e.dataTransfer.items;
+            const files = [];
+            
+            for (let item of items) {
+                if (item.kind === 'file') {
+                    const entry = item.webkitGetAsEntry();
+                    if (entry) {
+                        if (entry.isDirectory) {
+                            await readDirectory(entry, files, '');
+                        } else {
+                            const file = await new Promise((resolve, reject) => {
+                                entry.file(resolve, reject);
+                            });
+                            file.webkitRelativePath = entry.name;
+                            files.push(file);
+                        }
+                    }
                 }
             }
-        }
-        if (files.length > 0) {
-            selectedFiles = files;
-            displayFiles(selectedFiles);
+            
+            if (files.length > 0) {
+                selectedFiles = files;
+                displayFiles(selectedFiles);
+                showStatus('info', `📦 Загружено ${files.length} файлов`);
+            } else {
+                showStatus('warning', '⚠️ Папка пуста или не выбрана');
+            }
+        } catch (error) {
+            console.error('Ошибка:', error);
+            showStatus('error', '❌ Ошибка при чтении папки: ' + error.message);
         }
     });
     
@@ -374,44 +398,104 @@ UPLOAD_PAGE = """
         }
     });
     
-    function readDirectory(entry, files, path) {
-        const reader = entry.createReader();
-        reader.readEntries((entries) => {
-            for (let e of entries) {
-                if (e.isDirectory) {
-                    readDirectory(e, files, path + e.name + '/');
-                } else {
-                    e.file((file) => {
-                        file.webkitRelativePath = path + file.name;
-                        files.push(file);
-                    });
+    async function readDirectory(entry, files, path) {
+        return new Promise((resolve) => {
+            const reader = entry.createReader();
+            const allEntries = [];
+            
+            const readEntries = () => {
+                reader.readEntries((entries) => {
+                    if (entries.length === 0) {
+                        processEntries(allEntries);
+                        return;
+                    }
+                    allEntries.push(...entries);
+                    readEntries();
+                }, (error) => {
+                    console.error('Ошибка чтения папки:', error);
+                    resolve();
+                });
+            };
+            
+            const processEntries = (entries) => {
+                let pending = entries.length;
+                if (pending === 0) {
+                    resolve();
+                    return;
                 }
-            }
+                
+                for (let e of entries) {
+                    if (e.isDirectory) {
+                        readDirectory(e, files, path + e.name + '/').then(() => {
+                            pending--;
+                            if (pending === 0) resolve();
+                        });
+                    } else {
+                        e.file((file) => {
+                            file.webkitRelativePath = path + file.name;
+                            files.push(file);
+                            pending--;
+                            if (pending === 0) resolve();
+                        }, (error) => {
+                            console.error('Ошибка чтения файла:', error);
+                            pending--;
+                            if (pending === 0) resolve();
+                        });
+                    }
+                }
+            };
+            
+            readEntries();
         });
     }
     
     function displayFiles(files) {
         fileListContent.innerHTML = '';
-        const folders = new Set();
-        const fileCount = {};
+        
+        // Группируем файлы по папкам
+        const folders = new Map();
         files.forEach(f => {
-            const parts = f.webkitRelativePath.split('/');
+            const relPath = f.webkitRelativePath || f.name;
+            const parts = relPath.split('/');
             if (parts.length >= 2) {
-                const folder = parts[0] + '/' + parts[1];
-                folders.add(folder);
-                if (!fileCount[folder]) fileCount[folder] = 0;
-                fileCount[folder]++;
+                const folderKey = parts[0];
+                const subFolder = parts.slice(0, 2).join('/');
+                
+                if (!folders.has(folderKey)) {
+                    folders.set(folderKey, new Map());
+                }
+                const subFolders = folders.get(folderKey);
+                if (!subFolders.has(subFolder)) {
+                    subFolders.set(subFolder, []);
+                }
+                subFolders.get(subFolder).push(f);
             }
         });
-        const sortedFolders = Array.from(folders).sort();
-        sortedFolders.forEach(folder => {
-            const li = document.createElement('li');
-            const count = fileCount[folder] || 0;
-            const displayName = folder.includes('/') ? folder.split('/')[1] : folder;
-            li.innerHTML = `<span>📁 ${displayName}</span><span class="count">${count} файлов</span>`;
-            fileListContent.appendChild(li);
-        });
-        selectedInfo.textContent = `✅ Выбрано ${sortedFolders.length} папок, всего ${files.length} файлов`;
+        
+        let totalFolders = 0;
+        for (const [rootFolder, subFolders] of folders) {
+            const header = document.createElement('li');
+            header.style.fontWeight = 'bold';
+            header.style.background = '#e3f2fd';
+            header.textContent = `📁 ${rootFolder}`;
+            fileListContent.appendChild(header);
+            
+            for (const [subFolder, files] of subFolders) {
+                const li = document.createElement('li');
+                const displayName = subFolder.split('/').pop() || subFolder;
+                const fileTypes = files.map(f => {
+                    if (f.name === 'info.txt' || f.name.endsWith('.txt')) return '📄';
+                    if (f.type && f.type.startsWith('image/')) return '🖼️';
+                    return '📎';
+                });
+                const uniqueTypes = [...new Set(fileTypes)];
+                li.innerHTML = `<span>📂 ${displayName}</span><span class="count">${files.length} файлов (${uniqueTypes.join(' ')})</span>`;
+                fileListContent.appendChild(li);
+                totalFolders++;
+            }
+        }
+        
+        selectedInfo.textContent = `✅ Найдено ${totalFolders} папок с объявлениями, всего ${files.length} файлов`;
         fileList.style.display = 'block';
         delayContainer.style.display = 'flex';
         controlPanel.style.display = 'block';
@@ -462,14 +546,19 @@ UPLOAD_PAGE = """
     // ПАУЗА
     async function pausePublication() {
         try {
-            const response = await fetch('/pause_publication', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+            const response = await fetch('/pause_publication', { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' } 
+            });
             const result = await response.json();
+            
             if (result.success) {
                 showStatus('info', '⏸ Публикация на паузе');
                 addLog('⏸ ПАУЗА');
                 isPaused = true;
                 btnPause.style.display = 'none';
                 btnResume.style.display = 'inline-block';
+                btnStop.style.display = 'inline-block';
                 publicationStatus.className = 'status-badge paused';
                 publicationStatus.textContent = 'На паузе';
                 progress.className = 'progress paused';
@@ -478,57 +567,91 @@ UPLOAD_PAGE = """
             }
         } catch (error) {
             showStatus('error', '❌ ' + error.message);
+            addLog('❌ Ошибка паузы: ' + error.message);
         }
     }
     
     // ПРОДОЛЖИТЬ
     async function resumePublication() {
         try {
-            const response = await fetch('/resume_publication', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+            const response = await fetch('/resume_publication', { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' } 
+            });
             const result = await response.json();
+            
             if (result.success) {
                 showStatus('info', '▶ Публикация продолжена');
                 addLog('▶ ПРОДОЛЖЕНИЕ');
                 isPaused = false;
+                isStopped = false;
                 btnPause.style.display = 'inline-block';
                 btnResume.style.display = 'none';
+                btnStop.style.display = 'inline-block';
                 publicationStatus.className = 'status-badge running';
                 publicationStatus.textContent = 'Выполняется';
                 progress.className = 'progress';
-                uploadFolder();
+                
+                if (isProcessing) {
+                    uploadFolder();
+                }
             } else {
                 showStatus('error', '❌ ' + result.message);
             }
         } catch (error) {
             showStatus('error', '❌ ' + error.message);
+            addLog('❌ Ошибка продолжения: ' + error.message);
         }
     }
     
     // СТОП
     async function stopPublication() {
         if (!confirm('⏹ Остановить публикацию и создать отчёт?')) return;
+        
         try {
-            const response = await fetch('/stop_publication', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+            showStatus('info', '⏳ Остановка и создание отчета...');
+            btnStop.disabled = true;
+            
+            const response = await fetch('/stop_publication', { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' } 
+            });
             const result = await response.json();
+            
             if (result.success) {
-                showStatus('stop', '⏹ Публикация остановлена, отчёт готов');
-                addLog('⏹ СТОП: отчёт создан');
+                showStatus('success', `✅ ${result.message}`);
+                addLog(`📊 Остановлено: ${result.processed} папок, успешно: ${result.success_count || 0}, ошибок: ${result.error_count || 0}`);
+                
                 btnPause.style.display = 'none';
                 btnResume.style.display = 'none';
                 btnStop.style.display = 'none';
                 btnUpload.disabled = false;
                 btnClear.disabled = false;
-                reportBtn.disabled = false;
-                reportReady = true;
+                
+                if (result.report_url) {
+                    reportBtn.disabled = false;
+                    reportReady = true;
+                    addLog(`📊 Отчёт: ${result.report_url}`);
+                    
+                    setTimeout(() => {
+                        window.open(result.report_url, '_blank');
+                    }, 2000);
+                }
+                
                 publicationStatus.className = 'status-badge stopped';
                 publicationStatus.textContent = 'Остановлено';
                 progress.className = 'progress stopped';
-                if (result.report_url) addLog('📊 Отчёт: ' + result.report_url);
+                isProcessing = false;
+                isStopped = true;
+                
             } else {
                 showStatus('error', '❌ ' + result.message);
             }
         } catch (error) {
             showStatus('error', '❌ ' + error.message);
+            addLog('❌ Ошибка остановки: ' + error.message);
+        } finally {
+            btnStop.disabled = false;
         }
     }
     
@@ -572,17 +695,21 @@ UPLOAD_PAGE = """
         logDiv.textContent = '';
         addLog('🚀 Начинаем обработку...');
         
-        const folders = {};
+        // Группируем файлы по папкам
+        const folders = new Map();
         selectedFiles.forEach(file => {
-            const parts = file.webkitRelativePath.split('/');
+            const relPath = file.webkitRelativePath || file.name;
+            const parts = relPath.split('/');
             if (parts.length >= 2) {
-                const folderName = parts[0] + '/' + parts[1];
-                if (!folders[folderName]) folders[folderName] = [];
-                folders[folderName].push(file);
+                const folderKey = parts.slice(0, 2).join('/');
+                if (!folders.has(folderKey)) {
+                    folders.set(folderKey, []);
+                }
+                folders.get(folderKey).push(file);
             }
         });
         
-        const folderNames = Object.keys(folders);
+        const folderNames = Array.from(folders.keys());
         const totalFolders = folderNames.length;
         addLog(`📁 Найдено ${totalFolders} папок`);
         
@@ -590,6 +717,7 @@ UPLOAD_PAGE = """
         let errorCount = 0;
         
         for (let i = 0; i < folderNames.length; i++) {
+            // Проверяем состояние
             try {
                 const statusResponse = await fetch('/publication_status');
                 const statusData = await statusResponse.json();
@@ -603,7 +731,7 @@ UPLOAD_PAGE = """
                     publicationStatus.textContent = 'На паузе';
                     return;
                 }
-                if (!statusData.is_running) {
+                if (statusData.should_stop || !statusData.is_running) {
                     addLog('⏹ Остановлено');
                     break;
                 }
@@ -612,11 +740,11 @@ UPLOAD_PAGE = """
             if (isStopped) break;
             
             const folderName = folderNames[i];
-            const files = folders[folderName];
-            const percent = Math.round((i / totalFolders) * 100);
+            const files = folders.get(folderName);
+            const percent = Math.round(((i + 1) / totalFolders) * 100);
             progress.style.width = percent + '%';
-            progress.textContent = `${i}/${totalFolders}`;
-            progressText.textContent = `📊 ${i}/${totalFolders} папок`;
+            progress.textContent = `${i+1}/${totalFolders}`;
+            progressText.textContent = `📊 ${i+1}/${totalFolders} папок`;
             showStatus('info', `⏳ ${i+1}/${totalFolders}: ${folderName}`);
             
             try {
@@ -648,6 +776,17 @@ UPLOAD_PAGE = """
                 errorCount++;
                 addLog(`❌ ${folderName}: ошибка`);
             }
+            
+            // Проверяем, не нужно ли остановиться
+            try {
+                const statusResponse = await fetch('/publication_status');
+                const statusData = await statusResponse.json();
+                if (statusData.should_stop || !statusData.is_running) {
+                    addLog('⏹ Остановлено после папки');
+                    break;
+                }
+            } catch (e) {}
+            
             await new Promise(r => setTimeout(r, 2000));
         }
         
@@ -669,27 +808,44 @@ UPLOAD_PAGE = """
     }
     
     // ПОДГОТОВКА ПАПКИ
-    async function prepareFolderData(folderName, files) {
-        const txtFile = files.find(f => f.name === 'info.txt' || f.name.endsWith('.txt'));
-        if (!txtFile) return null;
+    async function prepareFolderData(folderPath, files) {
+        const txtFile = files.find(f => {
+            const relPath = f.webkitRelativePath || f.name;
+            return relPath.startsWith(folderPath) && 
+                   (f.name === 'info.txt' || f.name.endsWith('.txt'));
+        });
+        
+        if (!txtFile) {
+            addLog(`⚠️ В папке ${folderPath} нет info.txt`);
+            return null;
+        }
+        
         let fullText = await txtFile.text();
         let adText = fullText;
         let metadataText = '';
+        
         if (fullText.includes('#изъятая')) {
             const parts = fullText.split('#изъятая');
             adText = parts[0].trim();
             metadataText = parts[1] ? parts[1].trim() : '';
         }
-        const imageFiles = files.filter(f => f.type && f.type.startsWith('image/')).slice(0, 10);
+        
+        const imageFiles = files.filter(f => {
+            const relPath = f.webkitRelativePath || f.name;
+            return relPath.startsWith(folderPath) && 
+                   f.type && f.type.startsWith('image/');
+        }).slice(0, 10);
+        
         const imageTokens = [];
         for (const img of imageFiles) {
             if (isStopped) break;
-            const token = await uploadSinglePhoto(img, folderName);
+            const token = await uploadSinglePhoto(img, userId, folderPath);
             if (token) imageTokens.push(token);
             await new Promise(r => setTimeout(r, 300));
         }
+        
         return {
-            folderName: folderName,
+            folderName: folderPath,
             adText: adText,
             metadataText: metadataText,
             fullText: fullText,
@@ -698,19 +854,18 @@ UPLOAD_PAGE = """
     }
     
     // ЗАГРУЗКА ФОТО
-    async function uploadSinglePhoto(file, folderName) {
+    async function uploadSinglePhoto(file, user_id, folder_name) {
         try {
             const formData = new FormData();
             formData.append('photo', file);
-            formData.append('user_id', userId);
-            formData.append('folder_name', folderName);
+            formData.append('user_id', user_id);
+            formData.append('folder_name', folder_name);
             const response = await fetch('/upload_photo', {
                 method: 'POST',
                 body: formData
             });
             const result = await response.json();
             if (result.success) {
-                addLog(`✅ Фото ${file.name} загружено`);
                 return result.token;
             }
             return null;
@@ -733,29 +888,63 @@ UPLOAD_PAGE = """
         try {
             const response = await fetch(`/report_status/${userId}`);
             const result = await response.json();
+            
             reportStatus.style.display = 'block';
             let text = `📊 Всего: ${result.total} | ✅ Готово: ${result.success}`;
+            
             if (result.pending > 0) {
                 text += ` | ⏳ Ожидают: ${result.pending}`;
                 reportStatus.className = 'status info';
                 reportBtn.disabled = true;
                 reportReady = false;
-            } else if (result.success > 0) {
+                
+                if (result.failed > 0) {
+                    text += ` | ❌ Ошибок: ${result.failed}`;
+                }
+            } else if (result.success > 0 || result.failed > 0) {
                 text += '\n✅ Отчет готов!';
                 reportStatus.className = 'status success';
                 reportBtn.disabled = false;
                 reportReady = true;
             } else {
-                text += '\n⏳ Нет готовых публикаций';
+                text += '\n⏳ Нет публикаций';
                 reportStatus.className = 'status info';
                 reportBtn.disabled = true;
                 reportReady = false;
             }
+            
             reportStatus.textContent = text;
+            addLog('📊 ' + text);
+            
         } catch (error) {
             reportStatus.style.display = 'block';
             reportStatus.className = 'status error';
             reportStatus.textContent = '❌ ' + error.message;
+            addLog('❌ Ошибка проверки статуса: ' + error.message);
+        }
+    }
+    
+    // ПРИНУДИТЕЛЬНЫЙ ОТЧЕТ
+    async function forceReport() {
+        try {
+            showStatus('info', '⏳ Создание принудительного отчета...');
+            const response = await fetch(`/force_report/${userId}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+            const result = await response.json();
+            
+            if (result.success) {
+                showStatus('success', '✅ Отчет создан!');
+                reportReady = true;
+                reportBtn.disabled = false;
+                window.open(result.report_url, '_blank');
+                addLog('📊 Принудительный отчет: ' + result.report_url);
+            } else {
+                showStatus('error', '❌ ' + result.message);
+            }
+        } catch (error) {
+            showStatus('error', '❌ ' + error.message);
         }
     }
 </script>
@@ -820,9 +1009,13 @@ def publish_folder():
         if not user_id or not folder_data:
             return jsonify({'success': False, 'message': 'Нет данных'}), 400
         
+        if publication_state.get('should_stop'):
+            return jsonify({'success': False, 'message': 'Публикация остановлена'}), 409
+        
         if not publication_state['is_running']:
             publication_state['is_running'] = True
             publication_state['is_paused'] = False
+            publication_state['should_stop'] = False
             publication_state['user_id'] = user_id
             publication_state['delay'] = delay
             publication_state['current_index'] = 0
@@ -831,6 +1024,9 @@ def publish_folder():
         
         if publication_state['is_paused']:
             return jsonify({'success': False, 'message': 'Публикация на паузе'}), 409
+        
+        if publication_state.get('should_stop'):
+            return jsonify({'success': False, 'message': 'Публикация остановлена'}), 409
         
         folder_name = folder_data.get('folderName')
         ad_text = folder_data.get('adText')
@@ -850,9 +1046,20 @@ def publish_folder():
             'message': message
         })
         
+        if publication_state.get('should_stop'):
+            logger.info(f"⏹ Остановка после папки {folder_name}")
+            return jsonify({
+                'success': success,
+                'message': f'Остановлено после {folder_name}',
+                'stopped': True
+            })
+        
         if delay > 0 and success:
             logger.info(f"⏱️ Задержка {delay} сек")
-            time.sleep(delay)
+            for _ in range(delay):
+                if publication_state.get('should_stop') or publication_state.get('is_paused'):
+                    break
+                time.sleep(1)
         
         if success:
             return jsonify({'success': True, 'message': message})
@@ -870,6 +1077,9 @@ def pause_publication():
     
     if not publication_state['is_running']:
         return jsonify({'success': False, 'message': 'Нет активной публикации'}), 400
+    
+    if publication_state['is_paused']:
+        return jsonify({'success': False, 'message': 'Уже на паузе'}), 400
     
     publication_state['is_paused'] = True
     logger.info(f"⏸ ПАУЗА: публикация остановлена для {publication_state['user_id']}")
@@ -889,12 +1099,18 @@ def resume_publication():
     if not publication_state['is_paused']:
         return jsonify({'success': False, 'message': 'Публикация не на паузе'}), 400
     
+    if publication_state.get('should_stop'):
+        return jsonify({'success': False, 'message': 'Публикация остановлена'}), 400
+    
     publication_state['is_paused'] = False
+    publication_state['is_running'] = True
     logger.info(f"▶ ПРОДОЛЖЕНИЕ: публикация возобновлена для {publication_state['user_id']}")
     
     return jsonify({
         'success': True,
-        'message': '▶ Публикация продолжена'
+        'message': '▶ Публикация продолжена',
+        'current_index': publication_state.get('current_index', 0),
+        'total': publication_state.get('total_folders', 0)
     })
 
 
@@ -902,10 +1118,24 @@ def resume_publication():
 def stop_publication():
     global publication_state
     
-    if not publication_state['is_running']:
+    if not publication_state['is_running'] and not publication_state['is_paused']:
+        if publication_state.get('results'):
+            user_id = publication_state.get('user_id')
+            if user_id:
+                report_path = report_gen.generate_report(user_id)
+                if report_path:
+                    filename = os.path.basename(report_path)
+                    report_url = f"/download_report/{user_id}/{filename}"
+                    return jsonify({
+                        'success': True,
+                        'message': '📊 Отчет создан',
+                        'report_url': report_url,
+                        'processed': len(publication_state.get('results', []))
+                    })
         return jsonify({'success': False, 'message': 'Нет активной публикации'}), 400
     
     user_id = publication_state.get('user_id')
+    publication_state['should_stop'] = True
     publication_state['is_running'] = False
     publication_state['is_paused'] = False
     
@@ -914,25 +1144,41 @@ def stop_publication():
     report_url = None
     if user_id:
         try:
+            time.sleep(1)
             report_path = report_gen.generate_report(user_id)
             if report_path:
                 filename = os.path.basename(report_path)
-                report_url = f"https://maxbot.bothost.tech/download_report/{user_id}/{filename}"
-                api.send_message(
-                    user_id,
-                    f"⏹ **Публикация остановлена!**\n\n"
-                    f"📊 Отчёт создан: [Скачать]({report_url})\n\n"
-                    f"📦 Обработано: {publication_state.get('current_index', 0)} папок"
-                )
+                report_url = f"/download_report/{user_id}/{filename}"
+                logger.info(f"📊 Отчет создан при остановке: {report_path}")
+                
+                try:
+                    api.send_message(
+                        user_id,
+                        f"⏹ **Публикация остановлена!**\n\n"
+                        f"📊 **Отчёт создан:** [Скачать]({report_url})\n\n"
+                        f"📦 Обработано: {len(publication_state.get('results', []))} папок\n"
+                        f"✅ Успешно: {len([r for r in publication_state.get('results', []) if r.get('success')])}\n"
+                        f"❌ Ошибок: {len([r for r in publication_state.get('results', []) if not r.get('success')])}"
+                    )
+                except Exception as e:
+                    logger.error(f"❌ Ошибка отправки уведомления: {e}")
+            else:
+                logger.warning(f"⚠️ Не удалось создать отчет для {user_id}")
         except Exception as e:
-            logger.error(f"❌ Ошибка создания отчёта: {e}")
+            logger.error(f"❌ Ошибка создания отчета: {e}")
     
-    return jsonify({
+    result = {
         'success': True,
         'message': '⏹ Публикация остановлена, отчёт создан',
         'report_url': report_url,
-        'processed': publication_state.get('current_index', 0)
-    })
+        'processed': len(publication_state.get('results', [])),
+        'success_count': len([r for r in publication_state.get('results', []) if r.get('success')]),
+        'error_count': len([r for r in publication_state.get('results', []) if not r.get('success')])
+    }
+    
+    publication_state['should_stop'] = False
+    
+    return jsonify(result)
 
 
 @app.route('/publication_status', methods=['GET'])
@@ -942,6 +1188,7 @@ def publication_status():
     return jsonify({
         'is_running': publication_state['is_running'],
         'is_paused': publication_state['is_paused'],
+        'should_stop': publication_state.get('should_stop', False),
         'current_index': publication_state.get('current_index', 0),
         'total_folders': publication_state.get('total_folders', 0),
         'user_id': publication_state.get('user_id'),
@@ -1003,7 +1250,7 @@ def webhook():
                     return jsonify({"ok": True}), 200
                 
                 if text.strip() == '/stop':
-                    if publication_state['is_running']:
+                    if publication_state['is_running'] or publication_state['is_paused']:
                         stop_publication()
                     publisher.stop(user_id)
                     api.send_message(user_id, "⏹️ **Публикация остановлена!**")
@@ -1166,6 +1413,32 @@ def report_status(user_id):
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/force_report/<int:user_id>', methods=['POST'])
+def force_report(user_id):
+    """Принудительное создание отчета для пользователя"""
+    try:
+        report_path = report_gen.generate_report(user_id)
+        if report_path:
+            filename = os.path.basename(report_path)
+            download_url = f"/download_report/{user_id}/{filename}"
+            return jsonify({
+                'success': True,
+                'message': 'Отчет создан',
+                'report_url': download_url
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'message': 'Нет данных для отчета'
+            }), 404
+    except Exception as e:
+        logger.error(f"❌ Ошибка создания отчета: {e}")
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        }), 500
+
+
 @app.route('/force_update_links', methods=['POST'])
 def force_update_links():
     try:
@@ -1230,6 +1503,7 @@ def auto_cleanup(user_id):
             global publication_state
             publication_state['is_running'] = False
             publication_state['is_paused'] = False
+            publication_state['should_stop'] = False
         
         threading.Thread(target=delayed_cleanup, daemon=True).start()
         return jsonify({'success': True, 'message': 'Автоочистка через 5 минут'})
