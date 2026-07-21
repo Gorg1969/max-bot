@@ -1,3 +1,4 @@
+# app.py
 from flask import Flask, request, jsonify, render_template_string, send_file
 import requests
 import logging
@@ -7,6 +8,7 @@ import urllib3
 import json
 import threading
 import time
+import base64
 from werkzeug.exceptions import ClientDisconnected
 from modules import Database, FileManager, Publisher, WebInterface
 from modules.report_generator import ReportGenerator
@@ -34,6 +36,35 @@ class APIClient:
     def __init__(self):
         self.token = TOKEN
         self.base_url = BASE_URL
+
+    def upload_file(self, file_data, filename):
+        """Загружает файл на сервер и возвращает токен"""
+        if not self.token:
+            return None
+        try:
+            files = {'file': (filename, file_data, 'image/jpeg')}
+            response = requests.post(
+                f"{self.base_url}/files",
+                headers={"Authorization": self.token},
+                files=files,
+                timeout=30,
+                verify=False
+            )
+            if response.status_code == 200:
+                result = response.json()
+                token = result.get('token')
+                if token:
+                    logger.info(f"✅ Файл загружен, токен: {token[:10]}...")
+                    return token
+                else:
+                    logger.error(f"❌ Токен не получен: {result}")
+                    return None
+            else:
+                logger.error(f"❌ Ошибка загрузки файла: {response.status_code} - {response.text}")
+                return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки файла: {e}")
+            return None
 
     def send_message(self, user_id, text, attachments=None):
         if not self.token:
