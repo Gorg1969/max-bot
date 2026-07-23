@@ -1,4 +1,4 @@
-# app.py - полная версия с поддержкой видео и повторными попытками
+# app.py - полная версия с поддержто�� видео и исправленными ошибками 2.0
 from flask import Flask, request, jsonify, render_template_string, send_file
 import requests
 import logging
@@ -220,11 +220,16 @@ class APIClient:
                 # Получаем URL для загрузки видео
                 response = requests.post(
                     f"{self.base_url}/uploads",
-                    headers={"Authorization": self.token},
+                    headers={
+                        "Authorization": self.token,
+                        "Content-Type": "application/json"
+                    },
                     params={"type": "video"},
                     timeout=30,
                     verify=False
                 )
+                
+                logger.info(f"📡 Статус получения URL: {response.status_code}")
                 
                 if response.status_code != 200:
                     logger.error(f"❌ Ошибка получения URL: {response.status_code} - {response.text[:200]}")
@@ -235,7 +240,8 @@ class APIClient:
                 
                 try:
                     upload_data = response.json()
-                except ValueError:
+                    logger.info(f"📦 Ответ на получение URL: {upload_data}")
+                except ValueError as e:
                     raw_text = response.text.strip()
                     logger.error(f"❌ Невалидный JSON: {raw_text[:200]}")
                     if attempt < max_retries - 1:
@@ -251,27 +257,34 @@ class APIClient:
                         continue
                     return None
                 
+                logger.info(f"📤 URL для загрузки: {upload_url}")
+                
                 # Определяем тип контента
                 content_type = 'video/mp4'
-                if filename.lower().endswith('.mov'):
-                    content_type = 'video/quicktime'
-                elif filename.lower().endswith('.avi'):
-                    content_type = 'video/x-msvideo'
-                elif filename.lower().endswith('.mkv'):
-                    content_type = 'video/x-matroska'
-                elif filename.lower().endswith('.webm'):
-                    content_type = 'video/webm'
+                ext = filename.lower().split('.')[-1] if '.' in filename else 'mp4'
+                content_types = {
+                    'mp4': 'video/mp4',
+                    'mov': 'video/quicktime',
+                    'avi': 'video/x-msvideo',
+                    'mkv': 'video/x-matroska',
+                    'webm': 'video/webm',
+                    'mpeg': 'video/mpeg',
+                    'mpg': 'video/mpeg',
+                }
+                content_type = content_types.get(ext, 'video/mp4')
                 
                 files = {'data': (filename, video_bytes, content_type)}
                 
-                logger.info(f"🎬 Загрузка видео на {upload_url[:50]}... размер: {len(video_bytes)} байт")
+                logger.info(f"🎬 Загрузка видео размером: {len(video_bytes)} байт")
                 
                 upload_response = requests.post(
                     upload_url,
                     files=files,
-                    timeout=180,  # Увеличенный таймаут для видео
+                    timeout=180,
                     verify=False
                 )
+                
+                logger.info(f"📡 Статус загрузки видео: {upload_response.status_code}")
                 
                 if upload_response.status_code != 200:
                     logger.error(f"❌ Ошибка загрузки видео: {upload_response.status_code} - {upload_response.text[:200]}")
@@ -282,7 +295,8 @@ class APIClient:
                 
                 try:
                     upload_result = upload_response.json()
-                except ValueError:
+                    logger.info(f"📦 Результат загрузки видео: {upload_result}")
+                except ValueError as e:
                     raw_text = upload_response.text.strip()
                     logger.error(f"❌ Невалидный JSON в ответе: {raw_text[:200]}")
                     if attempt < max_retries - 1:
@@ -292,17 +306,28 @@ class APIClient:
                 
                 # Извлекаем токен видео
                 token = None
+                
                 if 'videos' in upload_result and isinstance(upload_result['videos'], dict):
                     for video_data in upload_result['videos'].values():
-                        if isinstance(video_data, dict) and 'token' in video_data:
-                            token = video_data['token']
-                            break
+                        if isinstance(video_data, dict):
+                            if 'token' in video_data:
+                                token = video_data['token']
+                                break
+                            elif 'file_token' in video_data:
+                                token = video_data['file_token']
+                                break
                 
                 if not token and 'token' in upload_result:
                     token = upload_result['token']
                 
-                if not token and 'data' in upload_result and 'token' in upload_result['data']:
-                    token = upload_result['data']['token']
+                if not token and 'data' in upload_result:
+                    if isinstance(upload_result['data'], dict):
+                        token = upload_result['data'].get('token')
+                        if not token:
+                            token = upload_result['data'].get('file_token')
+                
+                if not token and 'file_token' in upload_result:
+                    token = upload_result['file_token']
                 
                 if not token:
                     logger.error(f"❌ Не получен токен видео: {upload_result}")
@@ -328,11 +353,11 @@ class APIClient:
                 return None
             except Exception as e:
                 logger.error(f"❌ Ошибка загрузки видео: {e}")
+                import traceback
+                traceback.print_exc()
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                     continue
-                import traceback
-                traceback.print_exc()
                 return None
         
         return None
@@ -520,7 +545,6 @@ UPLOAD_PAGE = """
         const btnStart = document.getElementById('btnStart');
         const btnStop = document.getElementById('btnStop');
 
-        // Показываем информацию о задержке
         delayInfo.style.display = 'block';
 
         document.addEventListener('DOMContentLoaded', function() {
@@ -725,7 +749,6 @@ UPLOAD_PAGE = """
                     reportBtn.disabled = false;
                     reportReady = true;
                     
-                    // Автоматическая очистка после формирования отчета
                     addLog('🧹 Автоочистка данных после формирования отчета...');
                     fetch('/auto_cleanup/' + userId, {
                         method: 'POST',
@@ -962,18 +985,16 @@ UPLOAD_PAGE = """
 
         async function uploadSingleVideo(file, folderName) {
             try {
-                // Проверяем размер видео (максимум 50MB)
                 if (file.size > 50 * 1024 * 1024) {
                     addLog(`⚠️ Видео ${file.name} слишком большое (${(file.size/1024/1024).toFixed(1)}MB > 50MB)`);
                     return null;
                 }
                 
-                // Проверяем формат видео
-                const validFormats = ['.mp4', '.mov', '.avi', '.mkv', '.webm'];
-                const ext = '.' + file.name.split('.').pop().toLowerCase();
+                const validFormats = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.mpeg', '.mpg'];
+                const fileName = file.name || '';
+                const ext = '.' + fileName.split('.').pop().toLowerCase();
                 if (!validFormats.includes(ext)) {
                     addLog(`⚠️ Неподдерживаемый формат видео ${file.name}: ${ext}`);
-                    return null;
                 }
                 
                 addLog(`🎬 Загрузка видео ${file.name} (${(file.size/1024/1024).toFixed(1)}MB)...`);
@@ -984,7 +1005,7 @@ UPLOAD_PAGE = """
                 formData.append('folder_name', folderName);
                 
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 120000); // 120 секунд таймаут
+                const timeoutId = setTimeout(() => controller.abort(), 180000);
                 
                 try {
                     const response = await fetch('/upload_video', {
@@ -1014,7 +1035,7 @@ UPLOAD_PAGE = """
                 } catch (fetchError) {
                     clearTimeout(timeoutId);
                     if (fetchError.name === 'AbortError') {
-                        addLog(`⏱️ Таймаут загрузки видео ${file.name} (120 секунд)`);
+                        addLog(`⏱️ Таймаут загрузки видео ${file.name} (180 секунд)`);
                     } else {
                         addLog(`❌ Ошибка загрузки видео ${file.name}: ${fetchError.message}`);
                     }
@@ -1043,7 +1064,6 @@ UPLOAD_PAGE = """
                 metadataText = parts[1] ? parts[1].trim() : '';
             }
             
-            // Разделяем фото и видео
             const imageFiles = files
                 .filter(f => f.type && f.type.startsWith('image/'))
                 .slice(0, 10);
@@ -1054,9 +1074,9 @@ UPLOAD_PAGE = """
                     const name = f.name || '';
                     const type = f.type || '';
                     return type.startsWith('video/') || 
-                           name.toLowerCase().match(/\.(mp4|mov|avi|mkv|webm)$/);
+                           name.toLowerCase().match(/\.(mp4|mov|avi|mkv|webm|mpeg|mpg)$/);
                 })
-                .slice(0, 2); // Максимум 2 видео на сообщение
+                .slice(0, 2);
             
             addLog(`📸 Найдено фото: ${imageFiles.length}, 🎬 видео: ${videoFiles.length}`);
             
@@ -1081,7 +1101,7 @@ UPLOAD_PAGE = """
                 if (token) {
                     videoTokens.push(token);
                 }
-                await new Promise(r => setTimeout(r, 500)); // Больше пауза для видео
+                await new Promise(r => setTimeout(r, 500));
             }
             
             addLog(`📦 Загружено ${imageTokens.length} фото и ${videoTokens.length} видео`);
@@ -1097,7 +1117,6 @@ UPLOAD_PAGE = """
         }
 
         function getRandomDelay() {
-            // 20-40 секунд
             return Math.floor(Math.random() * 20000) + 20000;
         }
 
@@ -1220,14 +1239,12 @@ UPLOAD_PAGE = """
                 
                 processedCount = i + 1;
                 
-                // 🔥 ЗАДЕРЖКА 20-40 СЕКУНД МЕЖДУ ОТПРАВКАМИ (кроме последней)
                 if (i < folderNames.length - 1 && !isStopped) {
                     currentDelay = getRandomDelay();
                     const delaySeconds = Math.round(currentDelay / 1000);
                     addLog(`⏱️ Пауза ${delaySeconds} секунд перед следующей папкой...`);
                     showStatus('info', `⏱️ Пауза ${delaySeconds}с перед следующей папкой...`);
                     
-                    // Показываем обратный отсчет в прогрессе
                     for (let t = delaySeconds; t > 0 && !isStopped; t--) {
                         progress.textContent = `${i}/${totalFolders} (⏱️ ${t}с)`;
                         await new Promise(r => setTimeout(r, 1000));
@@ -1298,12 +1315,10 @@ UPLOAD_PAGE = """
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
-        # Обрабатываем POST запросы на корневой URL
         try:
             data = request.get_json()
             if data:
                 logger.info(f"📩 Получен POST на корневой URL: {data}")
-                # Если это похоже на вебхук, обрабатываем как вебхук
                 if data.get('update_type'):
                     return webhook_processor(data)
                 return jsonify({"status": "ok", "message": "POST received"}), 200
@@ -1315,7 +1330,6 @@ def index():
 
 
 def webhook_processor(data):
-    """Обработчик вебхука, вынесенный в отдельную функцию"""
     try:
         logger.info(f"📩 ОБРАБОТКА ВЕБХУКА: {data}")
         
@@ -1472,16 +1486,25 @@ def upload_video():
         if not user_id:
             return jsonify({'success': False, 'message': 'Нет user_id'}), 400
         
-        video_bytes = video.read()
-        logger.info(f"🎬 Загрузка видео {video.filename}, размер: {len(video_bytes)} байт")
+        # Проверяем размер видео
+        video.seek(0, 2)
+        size = video.tell()
+        video.seek(0)
         
-        token = api.upload_video(video_bytes, video.filename)
+        if size > 50 * 1024 * 1024:
+            return jsonify({'success': False, 'message': 'Видео слишком большое (максимум 50MB)'}), 400
+        
+        filename = video.filename or 'video.mp4'
+        video_bytes = video.read()
+        logger.info(f"🎬 Загрузка видео {filename}, размер: {len(video_bytes)} байт")
+        
+        token = api.upload_video(video_bytes, filename)
         
         if token:
             logger.info(f"✅ Видео загружено, токен: {token[:20]}...")
             return jsonify({'success': True, 'token': token, 'type': 'video'})
         else:
-            logger.error(f"❌ Не удалось загрузить видео {video.filename}")
+            logger.error(f"❌ Не удалось загрузить видео {filename}")
             return jsonify({'success': False, 'message': 'Не удалось загрузить видео'}), 500
         
     except Exception as e:
@@ -1769,7 +1792,6 @@ def clear_user_data(user_id):
         publisher.clear_diagnostic_log()
         publisher.pending_messages = {}
         
-        # Очищаем временную папку пользователя
         try:
             user_folder = fm.get_user_folder(user_id)
             if os.path.exists(user_folder):
@@ -1795,22 +1817,18 @@ def clear_user_data(user_id):
 
 @app.route('/auto_cleanup/<int:user_id>', methods=['POST'])
 def auto_cleanup(user_id):
-    """Автоматическая очистка данных пользователя после завершения"""
     try:
         def delayed_cleanup():
-            time.sleep(10)  # Небольшая задержка перед очисткой
+            time.sleep(10)
             logger.info(f"🧹 Автоочистка данных для {user_id}")
             
-            # Очищаем БД
             db.clear_user_data(user_id)
             publisher.clear_diagnostic_log()
             publisher.pending_messages = {}
             
-            # Удаляем папку пользователя (кроме отчетов)
             try:
                 user_folder = fm.get_user_folder(user_id)
                 if os.path.exists(user_folder):
-                    # Удаляем все, кроме отчетов
                     for item in os.listdir(user_folder):
                         item_path = os.path.join(user_folder, item)
                         if os.path.isdir(item_path):
@@ -1824,7 +1842,6 @@ def auto_cleanup(user_id):
             except Exception as e:
                 logger.error(f"⚠️ Ошибка очистки папки: {e}")
             
-            # Очищаем временную папку
             try:
                 temp_dir = os.path.join(DATA_DIR, 'temp', str(user_id))
                 if os.path.exists(temp_dir):
