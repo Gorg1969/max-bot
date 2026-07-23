@@ -1,4 +1,4 @@
-# app.py - исправленная версия
+# app.py - полная версия с поддержкой видео
 from flask import Flask, request, jsonify, render_template_string, send_file
 import requests
 import logging
@@ -201,6 +201,153 @@ class APIClient:
             traceback.print_exc()
             return None
 
+    def upload_video(self, video_bytes, filename='video.mp4'):
+        """
+        Загружает видеофайл на сервер MAX
+        """
+        if not self.token:
+            logger.error("❌ Нет токена для загрузки видео")
+            return None
+        
+        try:
+            # Получаем URL для загрузки видео
+            response = requests.post(
+                f"{self.base_url}/uploads",
+                headers={"Authorization": self.token},
+                params={"type": "video"},
+                timeout=30,
+                verify=False
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"❌ Ошибка получения URL для видео: {response.status_code} - {response.text[:200]}")
+                return None
+            
+            try:
+                upload_data = response.json()
+            except ValueError:
+                raw_text = response.text.strip()
+                logger.error(f"❌ Невалидный JSON: {raw_text[:200]}")
+                return None
+            
+            upload_url = upload_data.get('url')
+            if not upload_url:
+                logger.error(f"❌ Не получен URL: {upload_data}")
+                return None
+            
+            # Определяем тип контента
+            content_type = 'video/mp4'
+            if filename.lower().endswith('.mov'):
+                content_type = 'video/quicktime'
+            elif filename.lower().endswith('.avi'):
+                content_type = 'video/x-msvideo'
+            elif filename.lower().endswith('.mkv'):
+                content_type = 'video/x-matroska'
+            elif filename.lower().endswith('.webm'):
+                content_type = 'video/webm'
+            
+            files = {'data': (filename, video_bytes, content_type)}
+            
+            upload_response = requests.post(
+                upload_url,
+                files=files,
+                timeout=120,  # Видео может загружаться дольше
+                verify=False
+            )
+            
+            if upload_response.status_code != 200:
+                logger.error(f"❌ Ошибка загрузки видео: {upload_response.status_code} - {upload_response.text[:200]}")
+                return None
+            
+            try:
+                upload_result = upload_response.json()
+            except ValueError:
+                raw_text = upload_response.text.strip()
+                logger.error(f"❌ Невалидный JSON в ответе: {raw_text[:200]}")
+                return None
+            
+            # Извлекаем токен видео
+            token = None
+            if 'videos' in upload_result and isinstance(upload_result['videos'], dict):
+                for video_data in upload_result['videos'].values():
+                    if isinstance(video_data, dict) and 'token' in video_data:
+                        token = video_data['token']
+                        break
+            
+            if not token and 'token' in upload_result:
+                token = upload_result['token']
+            
+            if not token and 'data' in upload_result and 'token' in upload_result['data']:
+                token = upload_result['data']['token']
+            
+            if not token:
+                logger.error(f"❌ Не получен токен видео: {upload_result}")
+                return None
+            
+            logger.info(f"✅ Видео загружено, токен: {token[:20]}...")
+            return token
+            
+        except requests.exceptions.Timeout:
+            logger.error("❌ Таймаут при загрузке видео")
+            return None
+        except requests.exceptions.ConnectionError:
+            logger.error("❌ Ошибка соединения при загрузке видео")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки видео: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def send_message_with_attachments_and_video(self, chat_id, text, image_tokens, video_tokens):
+        """
+        Отправляет сообщение с фото и видео
+        """
+        if not self.token:
+            return False
+        try:
+            attachments = []
+            
+            # Добавляем фото
+            for token in image_tokens[:10]:
+                attachments.append({
+                    "type": "image",
+                    "payload": {"token": token}
+                })
+            
+            # Добавляем видео (максимум 1-2 видео на сообщение)
+            for token in video_tokens[:2]:
+                attachments.append({
+                    "type": "video",
+                    "payload": {"token": token}
+                })
+            
+            payload = {
+                "chat_id": str(chat_id),
+                "text": text,
+                "format": "markdown",
+                "attachments": attachments
+            }
+            
+            response = requests.post(
+                f"{self.base_url}/messages",
+                headers={"Authorization": self.token, "Content-Type": "application/json"},
+                json=payload,
+                timeout=90,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                logger.info(f"✅ Сообщение с фото/видео отправлено в чат {chat_id}")
+                return True, response
+            else:
+                logger.error(f"❌ Ошибка: {response.status_code} - {response.text}")
+                return False, None
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка: {e}")
+            return False, None
+
 
 api = APIClient()
 publisher = Publisher(api, fm, db)
@@ -263,6 +410,10 @@ UPLOAD_PAGE = """
         .clear-btn { background: #dc3545; color: white; }
         .clear-btn:hover { background: #c82333; }
         .delay-info { background: #e7f5ff; padding: 8px 15px; border-radius: 5px; margin: 5px 0; font-size: 13px; color: #0056b3; display: none; }
+        .media-types { display: flex; gap: 15px; flex-wrap: wrap; margin: 10px 0; padding: 10px; background: #f8f9fa; border-radius: 5px; }
+        .media-types .badge { padding: 4px 12px; border-radius: 20px; font-size: 13px; }
+        .badge-photo { background: #007bff; color: white; }
+        .badge-video { background: #dc3545; color: white; }
         @media (max-width: 600px) {
             body { padding: 10px; margin: 10px; }
             .container { padding: 15px; }
@@ -280,14 +431,20 @@ UPLOAD_PAGE = """
             <strong>📌 Как подготовить папку:</strong><br>
             1️⃣ Создайте головную папку (любое название)<br>
             2️⃣ Внутри создайте подпапки объявлений: <code>1 -123456789</code>, <code>2 -987654321</code><br>
-            3️⃣ В каждой подпапке: <code>info.txt</code> (текст) и фото (1-10 шт)<br>
+            3️⃣ В каждой подпапке: <code>info.txt</code> (текст), фото (1-10 шт) и/или видео (1-2 шт)<br>
             4️⃣ В тексте используйте разделитель <code>#изъятая</code>:<br>
             &nbsp;&nbsp;• Текст ДО разделителя — публикуется в чат<br>
             &nbsp;&nbsp;• Текст ПОСЛЕ разделителя — идет в отчет<br>
             5️⃣ Перетащите головную папку в поле ниже<br>
             6️⃣ Каждая папка отправляется отдельным запросом<br>
-            7️⃣ <strong>Максимум 10 фото</strong><br>
-            8️⃣ <strong>Интервал между отправками: 20-40 секунд</strong>
+            7️⃣ <strong>Максимум 10 фото и 2 видео</strong><br>
+            8️⃣ <strong>Интервал между отправками: 20-40 секунд</strong><br>
+            9️⃣ <strong>Поддерживаемые видео: MP4, MOV, AVI, MKV, WEBM (до 50MB)</strong>
+        </div>
+        
+        <div class="media-types">
+            <span>📸 <span class="badge badge-photo">Фото: до 10 шт</span></span>
+            <span>🎬 <span class="badge badge-video">Видео: до 2 шт</span></span>
         </div>
         
         <div class="drop-zone" id="dropZone">
@@ -340,7 +497,7 @@ UPLOAD_PAGE = """
             </p>
         </div>
         
-        <div class="footer">⚡ MAX Bot | Загрузка объявлений v2.0</div>
+        <div class="footer">⚡ MAX Bot | Загрузка объявлений v3.0 (с видео)</div>
     </div>
 
     <script>
@@ -814,6 +971,48 @@ UPLOAD_PAGE = """
             }
         }
 
+        async function uploadSingleVideo(file, folderName) {
+            try {
+                // Проверяем размер видео (максимум 50MB)
+                if (file.size > 50 * 1024 * 1024) {
+                    addLog(`⚠️ Видео ${file.name} слишком большое (${(file.size/1024/1024).toFixed(1)}MB > 50MB)`);
+                    return null;
+                }
+                
+                addLog(`🎬 Загрузка видео ${file.name} (${(file.size/1024/1024).toFixed(1)}MB)...`);
+                
+                const formData = new FormData();
+                formData.append('video', file);
+                formData.append('user_id', userId);
+                formData.append('folder_name', folderName);
+                
+                const response = await fetch('/upload_video', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    addLog(`❌ Сервер вернул не JSON: ${text.substring(0, 100)}`);
+                    return null;
+                }
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    addLog(`✅ Видео ${file.name} загружено`);
+                    return result.token;
+                } else {
+                    addLog(`❌ Ошибка загрузки видео ${file.name}: ${result.message}`);
+                    return null;
+                }
+            } catch (error) {
+                addLog(`❌ Ошибка загрузки видео ${file.name}: ${error.message}`);
+                return null;
+            }
+        }
+
         async function prepareFolderData(folderName, files) {
             const txtFile = files.find(f => f.name === 'info.txt' || f.name.endsWith('.txt'));
             if (!txtFile) {
@@ -831,9 +1030,20 @@ UPLOAD_PAGE = """
                 metadataText = parts[1] ? parts[1].trim() : '';
             }
             
+            // Разделяем фото и видео
             const imageFiles = files
                 .filter(f => f.type && f.type.startsWith('image/'))
                 .slice(0, 10);
+            
+            const videoFiles = files
+                .filter(f => {
+                    if (!f.type) return false;
+                    return f.type.startsWith('video/') || 
+                           f.name.toLowerCase().match(/\.(mp4|mov|avi|mkv|webm)$/);
+                })
+                .slice(0, 2); // Максимум 2 видео на сообщение
+            
+            addLog(`📸 Найдено фото: ${imageFiles.length}, 🎬 видео: ${videoFiles.length}`);
             
             const imageTokens = [];
             for (const img of imageFiles) {
@@ -847,14 +1057,27 @@ UPLOAD_PAGE = """
                 await new Promise(r => setTimeout(r, 300));
             }
             
-            addLog(`📦 Загружено ${imageTokens.length} из ${imageFiles.length} фото`);
+            const videoTokens = [];
+            for (const vid of videoFiles) {
+                if (isStopped) {
+                    break;
+                }
+                const token = await uploadSingleVideo(vid, folderName);
+                if (token) {
+                    videoTokens.push(token);
+                }
+                await new Promise(r => setTimeout(r, 500)); // Больше пауза для видео
+            }
+            
+            addLog(`📦 Загружено ${imageTokens.length} фото и ${videoTokens.length} видео`);
             
             return {
                 folderName: folderName,
                 adText: adText,
                 metadataText: metadataText,
                 fullText: fullText,
-                imageTokens: imageTokens
+                imageTokens: imageTokens,
+                videoTokens: videoTokens
             };
         }
 
@@ -947,14 +1170,18 @@ UPLOAD_PAGE = """
                         break;
                     }
                     
-                    addLog(`📤 Отправка ${i+1}/${totalFolders}: ${folderName} (${folderData.imageTokens.length} фото)`);
+                    addLog(`📤 Отправка ${i+1}/${totalFolders}: ${folderName} (${folderData.imageTokens.length} фото, ${folderData.videoTokens.length} видео)`);
                     
-                    const response = await fetch('/publish_folder', {
+                    const response = await fetch('/publish_folder_with_video', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             user_id: parseInt(userId),
-                            folder: folderData
+                            folder: {
+                                ...folderData,
+                                imageTokens: folderData.imageTokens,
+                                videoTokens: folderData.videoTokens
+                            }
                         })
                     });
                     
@@ -1095,6 +1322,38 @@ def upload_photo():
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
+@app.route('/upload_video', methods=['POST'])
+def upload_video():
+    try:
+        video = request.files.get('video')
+        user_id = request.form.get('user_id')
+        folder_name = request.form.get('folder_name')
+        
+        if not video:
+            return jsonify({'success': False, 'message': 'Нет видео'}), 400
+        
+        if not user_id:
+            return jsonify({'success': False, 'message': 'Нет user_id'}), 400
+        
+        video_bytes = video.read()
+        logger.info(f"🎬 Загрузка видео {video.filename}, размер: {len(video_bytes)} байт")
+        
+        token = api.upload_video(video_bytes, video.filename)
+        
+        if token:
+            logger.info(f"✅ Видео загружено, токен: {token[:20]}...")
+            return jsonify({'success': True, 'token': token, 'type': 'video'})
+        else:
+            logger.error(f"❌ Не удалось загрузить видео {video.filename}")
+            return jsonify({'success': False, 'message': 'Не удалось загрузить видео'}), 500
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки видео: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
 @app.route('/stop_processing', methods=['POST'])
 def stop_processing():
     try:
@@ -1160,6 +1419,41 @@ def publish_folder():
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
+@app.route('/publish_folder_with_video', methods=['POST'])
+def publish_folder_with_video():
+    try:
+        data = request.get_json()
+        user_id = data.get('user_id')
+        folder_data = data.get('folder')
+        
+        if not user_id or not folder_data:
+            return jsonify({'success': False, 'message': 'Нет данных'}), 400
+        
+        folder_name = folder_data.get('folderName')
+        ad_text = folder_data.get('adText')
+        metadata_text = folder_data.get('metadataText')
+        image_tokens = folder_data.get('imageTokens', [])
+        video_tokens = folder_data.get('videoTokens', [])
+        
+        logger.info(f"📦 Получена папка: {folder_name} от пользователя {user_id}")
+        logger.info(f"📝 Текст: {len(ad_text)} символов, 🖼️ Фото: {len(image_tokens)}, 🎬 Видео: {len(video_tokens)}")
+        
+        success, message = publisher.publish_folder_with_video_tokens(
+            user_id, folder_name, ad_text, metadata_text, image_tokens, video_tokens
+        )
+        
+        if success:
+            return jsonify({'success': True, 'message': message})
+        else:
+            return jsonify({'success': False, 'message': message}), 500
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -1202,7 +1496,7 @@ def webhook():
                         "📋 **Инструкция:**\n"
                         "1. Подготовьте папки с объявлениями\n"
                         "2. Используйте разделитель #изъятая\n"
-                        "3. Фото до 10 шт на объявление\n"
+                        "3. Фото до 10 шт, видео до 2 шт на объявление\n"
                         "4. Интервал между отправками: 20-40 секунд"
                     )
                     return jsonify({"ok": True}), 200
