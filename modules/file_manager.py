@@ -10,89 +10,34 @@ logger = logging.getLogger(__name__)
 
 class FileManager:
     def __init__(self, data_dir="/app/data"):
-        """
-        Инициализация менеджера файлов
-        
-        Args:
-            data_dir: Путь к директории с данными
-        """
         self.data_dir = data_dir
         os.makedirs(data_dir, exist_ok=True)
         logger.info(f"✅ FileManager инициализирован: {data_dir}")
     
     def get_user_folder(self, user_id):
-        """
-        Возвращает путь к папке пользователя.
-        Создает папку, если она не существует.
-        
-        Args:
-            user_id: ID пользователя
-            
-        Returns:
-            str: Путь к папке пользователя
-        """
         user_folder = os.path.join(self.data_dir, f"user_{user_id}")
         os.makedirs(user_folder, exist_ok=True)
         return user_folder
     
     def get_ads_folder(self, user_id):
-        """
-        Возвращает путь к папке с объявлениями пользователя.
-        
-        Args:
-            user_id: ID пользователя
-            
-        Returns:
-            str: Путь к папке с объявлениями
-        """
         user_folder = self.get_user_folder(user_id)
         ads_folder = os.path.join(user_folder, "ads")
         os.makedirs(ads_folder, exist_ok=True)
         return ads_folder
     
     def get_temp_folder(self, user_id):
-        """
-        Возвращает путь к временной папке пользователя.
-        
-        Args:
-            user_id: ID пользователя
-            
-        Returns:
-            str: Путь к временной папке
-        """
         user_folder = self.get_user_folder(user_id)
         temp_folder = os.path.join(user_folder, "temp")
         os.makedirs(temp_folder, exist_ok=True)
         return temp_folder
     
     def get_report_folder(self, user_id):
-        """
-        Возвращает путь к папке с отчетами пользователя.
-        
-        Args:
-            user_id: ID пользователя
-            
-        Returns:
-            str: Путь к папке с отчетами
-        """
         user_folder = self.get_user_folder(user_id)
         report_folder = os.path.join(user_folder, "reports")
         os.makedirs(report_folder, exist_ok=True)
         return report_folder
     
     def save_file(self, user_id, filename, content, subfolder=None):
-        """
-        Сохраняет файл в папку пользователя.
-        
-        Args:
-            user_id: ID пользователя
-            filename: Имя файла
-            content: Содержимое файла (bytes или str)
-            subfolder: Подпапка (опционально)
-            
-        Returns:
-            str: Путь к сохраненному файлу
-        """
         try:
             if subfolder:
                 folder = os.path.join(self.get_user_folder(user_id), subfolder)
@@ -102,7 +47,6 @@ class FileManager:
             
             filepath = os.path.join(folder, filename)
             
-            # Записываем файл
             if isinstance(content, str):
                 with open(filepath, 'w', encoding='utf-8') as f:
                     f.write(content)
@@ -118,17 +62,6 @@ class FileManager:
             return None
     
     def read_file(self, user_id, filename, subfolder=None):
-        """
-        Читает файл из папки пользователя.
-        
-        Args:
-            user_id: ID пользователя
-            filename: Имя файла
-            subfolder: Подпапка (опционально)
-            
-        Returns:
-            str или None: Содержимое файла
-        """
         try:
             if subfolder:
                 filepath = os.path.join(self.get_user_folder(user_id), subfolder, filename)
@@ -147,17 +80,6 @@ class FileManager:
             return None
     
     def delete_file(self, user_id, filename, subfolder=None):
-        """
-        Удаляет файл из папки пользователя.
-        
-        Args:
-            user_id: ID пользователя
-            filename: Имя файла
-            subfolder: Подпапка (опционально)
-            
-        Returns:
-            bool: True если файл удален
-        """
         try:
             if subfolder:
                 filepath = os.path.join(self.get_user_folder(user_id), subfolder, filename)
@@ -177,15 +99,6 @@ class FileManager:
             return False
     
     def delete_user_folder(self, user_id):
-        """
-        Полностью удаляет папку пользователя.
-        
-        Args:
-            user_id: ID пользователя
-            
-        Returns:
-            bool: True если папка удалена
-        """
         try:
             user_folder = self.get_user_folder(user_id)
             if os.path.exists(user_folder):
@@ -198,15 +111,6 @@ class FileManager:
             return False
     
     def clear_temp_folder(self, user_id):
-        """
-        Очищает временную папку пользователя.
-        
-        Args:
-            user_id: ID пользователя
-            
-        Returns:
-            bool: True если очищено
-        """
         try:
             temp_folder = self.get_temp_folder(user_id)
             if os.path.exists(temp_folder):
@@ -220,16 +124,6 @@ class FileManager:
             return False
     
     def list_user_files(self, user_id, subfolder=None):
-        """
-        Возвращает список файлов в папке пользователя.
-        
-        Args:
-            user_id: ID пользователя
-            subfolder: Подпапка (опционально)
-            
-        Returns:
-            list: Список файлов
-        """
         try:
             if subfolder:
                 folder = os.path.join(self.get_user_folder(user_id), subfolder)
@@ -257,17 +151,6 @@ class FileManager:
             return []
     
     def get_file_info(self, user_id, filename, subfolder=None):
-        """
-        Возвращает информацию о файле.
-        
-        Args:
-            user_id: ID пользователя
-            filename: Имя файла
-            subfolder: Подпапка (опционально)
-            
-        Returns:
-            dict или None: Информация о файле
-        """
         try:
             if subfolder:
                 filepath = os.path.join(self.get_user_folder(user_id), subfolder, filename)
@@ -292,12 +175,6 @@ class FileManager:
             return None
     
     def cleanup_old_files(self, max_age_hours=24):
-        """
-        Очищает старые файлы пользователей.
-        
-        Args:
-            max_age_hours: Максимальный возраст файлов в часах
-        """
         try:
             current_time = time.time()
             max_age_seconds = max_age_hours * 3600
@@ -306,11 +183,9 @@ class FileManager:
             for item in os.listdir(self.data_dir):
                 item_path = os.path.join(self.data_dir, item)
                 
-                # Проверяем только папки пользователей
                 if not os.path.isdir(item_path) or not item.startswith('user_'):
                     continue
                 
-                # Проверяем возраст папки
                 dir_mtime = os.path.getmtime(item_path)
                 if current_time - dir_mtime > max_age_seconds:
                     shutil.rmtree(item_path)
@@ -324,15 +199,6 @@ class FileManager:
             logger.error(f"❌ Ошибка очистки старых файлов: {e}")
     
     def get_user_size(self, user_id):
-        """
-        Возвращает размер папки пользователя.
-        
-        Args:
-            user_id: ID пользователя
-            
-        Returns:
-            int: Размер в байтах
-        """
         try:
             user_folder = self.get_user_folder(user_id)
             total_size = 0
@@ -350,15 +216,6 @@ class FileManager:
             return 0
     
     def ensure_folder_exists(self, folder_path):
-        """
-        Проверяет существование папки и создает при необходимости.
-        
-        Args:
-            folder_path: Путь к папке
-            
-        Returns:
-            bool: True если папка существует или создана
-        """
         try:
             os.makedirs(folder_path, exist_ok=True)
             return True
