@@ -1,4 +1,4 @@
-# app.py - полная версия с поддержкой видео и исправленным корневым маршрутом
+# app.py - полная версия с поддержкой видео и повторными попытками
 from flask import Flask, request, jsonify, render_template_string, send_file
 import requests
 import logging
@@ -10,6 +10,7 @@ import threading
 import time
 import base64
 import random
+import re
 from werkzeug.exceptions import ClientDisconnected
 from modules import Database, FileManager, Publisher, ReportGenerator
 
@@ -203,101 +204,138 @@ class APIClient:
 
     def upload_video(self, video_bytes, filename='video.mp4'):
         """
-        Загружает видеофайл на сервер MAX
+        Загружает видеофайл на сервер MAX с повторными попытками
         """
         if not self.token:
             logger.error("❌ Нет токена для загрузки видео")
             return None
         
-        try:
-            # Получаем URL для загрузки видео
-            response = requests.post(
-                f"{self.base_url}/uploads",
-                headers={"Authorization": self.token},
-                params={"type": "video"},
-                timeout=30,
-                verify=False
-            )
-            
-            if response.status_code != 200:
-                logger.error(f"❌ Ошибка получения URL для видео: {response.status_code} - {response.text[:200]}")
-                return None
-            
+        max_retries = 3
+        retry_delay = 3
+        
+        for attempt in range(max_retries):
             try:
-                upload_data = response.json()
-            except ValueError:
-                raw_text = response.text.strip()
-                logger.error(f"❌ Невалидный JSON: {raw_text[:200]}")
+                logger.info(f"🎬 Попытка {attempt + 1}/{max_retries} загрузки видео {filename}")
+                
+                # Получаем URL для загрузки видео
+                response = requests.post(
+                    f"{self.base_url}/uploads",
+                    headers={"Authorization": self.token},
+                    params={"type": "video"},
+                    timeout=30,
+                    verify=False
+                )
+                
+                if response.status_code != 200:
+                    logger.error(f"❌ Ошибка получения URL: {response.status_code} - {response.text[:200]}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    return None
+                
+                try:
+                    upload_data = response.json()
+                except ValueError:
+                    raw_text = response.text.strip()
+                    logger.error(f"❌ Невалидный JSON: {raw_text[:200]}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    return None
+                
+                upload_url = upload_data.get('url')
+                if not upload_url:
+                    logger.error(f"❌ Не получен URL: {upload_data}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    return None
+                
+                # Определяем тип контента
+                content_type = 'video/mp4'
+                if filename.lower().endswith('.mov'):
+                    content_type = 'video/quicktime'
+                elif filename.lower().endswith('.avi'):
+                    content_type = 'video/x-msvideo'
+                elif filename.lower().endswith('.mkv'):
+                    content_type = 'video/x-matroska'
+                elif filename.lower().endswith('.webm'):
+                    content_type = 'video/webm'
+                
+                files = {'data': (filename, video_bytes, content_type)}
+                
+                logger.info(f"🎬 Загрузка видео на {upload_url[:50]}... размер: {len(video_bytes)} байт")
+                
+                upload_response = requests.post(
+                    upload_url,
+                    files=files,
+                    timeout=180,  # Увеличенный таймаут для видео
+                    verify=False
+                )
+                
+                if upload_response.status_code != 200:
+                    logger.error(f"❌ Ошибка загрузки видео: {upload_response.status_code} - {upload_response.text[:200]}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    return None
+                
+                try:
+                    upload_result = upload_response.json()
+                except ValueError:
+                    raw_text = upload_response.text.strip()
+                    logger.error(f"❌ Невалидный JSON в ответе: {raw_text[:200]}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    return None
+                
+                # Извлекаем токен видео
+                token = None
+                if 'videos' in upload_result and isinstance(upload_result['videos'], dict):
+                    for video_data in upload_result['videos'].values():
+                        if isinstance(video_data, dict) and 'token' in video_data:
+                            token = video_data['token']
+                            break
+                
+                if not token and 'token' in upload_result:
+                    token = upload_result['token']
+                
+                if not token and 'data' in upload_result and 'token' in upload_result['data']:
+                    token = upload_result['data']['token']
+                
+                if not token:
+                    logger.error(f"❌ Не получен токен видео: {upload_result}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    return None
+                
+                logger.info(f"✅ Видео загружено, токен: {token[:20]}...")
+                return token
+                
+            except requests.exceptions.Timeout:
+                logger.error(f"❌ Таймаут при загрузке видео (попытка {attempt + 1})")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
                 return None
-            
-            upload_url = upload_data.get('url')
-            if not upload_url:
-                logger.error(f"❌ Не получен URL: {upload_data}")
+            except requests.exceptions.ConnectionError:
+                logger.error(f"❌ Ошибка соединения при загрузке видео (попытка {attempt + 1})")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
                 return None
-            
-            # Определяем тип контента
-            content_type = 'video/mp4'
-            if filename.lower().endswith('.mov'):
-                content_type = 'video/quicktime'
-            elif filename.lower().endswith('.avi'):
-                content_type = 'video/x-msvideo'
-            elif filename.lower().endswith('.mkv'):
-                content_type = 'video/x-matroska'
-            elif filename.lower().endswith('.webm'):
-                content_type = 'video/webm'
-            
-            files = {'data': (filename, video_bytes, content_type)}
-            
-            upload_response = requests.post(
-                upload_url,
-                files=files,
-                timeout=120,  # Видео может загружаться дольше
-                verify=False
-            )
-            
-            if upload_response.status_code != 200:
-                logger.error(f"❌ Ошибка загрузки видео: {upload_response.status_code} - {upload_response.text[:200]}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка загрузки видео: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                import traceback
+                traceback.print_exc()
                 return None
-            
-            try:
-                upload_result = upload_response.json()
-            except ValueError:
-                raw_text = upload_response.text.strip()
-                logger.error(f"❌ Невалидный JSON в ответе: {raw_text[:200]}")
-                return None
-            
-            # Извлекаем токен видео
-            token = None
-            if 'videos' in upload_result and isinstance(upload_result['videos'], dict):
-                for video_data in upload_result['videos'].values():
-                    if isinstance(video_data, dict) and 'token' in video_data:
-                        token = video_data['token']
-                        break
-            
-            if not token and 'token' in upload_result:
-                token = upload_result['token']
-            
-            if not token and 'data' in upload_result and 'token' in upload_result['data']:
-                token = upload_result['data']['token']
-            
-            if not token:
-                logger.error(f"❌ Не получен токен видео: {upload_result}")
-                return None
-            
-            logger.info(f"✅ Видео загружено, токен: {token[:20]}...")
-            return token
-            
-        except requests.exceptions.Timeout:
-            logger.error("❌ Таймаут при загрузке видео")
-            return None
-        except requests.exceptions.ConnectionError:
-            logger.error("❌ Ошибка соединения при загрузке видео")
-            return None
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки видео: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
+        
+        return None
 
 
 api = APIClient()
@@ -930,6 +968,14 @@ UPLOAD_PAGE = """
                     return null;
                 }
                 
+                // Проверяем формат видео
+                const validFormats = ['.mp4', '.mov', '.avi', '.mkv', '.webm'];
+                const ext = '.' + file.name.split('.').pop().toLowerCase();
+                if (!validFormats.includes(ext)) {
+                    addLog(`⚠️ Неподдерживаемый формат видео ${file.name}: ${ext}`);
+                    return null;
+                }
+                
                 addLog(`🎬 Загрузка видео ${file.name} (${(file.size/1024/1024).toFixed(1)}MB)...`);
                 
                 const formData = new FormData();
@@ -937,25 +983,41 @@ UPLOAD_PAGE = """
                 formData.append('user_id', userId);
                 formData.append('folder_name', folderName);
                 
-                const response = await fetch('/upload_video', {
-                    method: 'POST',
-                    body: formData
-                });
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 120000); // 120 секунд таймаут
                 
-                const contentType = response.headers.get('content-type');
-                if (!contentType || !contentType.includes('application/json')) {
-                    const text = await response.text();
-                    addLog(`❌ Сервер вернул не JSON: ${text.substring(0, 100)}`);
-                    return null;
-                }
-                
-                const result = await response.json();
-                
-                if (result.success) {
-                    addLog(`✅ Видео ${file.name} загружено`);
-                    return result.token;
-                } else {
-                    addLog(`❌ Ошибка загрузки видео ${file.name}: ${result.message}`);
+                try {
+                    const response = await fetch('/upload_video', {
+                        method: 'POST',
+                        body: formData,
+                        signal: controller.signal
+                    });
+                    
+                    clearTimeout(timeoutId);
+                    
+                    const contentType = response.headers.get('content-type');
+                    if (!contentType || !contentType.includes('application/json')) {
+                        const text = await response.text();
+                        addLog(`❌ Сервер вернул не JSON: ${text.substring(0, 200)}`);
+                        return null;
+                    }
+                    
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        addLog(`✅ Видео ${file.name} загружено`);
+                        return result.token;
+                    } else {
+                        addLog(`❌ Ошибка загрузки видео ${file.name}: ${result.message}`);
+                        return null;
+                    }
+                } catch (fetchError) {
+                    clearTimeout(timeoutId);
+                    if (fetchError.name === 'AbortError') {
+                        addLog(`⏱️ Таймаут загрузки видео ${file.name} (120 секунд)`);
+                    } else {
+                        addLog(`❌ Ошибка загрузки видео ${file.name}: ${fetchError.message}`);
+                    }
                     return null;
                 }
             } catch (error) {
@@ -988,9 +1050,11 @@ UPLOAD_PAGE = """
             
             const videoFiles = files
                 .filter(f => {
-                    if (!f.type) return false;
-                    return f.type.startsWith('video/') || 
-                           f.name.toLowerCase().match(/\.(mp4|mov|avi|mkv|webm)$/);
+                    if (!f.type && !f.name) return false;
+                    const name = f.name || '';
+                    const type = f.type || '';
+                    return type.startsWith('video/') || 
+                           name.toLowerCase().match(/\.(mp4|mov|avi|mkv|webm)$/);
                 })
                 .slice(0, 2); // Максимум 2 видео на сообщение
             
