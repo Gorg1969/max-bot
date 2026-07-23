@@ -1,4 +1,4 @@
-# app.py - полная версия с поддержкой видео
+# app.py - полная версия с поддержкой видео и исправленным корневым маршрутом
 from flask import Flask, request, jsonify, render_template_string, send_file
 import requests
 import logging
@@ -298,55 +298,6 @@ class APIClient:
             import traceback
             traceback.print_exc()
             return None
-
-    def send_message_with_attachments_and_video(self, chat_id, text, image_tokens, video_tokens):
-        """
-        Отправляет сообщение с фото и видео
-        """
-        if not self.token:
-            return False
-        try:
-            attachments = []
-            
-            # Добавляем фото
-            for token in image_tokens[:10]:
-                attachments.append({
-                    "type": "image",
-                    "payload": {"token": token}
-                })
-            
-            # Добавляем видео (максимум 1-2 видео на сообщение)
-            for token in video_tokens[:2]:
-                attachments.append({
-                    "type": "video",
-                    "payload": {"token": token}
-                })
-            
-            payload = {
-                "chat_id": str(chat_id),
-                "text": text,
-                "format": "markdown",
-                "attachments": attachments
-            }
-            
-            response = requests.post(
-                f"{self.base_url}/messages",
-                headers={"Authorization": self.token, "Content-Type": "application/json"},
-                json=payload,
-                timeout=90,
-                verify=False
-            )
-            
-            if response.status_code == 200:
-                logger.info(f"✅ Сообщение с фото/видео отправлено в чат {chat_id}")
-                return True, response
-            else:
-                logger.error(f"❌ Ошибка: {response.status_code} - {response.text}")
-                return False, None
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
-            return False, None
 
 
 api = APIClient()
@@ -1280,9 +1231,131 @@ UPLOAD_PAGE = """
 
 # ========== МАРШРУТЫ ==========
 
-@app.route('/')
+@app.route('/', methods=['GET', 'POST'])
 def index():
+    if request.method == 'POST':
+        # Обрабатываем POST запросы на корневой URL
+        try:
+            data = request.get_json()
+            if data:
+                logger.info(f"📩 Получен POST на корневой URL: {data}")
+                # Если это похоже на вебхук, обрабатываем как вебхук
+                if data.get('update_type'):
+                    return webhook_processor(data)
+                return jsonify({"status": "ok", "message": "POST received"}), 200
+            return jsonify({"status": "ok"}), 200
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки POST на корневой URL: {e}")
+            return jsonify({"status": "error", "message": str(e)}), 500
     return "🤖 MAX Bot is running!"
+
+
+def webhook_processor(data):
+    """Обработчик вебхука, вынесенный в отдельную функцию"""
+    try:
+        logger.info(f"📩 ОБРАБОТКА ВЕБХУКА: {data}")
+        
+        if not data:
+            return jsonify({"ok": True}), 200
+        
+        update_type = data.get('update_type')
+        
+        if update_type == 'message_created':
+            logger.info("📨 Получено событие message_created")
+            
+            message = data.get('message', {})
+            recipient = message.get('recipient', {})
+            sender = message.get('sender', {})
+            body = message.get('body', {})
+            
+            chat_id = recipient.get('chat_id')
+            user_id = sender.get('user_id')
+            text = body.get('text', '')
+            message_id = body.get('mid')
+            
+            if chat_id is not None:
+                chat_id = str(chat_id)
+            
+            logger.info(f"📨 chat_id: {chat_id}, user_id: {user_id}, text: {text}, mid: {message_id}")
+            
+            if user_id and text:
+                if text.strip() == '/start':
+                    api.send_message(
+                        user_id,
+                        "🏠 **Главное меню**\n\n"
+                        "🌐 **Загрузить папку:**\n"
+                        f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
+                        "📊 **Получить отчет:**\n"
+                        f"🔗 https://maxbot.bothost.tech/report/{user_id}\n\n"
+                        "⏹ **Остановить публикацию:** `/stop`\n\n"
+                        "📋 **Инструкция:**\n"
+                        "1. Подготовьте папки с объявлениями\n"
+                        "2. Используйте разделитель #изъятая\n"
+                        "3. Фото до 10 шт, видео до 2 шт на объявление\n"
+                        "4. Интервал между отправками: 20-40 секунд"
+                    )
+                    return jsonify({"ok": True}), 200
+                
+                if text.strip() == '/stop':
+                    publisher.stop(user_id)
+                    api.send_message(
+                        user_id, 
+                        "⏹️ **Публикация остановлена!**\n\n"
+                        "✅ Все процессы остановлены\n"
+                        "🗑️ Временные файлы удалены"
+                    )
+                    return jsonify({"ok": True}), 200
+                
+                if text.strip() == '/report':
+                    api.send_message(user_id, "📊 Создаю отчет...")
+                    report_path = report_gen.generate_report(user_id)
+                    if report_path:
+                        filename = os.path.basename(report_path)
+                        download_url = f"https://maxbot.bothost.tech/download_report/{user_id}/{filename}"
+                        api.send_message(
+                            user_id,
+                            f"📊 **Отчет создан!**\n\n"
+                            f"🔗 [Скачать отчет]({download_url})"
+                        )
+                    else:
+                        api.send_message(user_id, "❌ Нет данных для отчета.")
+                    return jsonify({"ok": True}), 200
+            
+            if chat_id and message_id:
+                logger.info(f"📨 Получен ID сообщения: {message_id} для чата {chat_id}")
+                if user_id:
+                    publisher.handle_message_created(chat_id, message_id, user_id)
+                else:
+                    publisher.handle_message_created(chat_id, message_id)
+                return jsonify({"ok": True}), 200
+            
+            return jsonify({"ok": True}), 200
+        
+        if update_type == 'bot_stopped':
+            logger.info("📨 Получено событие bot_stopped")
+            return jsonify({"ok": True}), 200
+        
+        logger.info(f"ℹ️ Получен вебхук с update_type: {update_type}")
+        return jsonify({"ok": True}), 200
+        
+    except Exception as e:
+        logger.error(f"❌ ОШИБКА В ОБРАБОТКЕ ВЕБХУКА: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False}), 500
+
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    try:
+        data = request.get_json()
+        logger.info(f"📩 ПОЛУЧЕН ВЕБХУК НА /webhook: {data}")
+        return webhook_processor(data)
+    except Exception as e:
+        logger.error(f"❌ ОШИБКА В ВЕБХУКЕ: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False}), 500
 
 
 @app.route('/upload', methods=['GET'])
@@ -1452,102 +1525,6 @@ def publish_folder_with_video():
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
-
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    try:
-        data = request.get_json()
-        logger.info(f"📩 ПОЛУЧЕН ВЕБХУК: {data}")
-        
-        if not data:
-            return jsonify({"ok": True}), 200
-        
-        update_type = data.get('update_type')
-        
-        if update_type == 'message_created':
-            logger.info("📨 Получено событие message_created")
-            
-            message = data.get('message', {})
-            recipient = message.get('recipient', {})
-            sender = message.get('sender', {})
-            body = message.get('body', {})
-            
-            chat_id = recipient.get('chat_id')
-            user_id = sender.get('user_id')
-            text = body.get('text', '')
-            message_id = body.get('mid')
-            
-            if chat_id is not None:
-                chat_id = str(chat_id)
-            
-            logger.info(f"📨 chat_id: {chat_id}, user_id: {user_id}, text: {text}, mid: {message_id}")
-            
-            if user_id and text:
-                if text.strip() == '/start':
-                    api.send_message(
-                        user_id,
-                        "🏠 **Главное меню**\n\n"
-                        "🌐 **Загрузить папку:**\n"
-                        f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
-                        "📊 **Получить отчет:**\n"
-                        f"🔗 https://maxbot.bothost.tech/report/{user_id}\n\n"
-                        "⏹ **Остановить публикацию:** `/stop`\n\n"
-                        "📋 **Инструкция:**\n"
-                        "1. Подготовьте папки с объявлениями\n"
-                        "2. Используйте разделитель #изъятая\n"
-                        "3. Фото до 10 шт, видео до 2 шт на объявление\n"
-                        "4. Интервал между отправками: 20-40 секунд"
-                    )
-                    return jsonify({"ok": True}), 200
-                
-                if text.strip() == '/stop':
-                    publisher.stop(user_id)
-                    api.send_message(
-                        user_id, 
-                        "⏹️ **Публикация остановлена!**\n\n"
-                        "✅ Все процессы остановлены\n"
-                        "🗑️ Временные файлы удалены"
-                    )
-                    return jsonify({"ok": True}), 200
-                
-                if text.strip() == '/report':
-                    api.send_message(user_id, "📊 Создаю отчет...")
-                    report_path = report_gen.generate_report(user_id)
-                    if report_path:
-                        filename = os.path.basename(report_path)
-                        download_url = f"https://maxbot.bothost.tech/download_report/{user_id}/{filename}"
-                        api.send_message(
-                            user_id,
-                            f"📊 **Отчет создан!**\n\n"
-                            f"🔗 [Скачать отчет]({download_url})"
-                        )
-                    else:
-                        api.send_message(user_id, "❌ Нет данных для отчета.")
-                    return jsonify({"ok": True}), 200
-            
-            if chat_id and message_id:
-                logger.info(f"📨 Получен ID сообщения: {message_id} для чата {chat_id}")
-                if user_id:
-                    publisher.handle_message_created(chat_id, message_id, user_id)
-                else:
-                    publisher.handle_message_created(chat_id, message_id)
-                return jsonify({"ok": True}), 200
-            
-            return jsonify({"ok": True}), 200
-        
-        if update_type == 'bot_stopped':
-            logger.info("📨 Получено событие bot_stopped")
-            return jsonify({"ok": True}), 200
-        
-        logger.info(f"ℹ️ Получен вебхук с update_type: {update_type}")
-        return jsonify({"ok": True}), 200
-        
-    except Exception as e:
-        logger.error(f"❌ ОШИБКА В ВЕБХУКЕ: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({"ok": False}), 500
 
 
 @app.route('/report/<int:user_id>')
