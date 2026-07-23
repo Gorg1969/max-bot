@@ -1,4 +1,4 @@
-# modules/publisher.py - полная версия с поддержкой видео
+# modules/publisher.py - исправленная версия
 import logging
 import os
 import time
@@ -59,11 +59,10 @@ class Publisher:
             
             attachments = []
             for token in image_tokens[:10]:
-                if token and len(str(token)) > 10:
-                    attachments.append({
-                        "type": "image",
-                        "payload": {"token": str(token)}
-                    })
+                attachments.append({
+                    "type": "image",
+                    "payload": {"token": token}
+                })
             
             payload = {
                 "text": text,
@@ -123,109 +122,8 @@ class Publisher:
                     return True, None
                 except Exception as e:
                     logger.error(f"❌ Ошибка обработки ответа: {e}")
-                    return True, None
-            else:
-                logger.error(f"❌ Ошибка API: {response.status_code}")
-                return False, None
-                
-        except Exception as e:
-            logger.error(f"❌ Критическая ошибка: {e}")
-            import traceback
-            traceback.print_exc()
-            return False, None
-
-    def _send_and_get_id_with_video(self, chat_id, text, image_tokens, video_tokens):
-        """
-        Отправляет сообщение с фото и видео, возвращает ссылку на пост
-        """
-        try:
-            if not self.api.token:
-                return False, None
-            
-            valid_video_tokens = [t for t in video_tokens if t and len(str(t)) > 10]
-            
-            if len(valid_video_tokens) != len(video_tokens):
-                logger.warning(f"⚠️ Некоторые видео токены невалидны: {len(video_tokens)} -> {len(valid_video_tokens)}")
-                video_tokens = valid_video_tokens
-            
-            attachments = []
-            
-            for token in image_tokens[:10]:
-                if token and len(str(token)) > 10:
-                    attachments.append({
-                        "type": "image",
-                        "payload": {"token": str(token)}
-                    })
-            
-            for token in video_tokens[:2]:
-                if token and len(str(token)) > 10:
-                    attachments.append({
-                        "type": "video",
-                        "payload": {"token": str(token)}
-                    })
-                    logger.info(f"🎬 Добавлено видео с токеном: {str(token)[:20]}...")
-            
-            if not attachments:
-                logger.warning(f"⚠️ Нет вложений для отправки, отправляем только текст")
-            
-            payload = {
-                "text": text,
-                "format": "markdown"
-            }
-            
-            if attachments:
-                payload["attachments"] = attachments
-            
-            chat_id_str = str(chat_id)
-            chat_id_for_api = chat_id_str if chat_id_str.startswith('-') else f"-{chat_id_str}"
-            
-            logger.info(f"📤 Отправка в чат {chat_id_for_api} с {len([a for a in attachments if a['type'] == 'image'])} фото и {len([a for a in attachments if a['type'] == 'video'])} видео")
-            
-            response = requests.post(
-                f"{self.api.base_url}/messages?chat_id={chat_id_for_api}",
-                headers={
-                    "Authorization": self.api.token,
-                    "Content-Type": "application/json"
-                },
-                json=payload,
-                timeout=90,
-                verify=False
-            )
-            
-            logger.info(f"📨 СТАТУС ОТВЕТА: {response.status_code}")
-            
-            if response.status_code == 200:
-                try:
-                    result = response.json()
-                    logger.info(f"📨 ПОЛНЫЙ JSON ОТВЕТА: {json.dumps(result, indent=2, ensure_ascii=False)}")
-                    
-                    seq = None
-                    if isinstance(result, dict):
-                        if 'message' in result and isinstance(result['message'], dict):
-                            msg = result['message']
-                            if 'body' in msg and isinstance(msg['body'], dict):
-                                if 'seq' in msg['body']:
-                                    seq = msg['body']['seq']
-                                    logger.info(f"✅ Найден seq: {seq}")
-                        
-                        if not seq and 'seq' in result:
-                            seq = result['seq']
-                            logger.info(f"✅ Найден seq в корне: {seq}")
-                    
-                    if seq:
-                        encoded_id = self._seq_to_max_id(seq)
-                        post_link = f"https://max.ru/c/{chat_id_str}/{encoded_id}"
-                        logger.info(f"🔗 Ссылка на пост создана: {post_link}")
-                        return True, post_link
-                    else:
-                        logger.warning(f"⚠️ seq не найден в ответе")
-                        return True, None
-                        
-                except json.JSONDecodeError as e:
-                    logger.error(f"❌ Ошибка парсинга JSON: {e}")
-                    return True, None
-                except Exception as e:
-                    logger.error(f"❌ Ошибка обработки ответа: {e}")
+                    import traceback
+                    traceback.print_exc()
                     return True, None
             else:
                 logger.error(f"❌ Ошибка API: {response.status_code}")
@@ -244,11 +142,10 @@ class Publisher:
             
             attachments = []
             for token in image_tokens[:10]:
-                if token and len(str(token)) > 10:
-                    attachments.append({
-                        "type": "image",
-                        "payload": {"token": str(token)}
-                    })
+                attachments.append({
+                    "type": "image",
+                    "payload": {"token": token}
+                })
             
             payload = {
                 "user_id": user_id,
@@ -269,89 +166,6 @@ class Publisher:
                 },
                 json=payload,
                 timeout=60,
-                verify=False
-            )
-            
-            if response.status_code == 200:
-                seq = None
-                post_link = None
-                try:
-                    result = response.json()
-                    if 'message' in result and isinstance(result['message'], dict):
-                        msg = result['message']
-                        if 'body' in msg and isinstance(msg['body'], dict):
-                            if 'seq' in msg['body']:
-                                seq = msg['body']['seq']
-                    elif 'seq' in result:
-                        seq = result['seq']
-                    
-                    if seq:
-                        encoded_id = self._seq_to_max_id(seq)
-                        post_link = f"https://max.ru/c/{user_id}/{encoded_id}"
-                    else:
-                        post_link = None
-                except:
-                    post_link = None
-                
-                if not post_link:
-                    post_link = f"https://max.ru/c/{user_id}"
-                
-                logger.info(f"✅ Отправлено пользователю {user_id}, ссылка: {post_link}")
-                return True, post_link
-            else:
-                logger.error(f"❌ Ошибка: {response.status_code}")
-                return False, None
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
-            return False, None
-
-    def _send_to_user_with_video(self, user_id, text, image_tokens, video_tokens):
-        """
-        Отправляет сообщение пользователю с фото и видео
-        """
-        try:
-            if not self.api.token:
-                return False, None
-            
-            valid_video_tokens = [t for t in video_tokens if t and len(str(t)) > 10]
-            video_tokens = valid_video_tokens
-            
-            attachments = []
-            
-            for token in image_tokens[:10]:
-                if token and len(str(token)) > 10:
-                    attachments.append({
-                        "type": "image",
-                        "payload": {"token": str(token)}
-                    })
-            
-            for token in video_tokens[:2]:
-                if token and len(str(token)) > 10:
-                    attachments.append({
-                        "type": "video",
-                        "payload": {"token": str(token)}
-                    })
-            
-            payload = {
-                "user_id": user_id,
-                "text": text,
-                "format": "markdown"
-            }
-            
-            if attachments:
-                payload["attachments"] = attachments
-            
-            logger.info(f"📤 Отправка пользователю {user_id} с {len(image_tokens)} фото и {len(video_tokens)} видео")
-            
-            response = requests.post(
-                f"{self.api.base_url}/messages",
-                headers={
-                    "Authorization": self.api.token,
-                    "Content-Type": "application/json"
-                },
-                json=payload,
-                timeout=90,
                 verify=False
             )
             
@@ -428,72 +242,6 @@ class Publisher:
             if not success:
                 logger.warning("⚠️ Отправка в чат не удалась, пробуем в личные сообщения...")
                 success, post_link = self._send_to_user(user_id, ad_text, image_tokens)
-            
-            if not success:
-                return False, "Не удалось отправить сообщение"
-            
-            if post_link:
-                metadata['post_link'] = post_link
-                logger.info(f"🔗 Ссылка на пост сохранена: {post_link}")
-            else:
-                metadata['post_link'] = ''
-                logger.warning(f"⚠️ Ссылка на пост не получена")
-            
-            if metadata['post_link'] and 'https://max.ru/u/' in metadata['post_link']:
-                logger.error(f"❌ ОШИБКА: В post_link попала ссылка-источник! Очищаем.")
-                metadata['post_link'] = ''
-            
-            now = datetime.now(self.moscow_tz)
-            timestamp = now.timestamp()
-            self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, timestamp)
-            self.db.add_publication(user_id, folder_name, chat_id, status='success')
-            
-            logger.info(f"✅ Папка {folder_name} опубликована")
-            
-            if post_link:
-                return True, f"✅ Папка {folder_name} опубликована, ссылка: {post_link}"
-            else:
-                return True, f"✅ Папка {folder_name} опубликована"
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка публикации {folder_name}: {e}")
-            import traceback
-            traceback.print_exc()
-            return False, str(e)
-
-    def publish_folder_with_video_tokens(self, user_id, folder_name, ad_text, metadata_text, image_tokens, video_tokens):
-        """
-        Публикует папку с фото и видео
-        """
-        try:
-            if self.STOP_FLAG.get(user_id, False):
-                return False, "Остановка пользователем"
-            
-            chat_id = self.extract_chat_id_from_folder(folder_name)
-            
-            if not chat_id:
-                return False, f"Не удалось извлечь chat_id из {folder_name}"
-            
-            logger.info(f"📤 Извлечен chat_id: {chat_id}")
-            logger.info(f"📸 Фото: {len(image_tokens)}, 🎬 Видео: {len(video_tokens)}")
-            
-            metadata = self._parse_metadata(metadata_text)
-            metadata['chat_id'] = chat_id
-            metadata['video_count'] = len(video_tokens)
-            
-            if video_tokens and len(video_tokens) > 0:
-                logger.info(f"🎬 Отправка с {len(video_tokens)} видео")
-                success, post_link = self._send_and_get_id_with_video(chat_id, ad_text, image_tokens, video_tokens)
-            else:
-                logger.info(f"📸 Отправка только с фото")
-                success, post_link = self._send_and_get_id(chat_id, ad_text, image_tokens)
-            
-            if not success:
-                logger.warning("⚠️ Отправка в чат не удалась, пробуем в личные сообщения...")
-                if video_tokens and len(video_tokens) > 0:
-                    success, post_link = self._send_to_user_with_video(user_id, ad_text, image_tokens, video_tokens)
-                else:
-                    success, post_link = self._send_to_user(user_id, ad_text, image_tokens)
             
             if not success:
                 return False, "Не удалось отправить сообщение"
