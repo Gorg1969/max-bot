@@ -142,7 +142,6 @@ class Publisher:
             if not self.api.token:
                 return False, None
             
-            # Проверяем, что видео токены валидны
             valid_video_tokens = [t for t in video_tokens if t and len(str(t)) > 10]
             
             if len(valid_video_tokens) != len(video_tokens):
@@ -151,7 +150,6 @@ class Publisher:
             
             attachments = []
             
-            # Добавляем фото
             for token in image_tokens[:10]:
                 if token and len(str(token)) > 10:
                     attachments.append({
@@ -159,7 +157,6 @@ class Publisher:
                         "payload": {"token": str(token)}
                     })
             
-            # Добавляем видео (максимум 2)
             for token in video_tokens[:2]:
                 if token and len(str(token)) > 10:
                     attachments.append({
@@ -317,7 +314,6 @@ class Publisher:
             if not self.api.token:
                 return False, None
             
-            # Проверяем, что видео токены валидны
             valid_video_tokens = [t for t in video_tokens if t and len(str(t)) > 10]
             video_tokens = valid_video_tokens
             
@@ -485,7 +481,6 @@ class Publisher:
             metadata['chat_id'] = chat_id
             metadata['video_count'] = len(video_tokens)
             
-            # Если есть видео, пробуем отправить с видео
             if video_tokens and len(video_tokens) > 0:
                 logger.info(f"🎬 Отправка с {len(video_tokens)} видео")
                 success, post_link = self._send_and_get_id_with_video(chat_id, ad_text, image_tokens, video_tokens)
