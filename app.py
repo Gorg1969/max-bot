@@ -1,4 +1,4 @@
-# app.py - полная версия с поддержто�� видео и исправленными ошибками 2.0
+# app.py - полная версия с поддержкой видео и исправленными ошибками
 from flask import Flask, request, jsonify, render_template_string, send_file
 import requests
 import logging
@@ -217,7 +217,6 @@ class APIClient:
             try:
                 logger.info(f"🎬 Попытка {attempt + 1}/{max_retries} загрузки видео {filename}")
                 
-                # Получаем URL для загрузки видео
                 response = requests.post(
                     f"{self.base_url}/uploads",
                     headers={
@@ -259,7 +258,6 @@ class APIClient:
                 
                 logger.info(f"📤 URL для загрузки: {upload_url}")
                 
-                # Определяем тип контента
                 content_type = 'video/mp4'
                 ext = filename.lower().split('.')[-1] if '.' in filename else 'mp4'
                 content_types = {
@@ -304,7 +302,6 @@ class APIClient:
                         continue
                     return None
                 
-                # Извлекаем токен видео
                 token = None
                 
                 if 'videos' in upload_result and isinstance(upload_result['videos'], dict):
@@ -1486,7 +1483,6 @@ def upload_video():
         if not user_id:
             return jsonify({'success': False, 'message': 'Нет user_id'}), 400
         
-        # Проверяем размер видео
         video.seek(0, 2)
         size = video.tell()
         video.seek(0)
