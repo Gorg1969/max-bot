@@ -59,10 +59,11 @@ class Publisher:
             
             attachments = []
             for token in image_tokens[:10]:
-                attachments.append({
-                    "type": "image",
-                    "payload": {"token": token}
-                })
+                if token and len(token) > 10:
+                    attachments.append({
+                        "type": "image",
+                        "payload": {"token": token}
+                    })
             
             payload = {
                 "text": text,
@@ -143,21 +144,34 @@ class Publisher:
             if not self.api.token:
                 return False, None
             
+            # Проверяем, что видео токены валидны
+            valid_video_tokens = [t for t in video_tokens if t and len(t) > 10]
+            
+            if len(valid_video_tokens) != len(video_tokens):
+                logger.warning(f"⚠️ Некоторые видео токены невалидны: {len(video_tokens)} -> {len(valid_video_tokens)}")
+                video_tokens = valid_video_tokens
+            
             attachments = []
             
             # Добавляем фото
             for token in image_tokens[:10]:
-                attachments.append({
-                    "type": "image",
-                    "payload": {"token": token}
-                })
+                if token and len(token) > 10:
+                    attachments.append({
+                        "type": "image",
+                        "payload": {"token": token}
+                    })
             
-            # Добавляем видео
+            # Добавляем видео (максимум 2)
             for token in video_tokens[:2]:
-                attachments.append({
-                    "type": "video",
-                    "payload": {"token": token}
-                })
+                if token and len(token) > 10:
+                    attachments.append({
+                        "type": "video",
+                        "payload": {"token": token}
+                    })
+            
+            # Если нет ни фото, ни видео - отправляем только текст
+            if not attachments:
+                logger.warning(f"⚠️ Нет вложений для отправки, отправляем только текст")
             
             payload = {
                 "text": text,
@@ -235,10 +249,11 @@ class Publisher:
             
             attachments = []
             for token in image_tokens[:10]:
-                attachments.append({
-                    "type": "image",
-                    "payload": {"token": token}
-                })
+                if token and len(token) > 10:
+                    attachments.append({
+                        "type": "image",
+                        "payload": {"token": token}
+                    })
             
             payload = {
                 "user_id": user_id,
@@ -304,19 +319,25 @@ class Publisher:
             if not self.api.token:
                 return False, None
             
+            # Проверяем, что видео токены валидны
+            valid_video_tokens = [t for t in video_tokens if t and len(t) > 10]
+            video_tokens = valid_video_tokens
+            
             attachments = []
             
             for token in image_tokens[:10]:
-                attachments.append({
-                    "type": "image",
-                    "payload": {"token": token}
-                })
+                if token and len(token) > 10:
+                    attachments.append({
+                        "type": "image",
+                        "payload": {"token": token}
+                    })
             
             for token in video_tokens[:2]:
-                attachments.append({
-                    "type": "video",
-                    "payload": {"token": token}
-                })
+                if token and len(token) > 10:
+                    attachments.append({
+                        "type": "video",
+                        "payload": {"token": token}
+                    })
             
             payload = {
                 "user_id": user_id,
