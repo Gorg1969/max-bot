@@ -1,4 +1,4 @@
-# app.py - исправленная версия с поддержкой видео
+# app.py - исправленная версия с поддержкой видео 3.0
 from flask import Flask, request, jsonify, render_template_string, send_file
 import requests
 import logging
