@@ -1,4 +1,4 @@
-# modules/publisher.py - исправленная версия
+# modules/publisher.py - исправленная версия с поддержкой видео
 import logging
 import os
 import time
@@ -17,8 +17,7 @@ class Publisher:
     def __init__(self, api, file_manager, db):
         self.api = api
         self.fm = file_manager
-        self.db = db
-        self.active_publishes = {}
+        self.db = db        self.active_publishes = {}
         self.publish_threads = {}
         self.FOLDER_TIMEOUT = 120
         self.STOP_FLAG = {}
@@ -52,15 +51,22 @@ class Publisher:
             logger.error(f"❌ Ошибка конвертации seq в MAX ID: {e}")
             return str(seq)
 
-    def _send_and_get_id(self, chat_id, text, image_tokens):
+    def _send_and_get_id(self, chat_id, text, media_tokens, media_types=None):
+        """
+        Отправка сообщения с медиа (фото и/или видео)
+        """
         try:
             if not self.api.token:
                 return False, None
             
+            if media_types is None:
+                media_types = ['image'] * len(media_tokens)
+            
             attachments = []
-            for token in image_tokens[:10]:
+            for i, token in enumerate(media_tokens[:10]):
+                media_type = media_types[i] if i < len(media_types) else 'image'
                 attachments.append({
-                    "type": "image",
+                    "type": media_type,  # "image" или "video"
                     "payload": {"token": token}
                 })
             
@@ -75,7 +81,7 @@ class Publisher:
             chat_id_str = str(chat_id)
             chat_id_for_api = chat_id_str if chat_id_str.startswith('-') else f"-{chat_id_str}"
             
-            logger.info(f"📤 Отправка в чат {chat_id_for_api} с {len(attachments)} фото")
+            logger.info(f"📤 Отправка в чат {chat_id_for_api} с {len(attachments)} медиа")
             
             response = requests.post(
                 f"{self.api.base_url}/messages?chat_id={chat_id_for_api}",
@@ -135,15 +141,19 @@ class Publisher:
             traceback.print_exc()
             return False, None
 
-    def _send_to_user(self, user_id, text, image_tokens):
+    def _send_to_user(self, user_id, text, media_tokens, media_types=None):
         try:
             if not self.api.token:
                 return False, None
             
+            if media_types is None:
+                media_types = ['image'] * len(media_tokens)
+            
             attachments = []
-            for token in image_tokens[:10]:
+            for i, token in enumerate(media_tokens[:10]):
+                media_type = media_types[i] if i < len(media_types) else 'image'
                 attachments.append({
-                    "type": "image",
+                    "type": media_type,
                     "payload": {"token": token}
                 })
             
@@ -156,7 +166,7 @@ class Publisher:
             if attachments:
                 payload["attachments"] = attachments
             
-            logger.info(f"📤 Отправка пользователю {user_id}")
+            logger.info(f"📤 Отправка пользователю {user_id} с {len(attachments)} медиа")
             
             response = requests.post(
                 f"{self.api.base_url}/messages",
@@ -223,6 +233,15 @@ class Publisher:
         return metadata
 
     def publish_folder_with_tokens(self, user_id, folder_name, ad_text, metadata_text, image_tokens):
+        """
+        Устаревший метод для совместимости
+        """
+        return self.publish_folder_with_media(user_id, folder_name, ad_text, metadata_text, image_tokens)
+
+    def publish_folder_with_media(self, user_id, folder_name, ad_text, metadata_text, media_tokens, media_types=None):
+        """
+        Публикация папки с медиа (фото и видео)
+        """
         try:
             if self.STOP_FLAG.get(user_id, False):
                 return False, "Остановка пользователем"
@@ -233,15 +252,22 @@ class Publisher:
                 return False, f"Не удалось извлечь chat_id из {folder_name}"
             
             logger.info(f"📤 Извлечен chat_id: {chat_id}")
+            logger.info(f"📦 Медиа: {len(media_tokens)} файлов")
             
             metadata = self._parse_metadata(metadata_text)
             metadata['chat_id'] = chat_id
             
-            success, post_link = self._send_and_get_id(chat_id, ad_text, image_tokens)
+            # Проверяем наличие видео
+            if media_types:
+                has_video = any(t == 'video' for t in media_types)
+                if has_video:
+                    logger.info("🎬 Обнаружено видео, проверяем поддержку чатом...")
+            
+            success, post_link = self._send_and_get_id(chat_id, ad_text, media_tokens, media_types)
             
             if not success:
                 logger.warning("⚠️ Отправка в чат не удалась, пробуем в личные сообщения...")
-                success, post_link = self._send_to_user(user_id, ad_text, image_tokens)
+                success, post_link = self._send_to_user(user_id, ad_text, media_tokens, media_types)
             
             if not success:
                 return False, "Не удалось отправить сообщение"
@@ -342,12 +368,12 @@ class Publisher:
                 else:
                     image_bytes = img_data
                 
-                token = self.api.upload_file(image_bytes, f"image_{i}.jpg")
+                token = self.api.upload_file(image_bytes, f"image_{i}.jpg", 'image')
                 if token:
                     image_tokens.append(token)
                     time.sleep(0.3)
             
-            return self.publish_folder_with_tokens(
+            return self.publish_folder_with_media(
                 user_id, folder_name, ad_text, metadata_text, image_tokens
             )
             
