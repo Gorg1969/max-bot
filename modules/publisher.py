@@ -17,7 +17,8 @@ class Publisher:
     def __init__(self, api, file_manager, db):
         self.api = api
         self.fm = file_manager
-        self.db = db        self.active_publishes = {}
+        self.db = db
+        self.active_publishes = {}
         self.publish_threads = {}
         self.FOLDER_TIMEOUT = 120
         self.STOP_FLAG = {}
