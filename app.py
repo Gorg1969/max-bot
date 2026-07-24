@@ -1,4 +1,9 @@
-# app.py - исправленная версия с поддержкой видео 3.0
+# app.py - исправленная версия с поддержкой видео 4.0
+import os
+os.environ['TZ'] = 'Europe/Moscow'
+import time
+time.tzset()
+
 from flask import Flask, request, jsonify, render_template_string, send_file
 import requests
 import logging
