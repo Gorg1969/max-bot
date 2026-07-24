@@ -134,6 +134,7 @@ class APIClient:
 
         try:
             logger.info(f"📤 Шаг 1: Запрос URL для загрузки {file_type}: {filename}")
+            logger.info(f"📤 Размер файла: {len(file_bytes)} байт ({len(file_bytes)/1024/1024:.2f} МБ)")
 
             # 1. Запрашиваем URL для загрузки
             response = requests.post(
@@ -145,11 +146,13 @@ class APIClient:
             )
 
             if response.status_code != 200:
-                logger.error(f"❌ Ошибка получения URL: {response.status_code} - {response.text[:200]}")
+                logger.error(f"❌ Ошибка получения URL: {response.status_code}")
+                logger.error(f"❌ Текст ответа: {response.text[:500]}")
                 return None
 
             try:
                 upload_data = response.json()
+                logger.info(f"📨 Ответ на запрос URL: {upload_data}")
             except ValueError:
                 logger.error(f"❌ Невалидный JSON: {response.text[:200]}")
                 return None
@@ -159,6 +162,8 @@ class APIClient:
                 logger.error(f"❌ Не получен URL: {upload_data}")
                 return None
 
+            logger.info(f"✅ Получен URL для загрузки: {upload_url}")
+
             # Для видео и аудио токен приходит на этом шаге
             token_from_step1 = upload_data.get('token')
             if file_type in ['video', 'audio'] and token_from_step1:
@@ -166,17 +171,31 @@ class APIClient:
 
             # 2. Загружаем файл на полученный URL
             logger.info(f"📤 Шаг 2: Загрузка файла на {upload_url}")
-            files = {'data': (filename, file_bytes)}
+            
+            # Для видео используем правильный Content-Type
+            if file_type == 'video':
+                files = {'data': (filename, file_bytes, 'video/mp4')}
+            else:
+                files = {'data': (filename, file_bytes)}
             
             upload_response = requests.post(
                 upload_url,
                 files=files,
-                timeout=120 if file_type == 'video' else 60,
+                timeout=180 if file_type == 'video' else 60,  # Увеличенный таймаут для видео
                 verify=False
             )
 
+            logger.info(f"📨 Статус загрузки: {upload_response.status_code}")
+            
             if upload_response.status_code != 200:
-                logger.error(f"❌ Ошибка загрузки: {upload_response.status_code} - {upload_response.text[:200]}")
+                logger.error(f"❌ Ошибка загрузки: {upload_response.status_code}")
+                logger.error(f"❌ Текст ответа: {upload_response.text[:500]}")
+                
+                # Пробуем альтернативный способ загрузки для видео
+                if file_type == 'video':
+                    logger.info("🔄 Пробуем альтернативный способ загрузки видео...")
+                    return self._upload_video_alternative(file_bytes, filename)
+                
                 return None
 
             # 3. Извлекаем токен из ответа
@@ -188,23 +207,29 @@ class APIClient:
                 # Пытаемся найти токен в ответе на загрузку
                 if 'token' in upload_result:
                     token = upload_result['token']
+                    logger.info(f"✅ Токен найден в корне ответа: {token[:20]}...")
                 elif 'data' in upload_result and isinstance(upload_result['data'], dict) and 'token' in upload_result['data']:
                     token = upload_result['data']['token']
+                    logger.info(f"✅ Токен найден в data: {token[:20]}...")
                 elif 'photos' in upload_result and isinstance(upload_result['photos'], dict):
                     for photo_data in upload_result['photos'].values():
                         if isinstance(photo_data, dict) and 'token' in photo_data:
                             token = photo_data['token']
+                            logger.info(f"✅ Токен найден в photos: {token[:20]}...")
                             break
-            except ValueError:
+                else:
+                    logger.warning(f"⚠️ Токен не найден в ответе. Ответ: {upload_result}")
+            except ValueError as e:
                 logger.warning(f"⚠️ Ответ на загрузку не JSON: {upload_response.text[:100]}")
+                logger.warning(f"⚠️ Ошибка парсинга: {e}")
 
             # Если токен не найден, используем токен с шага 1 (для видео/аудио)
             if not token and file_type in ['video', 'audio'] and token_from_step1:
                 token = token_from_step1
-                logger.info(f"✅ Используем токен с шага 1 для {file_type}")
+                logger.info(f"✅ Используем токен с шага 1 для {file_type}: {token[:20]}...")
 
             if token:
-                logger.info(f"✅ Файл загружен, токен: {token[:20]}...")
+                logger.info(f"✅ {file_type.upper()} загружен, токен: {token[:20]}...")
                 return token
             else:
                 logger.error(f"❌ Не удалось получить токен для {file_type}")
@@ -213,13 +238,73 @@ class APIClient:
         except requests.exceptions.Timeout:
             logger.error(f"❌ Таймаут при загрузке {file_type}")
             return None
-        except requests.exceptions.ConnectionError:
-            logger.error(f"❌ Ошибка соединения при загрузке {file_type}")
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"❌ Ошибка соединения при загрузке {file_type}: {e}")
             return None
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки {file_type}: {e}")
             import traceback
             traceback.print_exc()
+            return None
+
+    def _upload_video_alternative(self, video_bytes, filename='video.mp4'):
+        """
+        Альтернативный метод загрузки видео через прямой upload с другой структурой запроса
+        """
+        try:
+            logger.info("📤 Пробуем альтернативный метод загрузки видео...")
+            
+            # Пробуем отправить с type параметром и правильным Content-Type
+            files = {
+                'data': (filename, video_bytes, 'video/mp4')
+            }
+            
+            response = requests.post(
+                f"{self.base_url}/uploads",
+                headers={"Authorization": self.token},
+                params={"type": "video"},
+                files=files,
+                timeout=120,
+                verify=False
+            )
+            
+            logger.info(f"📨 Альт. ответ: статус {response.status_code}")
+            logger.info(f"📨 Текст ответа: {response.text[:500]}")
+            
+            if response.status_code == 200:
+                try:
+                    result = response.json()
+                    logger.info(f"📨 JSON ответа: {result}")
+                    
+                    # Ищем токен в ответе
+                    token = None
+                    if 'token' in result:
+                        token = result['token']
+                    elif 'data' in result and 'token' in result['data']:
+                        token = result['data']['token']
+                    elif 'videos' in result:
+                        videos = result['videos']
+                        if isinstance(videos, dict):
+                            for vid in videos.values():
+                                if isinstance(vid, dict) and 'token' in vid:
+                                    token = vid['token']
+                                    break
+                    
+                    if token:
+                        logger.info(f"✅ Видео загружено (альт), токен: {token[:20]}...")
+                        return token
+                    else:
+                        logger.error(f"❌ Токен не найден в альт. ответе: {result}")
+                        return None
+                except ValueError as e:
+                    logger.error(f"❌ Ошибка парсинга JSON: {e}")
+                    return None
+            else:
+                logger.error(f"❌ Альт. метод не сработал: {response.status_code}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка альтернативной загрузки: {e}")
             return None
 
 
@@ -310,7 +395,7 @@ UPLOAD_PAGE = """
             5️⃣ Перетащите головную папку в поле ниже<br>
             6️⃣ Каждая папка отправляется отдельным запросом<br>
             7️⃣ <strong>Максимум 10 медиа-файлов</strong> (фото + видео)<br>
-            8️⃣ <strong>Видео: MP4 до 50MB</strong><br>
+            8️⃣ <strong>Видео: MP4 до 250MB</strong><br>
             9️⃣ <strong>Интервал между отправками: 20-40 секунд</strong>
         </div>
         
@@ -843,7 +928,7 @@ UPLOAD_PAGE = """
                     }
                 }
                 
-                const maxSize = fileType === 'video' ? 50 * 1024 * 1024 : 10 * 1024 * 1024;
+                const maxSize = fileType === 'video' ? 250 * 1024 * 1024 : 10 * 1024 * 1024;
                 if (fileToUpload.size > maxSize) {
                     addLog(`⚠️ ${file.name} слишком большой (${(fileToUpload.size/1024/1024).toFixed(1)}MB), максимум ${maxSize/1024/1024}MB`);
                     return null;
@@ -1184,6 +1269,14 @@ def upload_photo():
         
         image_bytes = photo.read()
         logger.info(f"📸 Загрузка {file_type} {photo.filename}, размер: {len(image_bytes)} байт")
+        logger.info(f"📸 Content-Type: {photo.content_type}")
+        
+        # Проверяем размер для видео
+        if file_type == 'video':
+            max_size = 250 * 1024 * 1024  # 250 MB
+            if len(image_bytes) > max_size:
+                logger.error(f"❌ Видео слишком большое: {len(image_bytes)/1024/1024:.2f} МБ (макс 250 МБ)")
+                return jsonify({'success': False, 'message': 'Видео слишком большое (макс 250 МБ)'}), 400
         
         token = api.upload_file(image_bytes, photo.filename, file_type)
         
@@ -1310,8 +1403,9 @@ def webhook():
                         "1. Подготовьте папки с объявлениями\n"
                         "2. Используйте разделитель #изъятая\n"
                         "3. Фото до 10 шт, видео до 3 шт на объявление\n"
-                        "4. Поддерживаются форматы: MP4\n"
-                        "5. Интервал между отправками: 20-40 секунд"
+                        "4. Поддерживаются форматы: MP4, MOV, MKV, WEBM\n"
+                        "5. Максимальный размер видео: 250 МБ\n"
+                        "6. Интервал между отправками: 20-40 секунд"
                     )
                     return jsonify({"ok": True}), 200
                 
