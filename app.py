@@ -123,128 +123,93 @@ class APIClient:
             logger.error(f"❌ Ошибка: {e}")
             return False
 
-    def upload_file(self, image_bytes, filename='image.jpg', file_type='image'):
+    def upload_file(self, file_bytes, filename='file.bin', file_type='image'):
+        """
+        Загружает файл (изображение или видео) в MAX API.
+        Исправленная версия с правильным двухшаговым процессом загрузки.
+        """
         if not self.token:
             logger.error("❌ Нет токена для загрузки")
             return None
-        
+
         try:
-            logger.info(f"📤 Запрос URL для загрузки {file_type}: {filename}")
+            logger.info(f"📤 Шаг 1: Запрос URL для загрузки {file_type}: {filename}")
+
+            # 1. Запрашиваем URL для загрузки
+            response = requests.post(
+                f"{self.base_url}/uploads",
+                headers={"Authorization": self.token},
+                params={"type": file_type},  # 'image', 'video', 'audio', 'file'
+                timeout=30,
+                verify=False
+            )
+
+            if response.status_code != 200:
+                logger.error(f"❌ Ошибка получения URL: {response.status_code} - {response.text[:200]}")
+                return None
+
+            try:
+                upload_data = response.json()
+            except ValueError:
+                logger.error(f"❌ Невалидный JSON: {response.text[:200]}")
+                return None
+
+            upload_url = upload_data.get('url')
+            if not upload_url:
+                logger.error(f"❌ Не получен URL: {upload_data}")
+                return None
+
+            # Для видео и аудио токен приходит на этом шаге
+            token_from_step1 = upload_data.get('token')
+            if file_type in ['video', 'audio'] and token_from_step1:
+                logger.info(f"✅ Для {file_type} получен токен на шаге 1: {token_from_step1[:20]}...")
+
+            # 2. Загружаем файл на полученный URL
+            logger.info(f"📤 Шаг 2: Загрузка файла на {upload_url}")
+            files = {'data': (filename, file_bytes)}
             
-            # Для видео используем другой подход
-            if file_type == 'video':
-                # Пробуем загрузить видео напрямую через POST /uploads с files
-                files = {
-                    'data': (filename, image_bytes, 'video/mp4')
-                }
-                
-                upload_response = requests.post(
-                    f"{self.base_url}/uploads",
-                    headers={"Authorization": self.token},
-                    params={"type": "video"},
-                    files=files,
-                    timeout=120,
-                    verify=False
-                )
-                
-                logger.info(f"📨 Ответ загрузки видео: статус {upload_response.status_code}")
-                logger.info(f"📨 Текст ответа: {upload_response.text[:500]}")
-                
-                if upload_response.status_code != 200:
-                    logger.error(f"❌ Ошибка загрузки видео: {upload_response.status_code}")
-                    return None
-                
-                # Пробуем парсить JSON
-                try:
-                    upload_result = upload_response.json()
-                except ValueError:
-                    # Если ответ не JSON, пробуем другой метод
-                    logger.warning("⚠️ Ответ не JSON, пробуем альтернативный метод загрузки видео")
-                    return self._upload_video_alternative(image_bytes, filename)
-                
-                # Ищем токен
-                token = None
-                if 'data' in upload_result and isinstance(upload_result['data'], dict):
-                    token = upload_result['data'].get('token')
-                if not token and 'token' in upload_result:
+            upload_response = requests.post(
+                upload_url,
+                files=files,
+                timeout=120 if file_type == 'video' else 60,
+                verify=False
+            )
+
+            if upload_response.status_code != 200:
+                logger.error(f"❌ Ошибка загрузки: {upload_response.status_code} - {upload_response.text[:200]}")
+                return None
+
+            # 3. Извлекаем токен из ответа
+            token = None
+            try:
+                upload_result = upload_response.json()
+                logger.info(f"📨 Ответ сервера после загрузки: {upload_result}")
+
+                # Пытаемся найти токен в ответе на загрузку
+                if 'token' in upload_result:
                     token = upload_result['token']
-                if not token and 'videos' in upload_result:
-                    videos = upload_result['videos']
-                    if isinstance(videos, dict):
-                        for vid in videos.values():
-                            if isinstance(vid, dict) and 'token' in vid:
-                                token = vid['token']
-                                break
-                
-                if token:
-                    logger.info(f"✅ Видео загружено, токен: {token[:20]}...")
-                    return token
-                else:
-                    logger.error(f"❌ Токен не найден в ответе: {upload_result}")
-                    return None
-            
-            # Для изображений - стандартный метод
-            else:
-                response = requests.post(
-                    f"{self.base_url}/uploads",
-                    headers={"Authorization": self.token},
-                    params={"type": "image"},
-                    timeout=30,
-                    verify=False
-                )
-                
-                if response.status_code != 200:
-                    logger.error(f"❌ Ошибка получения URL: {response.status_code} - {response.text[:200]}")
-                    return None
-                
-                try:
-                    upload_data = response.json()
-                except ValueError:
-                    logger.error(f"❌ Невалидный JSON: {response.text[:200]}")
-                    return None
-                
-                upload_url = upload_data.get('url')
-                if not upload_url:
-                    logger.error(f"❌ Не получен URL: {upload_data}")
-                    return None
-                
-                files = {'data': (filename, image_bytes, 'image/jpeg')}
-                
-                upload_response = requests.post(
-                    upload_url,
-                    files=files,
-                    timeout=60,
-                    verify=False
-                )
-                
-                if upload_response.status_code != 200:
-                    logger.error(f"❌ Ошибка загрузки: {upload_response.status_code} - {upload_response.text[:200]}")
-                    return None
-                
-                try:
-                    upload_result = upload_response.json()
-                except ValueError:
-                    logger.error(f"❌ Невалидный JSON в ответе: {upload_response.text[:200]}")
-                    return None
-                
-                token = None
-                if 'photos' in upload_result and isinstance(upload_result['photos'], dict):
+                elif 'data' in upload_result and isinstance(upload_result['data'], dict) and 'token' in upload_result['data']:
+                    token = upload_result['data']['token']
+                elif 'photos' in upload_result and isinstance(upload_result['photos'], dict):
                     for photo_data in upload_result['photos'].values():
                         if isinstance(photo_data, dict) and 'token' in photo_data:
                             token = photo_data['token']
                             break
-                if not token and 'token' in upload_result:
-                    token = upload_result['token']
-                if not token and 'data' in upload_result and 'token' in upload_result['data']:
-                    token = upload_result['data']['token']
-                
-                if token:
-                    logger.info(f"✅ Фото загружено, токен: {token[:20]}...")
-                    return token
-                else:
-                    logger.error(f"❌ Не получен токен: {upload_result}")
-                    return None
-            
+            except ValueError:
+                logger.warning(f"⚠️ Ответ на загрузку не JSON: {upload_response.text[:100]}")
+
+            # Если токен не найден, используем токен с шага 1 (для видео/аудио)
+            if not token and file_type in ['video', 'audio'] and token_from_step1:
+                token = token_from_step1
+                logger.info(f"✅ Используем токен с шага 1 для {file_type}")
+
+            if token:
+                logger.info(f"✅ Файл загружен, токен: {token[:20]}...")
+                return token
+            else:
+                logger.error(f"❌ Не удалось получить токен для {file_type}")
+                return None
+
         except requests.exceptions.Timeout:
             logger.error(f"❌ Таймаут при загрузке {file_type}")
             return None
@@ -255,47 +220,6 @@ class APIClient:
             logger.error(f"❌ Ошибка загрузки {file_type}: {e}")
             import traceback
             traceback.print_exc()
-            return None
-
-    def _upload_video_alternative(self, video_bytes, filename='video.mp4'):
-        """
-        Альтернативный метод загрузки видео через прямой upload с другой структурой запроса
-        """
-        try:
-            logger.info("📤 Пробуем альтернативный метод загрузки видео...")
-            
-            # Пробуем отправить без type параметра
-            files = {
-                'data': (filename, video_bytes, 'video/mp4')
-            }
-            
-            response = requests.post(
-                f"{self.base_url}/uploads",
-                headers={"Authorization": self.token},
-                files=files,
-                timeout=120,
-                verify=False
-            )
-            
-            logger.info(f"📨 Альт. ответ: статус {response.status_code}, текст: {response.text[:200]}")
-            
-            if response.status_code == 200:
-                try:
-                    result = response.json()
-                    if 'token' in result:
-                        logger.info(f"✅ Видео загружено (альт), токен: {result['token'][:20]}...")
-                        return result['token']
-                    if 'data' in result and 'token' in result['data']:
-                        logger.info(f"✅ Видео загружено (альт), токен: {result['data']['token'][:20]}...")
-                        return result['data']['token']
-                except:
-                    pass
-            
-            logger.error("❌ Альтернативный метод загрузки видео не сработал")
-            return None
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка альтернативной загрузки: {e}")
             return None
 
 
@@ -1020,7 +944,7 @@ UPLOAD_PAGE = """
                     mediaTokens.push(result.token);
                     mediaTypes.push(result.type);
                 }
-                await new Promise(r => setTimeout(r, 300));
+                await new Promise(r => setTimeout(r, 500)); // Увеличенная задержка для видео
             }
             
             const videoCount = mediaTypes.filter(t => t === 'video').length;
