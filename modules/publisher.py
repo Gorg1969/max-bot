@@ -289,7 +289,7 @@ class Publisher:
                 logger.error(f"❌ ОШИБКА: В post_link попала ссылка-источник! Очищаем.")
                 metadata['post_link'] = ''
             
-            now = datetime.now(self.moscow_tz)
+            now = datetime.now()
             timestamp = now.timestamp()
             self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, timestamp)
             self.db.add_publication(user_id, folder_name, chat_id, status='success')
