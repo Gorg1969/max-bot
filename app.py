@@ -94,7 +94,7 @@ class APIClient:
             for i, token in enumerate(tokens[:10]):
                 media_type = media_types[i] if i < len(media_types) else 'image'
                 attachments.append({
-                    "type": media_type,  # "image" или "video"
+                    "type": media_type,
                     "payload": {"token": token}
                 })
             
@@ -124,31 +124,25 @@ class APIClient:
             return False
 
     def upload_file(self, image_bytes, filename='image.jpg', file_type='image'):
-        """
-        Загрузка файла (изображение или видео) через API MAX
-        """
         if not self.token:
             logger.error("❌ Нет токена для загрузки")
             return None
         
         try:
-            # Шаг 1: Получение URL для загрузки
             logger.info(f"📤 Запрос URL для загрузки {file_type}: {filename}")
             
             response = requests.post(
                 f"{self.base_url}/uploads",
                 headers={"Authorization": self.token},
-                params={"type": file_type},  # "image" или "video"
+                params={"type": file_type},
                 timeout=30,
                 verify=False
             )
             
-            # Проверяем статус ответа
             if response.status_code != 200:
                 logger.error(f"❌ Ошибка получения URL: {response.status_code} - {response.text[:200]}")
                 return None
             
-            # Парсим JSON ответ
             try:
                 upload_data = response.json()
                 logger.info(f"📨 Получен URL для загрузки: {upload_data.get('url', '')[:50]}...")
@@ -161,8 +155,6 @@ class APIClient:
                 logger.error(f"❌ Не получен URL: {upload_data}")
                 return None
             
-            # Шаг 2: Загрузка файла по полученному URL
-            # Определяем Content-Type в зависимости от типа файла
             if file_type == 'video':
                 content_type = 'video/mp4'
             elif file_type == 'image':
@@ -177,16 +169,14 @@ class APIClient:
             upload_response = requests.post(
                 upload_url,
                 files=files,
-                timeout=120 if file_type == 'video' else 60,  # Для видео больше таймаут
+                timeout=120 if file_type == 'video' else 60,
                 verify=False
             )
             
-            # Проверяем статус загрузки
             if upload_response.status_code != 200:
                 logger.error(f"❌ Ошибка загрузки: {upload_response.status_code} - {upload_response.text[:200]}")
                 return None
             
-            # Парсим ответ после загрузки
             try:
                 upload_result = upload_response.json()
                 logger.info(f"📨 Ответ после загрузки: {json.dumps(upload_result, ensure_ascii=False)[:200]}")
@@ -194,10 +184,8 @@ class APIClient:
                 logger.error(f"❌ Невалидный JSON в ответе на загрузку: {upload_response.text[:200]}")
                 return None
             
-            # Шаг 3: Извлечение токена из ответа
             token = None
             
-            # Пробуем разные варианты извлечения токена
             if 'token' in upload_result:
                 token = upload_result['token']
                 logger.info(f"✅ Токен найден в корне ответа")
@@ -206,7 +194,6 @@ class APIClient:
                     token = upload_result['data']['token']
                     logger.info(f"✅ Токен найден в data")
             
-            # Для видео может быть структура с videos
             if not token and 'videos' in upload_result:
                 videos = upload_result['videos']
                 if isinstance(videos, dict):
@@ -220,7 +207,6 @@ class APIClient:
                         token = videos[0]['token']
                         logger.info(f"✅ Токен найден в videos[0]")
             
-            # Для изображений может быть структура с photos
             if not token and 'photos' in upload_result:
                 photos = upload_result['photos']
                 if isinstance(photos, dict):
@@ -1186,8 +1172,11 @@ UPLOAD_PAGE = """
 
 # ========== МАРШРУТЫ ==========
 
-@app.route('/')
+@app.route('/', methods=['GET', 'POST'])
 def index():
+    if request.method == 'POST':
+        logger.info("📨 POST запрос на корневой URL, перенаправляем в webhook")
+        return webhook()
     return "🤖 MAX Bot is running!"
 
 
@@ -1722,6 +1711,18 @@ def diagnostic_last():
         response = jsonify({'success': False, 'message': str(e)})
         response.headers['Content-Type'] = 'application/json; charset=utf-8'
         return response, 500
+
+
+@app.errorhandler(405)
+def method_not_allowed(error):
+    logger.warning(f"⚠️ 405 Method Not Allowed: {request.method} {request.path}")
+    if request.path == '/' and request.method == 'POST':
+        return webhook()
+    return jsonify({
+        'success': False,
+        'error': 'Method not allowed',
+        'message': f'Метод {request.method} не разрешен для {request.path}'
+    }), 405
 
 
 @app.errorhandler(Exception)
