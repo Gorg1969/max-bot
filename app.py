@@ -124,28 +124,36 @@ class APIClient:
             return False
 
     def upload_file(self, image_bytes, filename='image.jpg', file_type='image'):
+        """
+        Загрузка файла (изображение или видео) через API MAX
+        """
         if not self.token:
             logger.error("❌ Нет токена для загрузки")
             return None
         
         try:
+            # Шаг 1: Получение URL для загрузки
+            logger.info(f"📤 Запрос URL для загрузки {file_type}: {filename}")
+            
             response = requests.post(
                 f"{self.base_url}/uploads",
                 headers={"Authorization": self.token},
-                params={"type": file_type},  # image или video
+                params={"type": file_type},  # "image" или "video"
                 timeout=30,
                 verify=False
             )
             
+            # Проверяем статус ответа
             if response.status_code != 200:
                 logger.error(f"❌ Ошибка получения URL: {response.status_code} - {response.text[:200]}")
                 return None
             
+            # Парсим JSON ответ
             try:
                 upload_data = response.json()
-            except ValueError:
-                raw_text = response.text.strip()
-                logger.error(f"❌ Невалидный JSON: {raw_text[:200]}")
+                logger.info(f"📨 Получен URL для загрузки: {upload_data.get('url', '')[:50]}...")
+            except ValueError as e:
+                logger.error(f"❌ Невалидный JSON в ответе на получение URL: {response.text[:200]}")
                 return None
             
             upload_url = upload_data.get('url')
@@ -153,65 +161,94 @@ class APIClient:
                 logger.error(f"❌ Не получен URL: {upload_data}")
                 return None
             
-            # Для видео используем соответствующий content-type
-            content_type = 'video/mp4' if file_type == 'video' else 'image/jpeg'
+            # Шаг 2: Загрузка файла по полученному URL
+            # Определяем Content-Type в зависимости от типа файла
+            if file_type == 'video':
+                content_type = 'video/mp4'
+            elif file_type == 'image':
+                content_type = 'image/jpeg'
+            else:
+                content_type = 'application/octet-stream'
+            
             files = {'data': (filename, image_bytes, content_type)}
+            
+            logger.info(f"📤 Загрузка {file_type} ({len(image_bytes)} байт) по URL...")
             
             upload_response = requests.post(
                 upload_url,
                 files=files,
-                timeout=60,
+                timeout=120 if file_type == 'video' else 60,  # Для видео больше таймаут
                 verify=False
             )
             
+            # Проверяем статус загрузки
             if upload_response.status_code != 200:
                 logger.error(f"❌ Ошибка загрузки: {upload_response.status_code} - {upload_response.text[:200]}")
                 return None
             
+            # Парсим ответ после загрузки
             try:
                 upload_result = upload_response.json()
-            except ValueError:
-                raw_text = upload_response.text.strip()
-                logger.error(f"❌ Невалидный JSON в ответе: {raw_text[:200]}")
+                logger.info(f"📨 Ответ после загрузки: {json.dumps(upload_result, ensure_ascii=False)[:200]}")
+            except ValueError as e:
+                logger.error(f"❌ Невалидный JSON в ответе на загрузку: {upload_response.text[:200]}")
                 return None
             
+            # Шаг 3: Извлечение токена из ответа
             token = None
-            # Пробуем извлечь токен из разных структур ответа
-            if 'photos' in upload_result and isinstance(upload_result['photos'], dict):
-                for photo_data in upload_result['photos'].values():
-                    if isinstance(photo_data, dict) and 'token' in photo_data:
-                        token = photo_data['token']
-                        break
             
-            if not token and 'token' in upload_result:
+            # Пробуем разные варианты извлечения токена
+            if 'token' in upload_result:
                 token = upload_result['token']
+                logger.info(f"✅ Токен найден в корне ответа")
+            elif 'data' in upload_result and isinstance(upload_result['data'], dict):
+                if 'token' in upload_result['data']:
+                    token = upload_result['data']['token']
+                    logger.info(f"✅ Токен найден в data")
             
-            if not token and 'data' in upload_result and 'token' in upload_result['data']:
-                token = upload_result['data']['token']
-            
-            # Для видео может быть другая структура
+            # Для видео может быть структура с videos
             if not token and 'videos' in upload_result:
-                if isinstance(upload_result['videos'], dict):
-                    for video_data in upload_result['videos'].values():
+                videos = upload_result['videos']
+                if isinstance(videos, dict):
+                    for video_key, video_data in videos.items():
                         if isinstance(video_data, dict) and 'token' in video_data:
                             token = video_data['token']
+                            logger.info(f"✅ Токен найден в videos[{video_key}]")
                             break
+                elif isinstance(videos, list) and len(videos) > 0:
+                    if isinstance(videos[0], dict) and 'token' in videos[0]:
+                        token = videos[0]['token']
+                        logger.info(f"✅ Токен найден в videos[0]")
             
-            if not token:
-                logger.error(f"❌ Не получен токен: {upload_result}")
+            # Для изображений может быть структура с photos
+            if not token and 'photos' in upload_result:
+                photos = upload_result['photos']
+                if isinstance(photos, dict):
+                    for photo_key, photo_data in photos.items():
+                        if isinstance(photo_data, dict) and 'token' in photo_data:
+                            token = photo_data['token']
+                            logger.info(f"✅ Токен найден в photos[{photo_key}]")
+                            break
+                elif isinstance(photos, list) and len(photos) > 0:
+                    if isinstance(photos[0], dict) and 'token' in photos[0]:
+                        token = photos[0]['token']
+                        logger.info(f"✅ Токен найден в photos[0]")
+            
+            if token:
+                logger.info(f"✅ {file_type} загружен, токен: {token[:20]}...")
+                return token
+            else:
+                logger.error(f"❌ Не найден токен в ответе: {upload_result}")
                 return None
             
-            logger.info(f"✅ Файл ({file_type}) загружен, токен: {token[:20]}...")
-            return token
-            
         except requests.exceptions.Timeout:
-            logger.error("❌ Таймаут при загрузке файла")
+            logger.error(f"❌ Таймаут при загрузке {file_type}")
             return None
         except requests.exceptions.ConnectionError:
-            logger.error("❌ Ошибка соединения при загрузке файла")
+            logger.error(f"❌ Ошибка соединения при загрузке {file_type}")
             return None
         except Exception as e:
-            logger.error(f"❌ Ошибка загрузки: {e}")
+            logger.error(f"❌ Ошибка загрузки {file_type}: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -277,7 +314,6 @@ UPLOAD_PAGE = """
         .report-section .btn-group { display: flex; gap: 10px; align-items: center; justify-content: center; flex-wrap: wrap; }
         #reportStatus { margin-top: 15px; padding: 15px; border-radius: 5px; display: none; font-weight: 500; white-space: pre-line; }
         .queue-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; display: none; font-weight: 500; }
-        .photo-progress { margin: 5px 0; font-size: 13px; color: #666; }
         .clear-btn { background: #dc3545; color: white; }
         .clear-btn:hover { background: #c82333; }
         .delay-info { background: #e7f5ff; padding: 8px 15px; border-radius: 5px; margin: 5px 0; font-size: 13px; color: #0056b3; display: none; }
@@ -305,7 +341,7 @@ UPLOAD_PAGE = """
             5️⃣ Перетащите головную папку в поле ниже<br>
             6️⃣ Каждая папка отправляется отдельным запросом<br>
             7️⃣ <strong>Максимум 10 медиа-файлов</strong> (фото + видео)<br>
-            8️⃣ <strong>Видео: MP4, MOV, AVI до 50MB</strong><br>
+            8️⃣ <strong>Видео: MP4, MOV, AVI, MKV, WEBM до 50MB</strong><br>
             9️⃣ <strong>Интервал между отправками: 20-40 секунд</strong>
         </div>
         
@@ -393,7 +429,6 @@ UPLOAD_PAGE = """
         const btnStart = document.getElementById('btnStart');
         const btnStop = document.getElementById('btnStop');
 
-        // Показываем информацию о задержке
         delayInfo.style.display = 'block';
 
         document.addEventListener('DOMContentLoaded', function() {
@@ -461,7 +496,7 @@ UPLOAD_PAGE = """
         function getFileType(file) {
             const ext = file.name.split('.').pop().toLowerCase();
             const videoExts = ['mp4', 'mov', 'avi', 'mkv', 'webm', 'flv', '3gp', 'm4v', 'mpg', 'mpeg'];
-            const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'tiff', 'svg'];
+            const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'tiff', 'svg', 'heic'];
             
             if (videoExts.includes(ext)) return 'video';
             if (imageExts.includes(ext)) return 'image';
@@ -635,7 +670,6 @@ UPLOAD_PAGE = """
                     reportBtn.disabled = false;
                     reportReady = true;
                     
-                    // Автоматическая очистка после формирования отчета
                     addLog('🧹 Автоочистка данных после формирования отчета...');
                     fetch('/auto_cleanup/' + userId, {
                         method: 'POST',
@@ -854,27 +888,43 @@ UPLOAD_PAGE = """
                 formData.append('folder_name', folderName);
                 formData.append('file_type', fileType);
                 
-                const response = await fetch('/upload_photo', {
-                    method: 'POST',
-                    body: formData
-                });
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), fileType === 'video' ? 120000 : 30000);
                 
-                const contentType = response.headers.get('content-type');
-                if (!contentType || !contentType.includes('application/json')) {
-                    const text = await response.text();
-                    addLog(`❌ Сервер вернул не JSON: ${text.substring(0, 100)}`);
+                try {
+                    const response = await fetch('/upload_photo', {
+                        method: 'POST',
+                        body: formData,
+                        signal: controller.signal
+                    });
+                    
+                    clearTimeout(timeoutId);
+                    
+                    const contentType = response.headers.get('content-type');
+                    if (!contentType || !contentType.includes('application/json')) {
+                        const text = await response.text();
+                        addLog(`❌ Сервер вернул не JSON: ${text.substring(0, 100)}`);
+                        return null;
+                    }
+                    
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        addLog(`✅ ${fileType} ${file.name} загружен`);
+                        return { token: result.token, type: fileType };
+                    } else {
+                        addLog(`❌ Ошибка загрузки ${file.name}: ${result.message}`);
+                        return null;
+                    }
+                } catch (fetchError) {
+                    if (fetchError.name === 'AbortError') {
+                        addLog(`⏱️ Таймаут загрузки ${file.name}`);
+                    } else {
+                        addLog(`❌ Ошибка загрузки ${file.name}: ${fetchError.message}`);
+                    }
                     return null;
                 }
                 
-                const result = await response.json();
-                
-                if (result.success) {
-                    addLog(`✅ ${fileType} ${file.name} загружен`);
-                    return { token: result.token, type: fileType };
-                } else {
-                    addLog(`❌ Ошибка загрузки ${file.name}: ${result.message}`);
-                    return null;
-                }
             } catch (error) {
                 addLog(`❌ Ошибка загрузки ${file.name}: ${error.message}`);
                 return null;
@@ -898,7 +948,6 @@ UPLOAD_PAGE = """
                 metadataText = parts[1] ? parts[1].trim() : '';
             }
             
-            // Собираем все медиа-файлы (фото и видео)
             const mediaFiles = files
                 .filter(f => {
                     const type = getFileType(f);
@@ -906,7 +955,6 @@ UPLOAD_PAGE = """
                 })
                 .slice(0, 10);
             
-            // Сортируем: сначала видео, потом фото
             mediaFiles.sort((a, b) => {
                 const aType = getFileType(a);
                 const bType = getFileType(b);
@@ -1290,7 +1338,7 @@ def webhook():
                         "1. Подготовьте папки с объявлениями\n"
                         "2. Используйте разделитель #изъятая\n"
                         "3. Фото до 10 шт, видео до 3 шт на объявление\n"
-                        "4. Поддерживаются форматы: MP4, MOV, AVI, MKV\n"
+                        "4. Поддерживаются форматы: MP4, MOV, AVI, MKV, WEBM\n"
                         "5. Интервал между отправками: 20-40 секунд"
                     )
                     return jsonify({"ok": True}), 200
