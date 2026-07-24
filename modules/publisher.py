@@ -1,4 +1,4 @@
-# modules/publisher.py - исправленная версия с поддержкой видео
+# modules/publisher.py - финальная версия с поддержкой видео
 import logging
 import os
 import time
