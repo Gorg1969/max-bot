@@ -1,4 +1,4 @@
-# app.py - исправленная версия
+# app.py - исправленная версия с поддержкой видео
 from flask import Flask, request, jsonify, render_template_string, send_file
 import requests
 import logging
@@ -83,14 +83,18 @@ class APIClient:
             logger.error(f"❌ Ошибка отправки в чат: {e}")
             return False
 
-    def send_message_with_attachments(self, chat_id, text, tokens):
+    def send_message_with_attachments(self, chat_id, text, tokens, media_types=None):
         if not self.token:
             return False
         try:
+            if media_types is None:
+                media_types = ['image'] * len(tokens)
+            
             attachments = []
-            for token in tokens[:10]:
+            for i, token in enumerate(tokens[:10]):
+                media_type = media_types[i] if i < len(media_types) else 'image'
                 attachments.append({
-                    "type": "image",
+                    "type": media_type,  # "image" или "video"
                     "payload": {"token": token}
                 })
             
@@ -110,7 +114,7 @@ class APIClient:
             )
             
             if response.status_code == 200:
-                logger.info(f"✅ Сообщение с фото отправлено в чат {chat_id}")
+                logger.info(f"✅ Сообщение с медиа отправлено в чат {chat_id}")
                 return True
             else:
                 logger.error(f"❌ Ошибка: {response.status_code} - {response.text}")
@@ -119,7 +123,7 @@ class APIClient:
             logger.error(f"❌ Ошибка: {e}")
             return False
 
-    def upload_file(self, image_bytes, filename='image.jpg'):
+    def upload_file(self, image_bytes, filename='image.jpg', file_type='image'):
         if not self.token:
             logger.error("❌ Нет токена для загрузки")
             return None
@@ -128,7 +132,7 @@ class APIClient:
             response = requests.post(
                 f"{self.base_url}/uploads",
                 headers={"Authorization": self.token},
-                params={"type": "image"},
+                params={"type": file_type},  # image или video
                 timeout=30,
                 verify=False
             )
@@ -149,7 +153,9 @@ class APIClient:
                 logger.error(f"❌ Не получен URL: {upload_data}")
                 return None
             
-            files = {'data': (filename, image_bytes, 'image/jpeg')}
+            # Для видео используем соответствующий content-type
+            content_type = 'video/mp4' if file_type == 'video' else 'image/jpeg'
+            files = {'data': (filename, image_bytes, content_type)}
             
             upload_response = requests.post(
                 upload_url,
@@ -170,6 +176,7 @@ class APIClient:
                 return None
             
             token = None
+            # Пробуем извлечь токен из разных структур ответа
             if 'photos' in upload_result and isinstance(upload_result['photos'], dict):
                 for photo_data in upload_result['photos'].values():
                     if isinstance(photo_data, dict) and 'token' in photo_data:
@@ -182,11 +189,19 @@ class APIClient:
             if not token and 'data' in upload_result and 'token' in upload_result['data']:
                 token = upload_result['data']['token']
             
+            # Для видео может быть другая структура
+            if not token and 'videos' in upload_result:
+                if isinstance(upload_result['videos'], dict):
+                    for video_data in upload_result['videos'].values():
+                        if isinstance(video_data, dict) and 'token' in video_data:
+                            token = video_data['token']
+                            break
+            
             if not token:
                 logger.error(f"❌ Не получен токен: {upload_result}")
                 return None
             
-            logger.info(f"✅ Файл загружен, токен: {token[:20]}...")
+            logger.info(f"✅ Файл ({file_type}) загружен, токен: {token[:20]}...")
             return token
             
         except requests.exceptions.Timeout:
@@ -246,6 +261,9 @@ UPLOAD_PAGE = """
         .file-list { text-align: left; margin: 20px 0; padding: 0; list-style: none; max-height: 300px; overflow-y: auto; }
         .file-list li { background: #f8f9fa; padding: 10px 15px; margin: 5px 0; border-radius: 5px; border-left: 3px solid #007bff; display: flex; justify-content: space-between; align-items: center; }
         .file-list li .count { background: #007bff; color: white; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
+        .file-list li .media-types { font-size: 12px; color: #666; margin-left: 10px; }
+        .file-list li .media-types .video { color: #dc3545; }
+        .file-list li .media-types .image { color: #28a745; }
         .progress-bar { width: 100%; height: 25px; background: #e9ecef; border-radius: 10px; overflow: hidden; margin: 10px 0; display: none; }
         .progress-bar .progress { height: 100%; background: linear-gradient(90deg, #28a745, #20c997); transition: width 0.3s; width: 0%; display: flex; align-items: center; justify-content: center; color: white; font-size: 12px; font-weight: bold; }
         .progress-bar .progress.stopped { background: linear-gradient(90deg, #dc3545, #c82333); }
@@ -280,14 +298,15 @@ UPLOAD_PAGE = """
             <strong>📌 Как подготовить папку:</strong><br>
             1️⃣ Создайте головную папку (любое название)<br>
             2️⃣ Внутри создайте подпапки объявлений: <code>1 -123456789</code>, <code>2 -987654321</code><br>
-            3️⃣ В каждой подпапке: <code>info.txt</code> (текст) и фото (1-10 шт)<br>
+            3️⃣ В каждой подпапке: <code>info.txt</code> (текст) и медиа (фото 1-10 шт, видео 1-3 шт)<br>
             4️⃣ В тексте используйте разделитель <code>#изъятая</code>:<br>
             &nbsp;&nbsp;• Текст ДО разделителя — публикуется в чат<br>
             &nbsp;&nbsp;• Текст ПОСЛЕ разделителя — идет в отчет<br>
             5️⃣ Перетащите головную папку в поле ниже<br>
             6️⃣ Каждая папка отправляется отдельным запросом<br>
-            7️⃣ <strong>Максимум 10 фото</strong><br>
-            8️⃣ <strong>Интервал между отправками: 20-40 секунд</strong>
+            7️⃣ <strong>Максимум 10 медиа-файлов</strong> (фото + видео)<br>
+            8️⃣ <strong>Видео: MP4, MOV, AVI до 50MB</strong><br>
+            9️⃣ <strong>Интервал между отправками: 20-40 секунд</strong>
         </div>
         
         <div class="drop-zone" id="dropZone">
@@ -340,7 +359,7 @@ UPLOAD_PAGE = """
             </p>
         </div>
         
-        <div class="footer">⚡ MAX Bot | Загрузка объявлений v2.0</div>
+        <div class="footer">⚡ MAX Bot | Загрузка объявлений v2.0 (с видео)</div>
     </div>
 
     <script>
@@ -439,10 +458,28 @@ UPLOAD_PAGE = """
             });
         }
 
+        function getFileType(file) {
+            const ext = file.name.split('.').pop().toLowerCase();
+            const videoExts = ['mp4', 'mov', 'avi', 'mkv', 'webm', 'flv', '3gp', 'm4v', 'mpg', 'mpeg'];
+            const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'tiff', 'svg'];
+            
+            if (videoExts.includes(ext)) return 'video';
+            if (imageExts.includes(ext)) return 'image';
+            return 'unknown';
+        }
+
+        function getFileIcon(file) {
+            const type = getFileType(file);
+            if (type === 'video') return '🎬';
+            if (type === 'image') return '🖼️';
+            return '📄';
+        }
+
         function displayFiles(files) {
             fileListContent.innerHTML = '';
             const folders = new Set();
             const fileCount = {};
+            const mediaTypes = {};
             
             files.forEach(f => {
                 const parts = f.webkitRelativePath.split('/');
@@ -451,6 +488,13 @@ UPLOAD_PAGE = """
                     folders.add(folder);
                     if (!fileCount[folder]) fileCount[folder] = 0;
                     fileCount[folder]++;
+                    
+                    const type = getFileType(f);
+                    if (type !== 'unknown') {
+                        if (!mediaTypes[folder]) mediaTypes[folder] = { video: 0, image: 0 };
+                        if (type === 'video') mediaTypes[folder].video++;
+                        else if (type === 'image') mediaTypes[folder].image++;
+                    }
                 }
             });
             
@@ -460,7 +504,19 @@ UPLOAD_PAGE = """
                 const li = document.createElement('li');
                 const count = fileCount[folder] || 0;
                 const displayName = folder.includes('/') ? folder.split('/')[1] : folder;
-                li.innerHTML = `<span>📁 <strong>${displayName}</strong></span><span class="count">${count} файлов</span>`;
+                const media = mediaTypes[folder] || { video: 0, image: 0 };
+                
+                let mediaInfo = '';
+                if (media.video > 0) mediaInfo += `<span class="video">🎬 ${media.video}</span> `;
+                if (media.image > 0) mediaInfo += `<span class="image">🖼️ ${media.image}</span> `;
+                
+                li.innerHTML = `
+                    <span>📁 <strong>${displayName}</strong></span>
+                    <span>
+                        <span class="count">${count} файлов</span>
+                        ${mediaInfo ? `<span class="media-types">${mediaInfo}</span>` : ''}
+                    </span>
+                `;
                 li.id = `folder-${folder.replace(/[^a-zA-Z0-9]/g, '_')}`;
                 fileListContent.appendChild(li);
             });
@@ -770,22 +826,33 @@ UPLOAD_PAGE = """
             });
         }
 
-        async function uploadSinglePhoto(file, folderName) {
+        async function uploadSingleMedia(file, folderName) {
             try {
-                let compressed;
-                try {
-                    compressed = await compressImage(file, 600, 600, 0.5);
-                } catch (e) {
-                    addLog(`⚠️ Не удалось сжать ${file.name}, пробуем оригинал`);
-                    compressed = file;
+                const fileType = getFileType(file);
+                
+                let fileToUpload = file;
+                if (fileType === 'image') {
+                    try {
+                        fileToUpload = await compressImage(file, 600, 600, 0.5);
+                    } catch (e) {
+                        addLog(`⚠️ Не удалось сжать ${file.name}, пробуем оригинал`);
+                        fileToUpload = file;
+                    }
                 }
                 
-                addLog(`📤 Загрузка фото ${file.name} (${(compressed.size/1024).toFixed(0)}KB)...`);
+                const maxSize = fileType === 'video' ? 50 * 1024 * 1024 : 10 * 1024 * 1024;
+                if (fileToUpload.size > maxSize) {
+                    addLog(`⚠️ ${file.name} слишком большой (${(fileToUpload.size/1024/1024).toFixed(1)}MB), максимум ${maxSize/1024/1024}MB`);
+                    return null;
+                }
+                
+                addLog(`📤 Загрузка ${fileType} ${file.name} (${(fileToUpload.size/1024).toFixed(0)}KB)...`);
                 
                 const formData = new FormData();
-                formData.append('photo', compressed);
+                formData.append('photo', fileToUpload);
                 formData.append('user_id', userId);
                 formData.append('folder_name', folderName);
+                formData.append('file_type', fileType);
                 
                 const response = await fetch('/upload_photo', {
                     method: 'POST',
@@ -802,8 +869,8 @@ UPLOAD_PAGE = """
                 const result = await response.json();
                 
                 if (result.success) {
-                    addLog(`✅ Фото ${file.name} загружено`);
-                    return result.token;
+                    addLog(`✅ ${fileType} ${file.name} загружен`);
+                    return { token: result.token, type: fileType };
                 } else {
                     addLog(`❌ Ошибка загрузки ${file.name}: ${result.message}`);
                     return null;
@@ -831,35 +898,53 @@ UPLOAD_PAGE = """
                 metadataText = parts[1] ? parts[1].trim() : '';
             }
             
-            const imageFiles = files
-                .filter(f => f.type && f.type.startsWith('image/'))
+            // Собираем все медиа-файлы (фото и видео)
+            const mediaFiles = files
+                .filter(f => {
+                    const type = getFileType(f);
+                    return type === 'image' || type === 'video';
+                })
                 .slice(0, 10);
             
-            const imageTokens = [];
-            for (const img of imageFiles) {
+            // Сортируем: сначала видео, потом фото
+            mediaFiles.sort((a, b) => {
+                const aType = getFileType(a);
+                const bType = getFileType(b);
+                if (aType === 'video' && bType !== 'video') return -1;
+                if (aType !== 'video' && bType === 'video') return 1;
+                return 0;
+            });
+            
+            const mediaTokens = [];
+            const mediaTypes = [];
+            
+            for (const media of mediaFiles) {
                 if (isStopped) {
                     break;
                 }
-                const token = await uploadSinglePhoto(img, folderName);
-                if (token) {
-                    imageTokens.push(token);
+                const result = await uploadSingleMedia(media, folderName);
+                if (result) {
+                    mediaTokens.push(result.token);
+                    mediaTypes.push(result.type);
                 }
                 await new Promise(r => setTimeout(r, 300));
             }
             
-            addLog(`📦 Загружено ${imageTokens.length} из ${imageFiles.length} фото`);
+            const videoCount = mediaTypes.filter(t => t === 'video').length;
+            const imageCount = mediaTypes.filter(t => t === 'image').length;
+            addLog(`📦 Загружено ${mediaTokens.length} медиа (🎬 ${videoCount} видео, 🖼️ ${imageCount} фото)`);
             
             return {
                 folderName: folderName,
                 adText: adText,
                 metadataText: metadataText,
                 fullText: fullText,
-                imageTokens: imageTokens
+                mediaTokens: mediaTokens,
+                mediaTypes: mediaTypes
             };
         }
 
         function getRandomDelay() {
-            // 20-40 секунд
             return Math.floor(Math.random() * 20000) + 20000;
         }
 
@@ -947,7 +1032,9 @@ UPLOAD_PAGE = """
                         break;
                     }
                     
-                    addLog(`📤 Отправка ${i+1}/${totalFolders}: ${folderName} (${folderData.imageTokens.length} фото)`);
+                    const mediaCount = folderData.mediaTokens.length;
+                    const videoCount = folderData.mediaTypes.filter(t => t === 'video').length;
+                    addLog(`📤 Отправка ${i+1}/${totalFolders}: ${folderName} (${mediaCount} медиа, 🎬 ${videoCount} видео)`);
                     
                     const response = await fetch('/publish_folder', {
                         method: 'POST',
@@ -978,14 +1065,12 @@ UPLOAD_PAGE = """
                 
                 processedCount = i + 1;
                 
-                // 🔥 ЗАДЕРЖКА 20-40 СЕКУНД МЕЖДУ ОТПРАВКАМИ (кроме последней)
                 if (i < folderNames.length - 1 && !isStopped) {
                     currentDelay = getRandomDelay();
                     const delaySeconds = Math.round(currentDelay / 1000);
                     addLog(`⏱️ Пауза ${delaySeconds} секунд перед следующей папкой...`);
                     showStatus('info', `⏱️ Пауза ${delaySeconds}с перед следующей папкой...`);
                     
-                    // Показываем обратный отсчет в прогрессе
                     for (let t = delaySeconds; t > 0 && !isStopped; t--) {
                         progress.textContent = `${i}/${totalFolders} (⏱️ ${t}с)`;
                         await new Promise(r => setTimeout(r, 1000));
@@ -1069,27 +1154,28 @@ def upload_photo():
         photo = request.files.get('photo')
         user_id = request.form.get('user_id')
         folder_name = request.form.get('folder_name')
+        file_type = request.form.get('file_type', 'image')
         
         if not photo:
-            return jsonify({'success': False, 'message': 'Нет фото'}), 400
+            return jsonify({'success': False, 'message': 'Нет файла'}), 400
         
         if not user_id:
             return jsonify({'success': False, 'message': 'Нет user_id'}), 400
         
         image_bytes = photo.read()
-        logger.info(f"📸 Загрузка фото {photo.filename}, размер: {len(image_bytes)} байт")
+        logger.info(f"📸 Загрузка {file_type} {photo.filename}, размер: {len(image_bytes)} байт")
         
-        token = api.upload_file(image_bytes, photo.filename)
+        token = api.upload_file(image_bytes, photo.filename, file_type)
         
         if token:
-            logger.info(f"✅ Фото загружено, токен: {token[:20]}...")
-            return jsonify({'success': True, 'token': token})
+            logger.info(f"✅ {file_type} загружен, токен: {token[:20]}...")
+            return jsonify({'success': True, 'token': token, 'type': file_type})
         else:
-            logger.error(f"❌ Не удалось загрузить фото {photo.filename}")
-            return jsonify({'success': False, 'message': 'Не удалось загрузить фото'}), 500
+            logger.error(f"❌ Не удалось загрузить {file_type} {photo.filename}")
+            return jsonify({'success': False, 'message': f'Не удалось загрузить {file_type}'}), 500
         
     except Exception as e:
-        logger.error(f"❌ Ошибка загрузки фото: {e}")
+        logger.error(f"❌ Ошибка загрузки: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
@@ -1139,13 +1225,14 @@ def publish_folder():
         folder_name = folder_data.get('folderName')
         ad_text = folder_data.get('adText')
         metadata_text = folder_data.get('metadataText')
-        image_tokens = folder_data.get('imageTokens', [])
+        media_tokens = folder_data.get('mediaTokens', [])
+        media_types = folder_data.get('mediaTypes', [])
         
         logger.info(f"📦 Получена папка: {folder_name} от пользователя {user_id}")
-        logger.info(f"📝 Текст: {len(ad_text)} символов, 🖼️ Фото: {len(image_tokens)}")
+        logger.info(f"📝 Текст: {len(ad_text)} символов, 🖼️ Медиа: {len(media_tokens)}")
         
-        success, message = publisher.publish_folder_with_tokens(
-            user_id, folder_name, ad_text, metadata_text, image_tokens
+        success, message = publisher.publish_folder_with_media(
+            user_id, folder_name, ad_text, metadata_text, media_tokens, media_types
         )
         
         if success:
@@ -1202,8 +1289,9 @@ def webhook():
                         "📋 **Инструкция:**\n"
                         "1. Подготовьте папки с объявлениями\n"
                         "2. Используйте разделитель #изъятая\n"
-                        "3. Фото до 10 шт на объявление\n"
-                        "4. Интервал между отправками: 20-40 секунд"
+                        "3. Фото до 10 шт, видео до 3 шт на объявление\n"
+                        "4. Поддерживаются форматы: MP4, MOV, AVI, MKV\n"
+                        "5. Интервал между отправками: 20-40 секунд"
                     )
                     return jsonify({"ok": True}), 200
                 
@@ -1434,7 +1522,6 @@ def clear_user_data(user_id):
         publisher.clear_diagnostic_log()
         publisher.pending_messages = {}
         
-        # Очищаем временную папку пользователя
         try:
             user_folder = fm.get_user_folder(user_id)
             if os.path.exists(user_folder):
@@ -1460,22 +1547,18 @@ def clear_user_data(user_id):
 
 @app.route('/auto_cleanup/<int:user_id>', methods=['POST'])
 def auto_cleanup(user_id):
-    """Автоматическая очистка данных пользователя после завершения"""
     try:
         def delayed_cleanup():
-            time.sleep(10)  # Небольшая задержка перед очисткой
+            time.sleep(10)
             logger.info(f"🧹 Автоочистка данных для {user_id}")
             
-            # Очищаем БД
             db.clear_user_data(user_id)
             publisher.clear_diagnostic_log()
             publisher.pending_messages = {}
             
-            # Удаляем папку пользователя (кроме отчетов)
             try:
                 user_folder = fm.get_user_folder(user_id)
                 if os.path.exists(user_folder):
-                    # Удаляем все, кроме отчетов
                     for item in os.listdir(user_folder):
                         item_path = os.path.join(user_folder, item)
                         if os.path.isdir(item_path):
@@ -1489,7 +1572,6 @@ def auto_cleanup(user_id):
             except Exception as e:
                 logger.error(f"⚠️ Ошибка очистки папки: {e}")
             
-            # Очищаем временную папку
             try:
                 temp_dir = os.path.join(DATA_DIR, 'temp', str(user_id))
                 if os.path.exists(temp_dir):
