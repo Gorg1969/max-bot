@@ -264,6 +264,11 @@ class Publisher:
                 if has_video:
                     logger.info("🎬 Обнаружено видео, проверяем поддержку чатом...")
             
+            # Для видео увеличиваем таймаут и делаем паузу перед отправкой
+            if media_types and any(t == 'video' for t in media_types):
+                logger.info("⏳ Ожидание 3 секунды перед отправкой видео (для обработки на сервере)...")
+                time.sleep(3)
+            
             success, post_link = self._send_and_get_id(chat_id, ad_text, media_tokens, media_types)
             
             if not success:
