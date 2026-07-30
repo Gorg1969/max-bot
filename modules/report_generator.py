@@ -67,7 +67,7 @@ class Publisher:
             for i, token in enumerate(media_tokens[:10]):
                 media_type = media_types[i] if i < len(media_types) else 'image'
                 attachments.append({
-                    "type": media_type,  # "image" или "video"
+                    "type": media_type,
                     "payload": {"token": token}
                 })
             
@@ -258,15 +258,13 @@ class Publisher:
             metadata = self._parse_metadata(metadata_text)
             metadata['chat_id'] = chat_id
             
-            # Проверяем наличие видео
             if media_types:
                 has_video = any(t == 'video' for t in media_types)
                 if has_video:
                     logger.info("🎬 Обнаружено видео, проверяем поддержку чатом...")
             
-            # Для видео увеличиваем таймаут и делаем паузу перед отправкой
             if media_types and any(t == 'video' for t in media_types):
-                logger.info("⏳ Ожидание 3 секунды перед отправкой видео (для обработки на сервере)...")
+                logger.info("⏳ Ожидание 3 секунды перед отправкой видео...")
                 time.sleep(3)
             
             success, post_link = self._send_and_get_id(chat_id, ad_text, media_tokens, media_types)
@@ -297,19 +295,16 @@ class Publisher:
             logger.info(f"✅ Папка {folder_name} опубликована")
             
             # ========== АВТОМАТИЧЕСКАЯ ОТПРАВКА ОТЧЕТА ==========
-            # Проверяем, остались ли pending публикации
             pending_publications = self.db.get_publications_with_status(user_id, 'pending')
             pending_count = len(pending_publications)
             
             logger.info(f"📊 Осталось pending публикаций: {pending_count}")
             
             if pending_count == 0:
-                # Все публикации завершены (или успешно, или с ошибками) - отправляем отчет
                 logger.info(f"📊 Все публикации для {user_id} завершены, отправляю отчет...")
                 
-                # Запускаем генерацию отчета в фоне
                 def send_report():
-                    time.sleep(5)  # Даем время на обновление БД
+                    time.sleep(5)
                     try:
                         from modules.report_generator import ReportGenerator
                         report_gen = ReportGenerator(self.fm, self.db)
@@ -321,14 +316,12 @@ class Publisher:
                             
                             stats = self.db.get_stats(user_id)
                             
-                            # Формируем сообщение с отчетом
                             status_msg = ""
                             if stats.get('errors', 0) > 0:
                                 status_msg = f"⚠️ {stats.get('errors', 0)} публикаций с ошибками\n"
                             if stats.get('success', 0) > 0:
                                 status_msg += f"✅ {stats.get('success', 0)} успешно\n"
                             
-                            # Отправляем ссылку пользователю
                             self.api.send_message(
                                 user_id,
                                 f"📊 **Отчет готов!**\n\n"
