@@ -1,4 +1,4 @@
-# modules/publisher.py - финальная версия с поддержкой видео
+# modules/publisher.py - финальная версия с поддержкой видео и автоотчетом
 import logging
 import os
 import time
@@ -295,6 +295,58 @@ class Publisher:
             self.db.add_publication(user_id, folder_name, chat_id, status='success')
             
             logger.info(f"✅ Папка {folder_name} опубликована")
+            
+            # ========== АВТОМАТИЧЕСКАЯ ОТПРАВКА ОТЧЕТА ==========
+            # Проверяем, остались ли pending публикации
+            pending_count = self.db.count_pending_publications(user_id)
+            
+            if pending_count == 0:
+                # Все публикации завершены - отправляем отчет
+                logger.info(f"📊 Все публикации для {user_id} завершены, отправляю отчет...")
+                
+                # Запускаем генерацию отчета в фоне
+                def send_report():
+                    time.sleep(5)  # Даем время на обновление БД
+                    try:
+                        from modules.report_generator import ReportGenerator
+                        report_gen = ReportGenerator(self.fm, self.db)
+                        report_path = report_gen.generate_report(user_id)
+                        
+                        if report_path:
+                            filename = os.path.basename(report_path)
+                            download_url = f"https://maxbot.bothost.tech/download_report/{user_id}/{filename}"
+                            
+                            stats = self.db.get_stats(user_id)
+                            
+                            # Отправляем ссылку пользователю
+                            self.api.send_message(
+                                user_id,
+                                f"📊 **Отчет готов!**\n\n"
+                                f"✅ Все публикации завершены\n"
+                                f"📦 Всего: {stats.get('total', 0)}\n"
+                                f"✅ Успешно: {stats.get('success', 0)}\n"
+                                f"❌ Ошибок: {stats.get('errors', 0)}\n\n"
+                                f"🔗 [Скачать отчет]({download_url})\n\n"
+                                f"📋 Отчет также доступен по ссылке:\n"
+                                f"https://maxbot.bothost.tech/status_page/{user_id}"
+                            )
+                            logger.info(f"📊 Отчет отправлен пользователю {user_id}")
+                        else:
+                            self.api.send_message(
+                                user_id,
+                                "❌ Не удалось создать отчет. Попробуйте позже."
+                            )
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка отправки отчета: {e}")
+                        try:
+                            self.api.send_message(
+                                user_id,
+                                f"❌ Ошибка создания отчета: {str(e)}"
+                            )
+                        except:
+                            pass
+                
+                threading.Thread(target=send_report, daemon=True).start()
             
             if post_link:
                 return True, f"✅ Папка {folder_name} опубликована, ссылка: {post_link}"
