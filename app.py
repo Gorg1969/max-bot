@@ -129,10 +129,6 @@ class APIClient:
             return False
 
     def upload_file(self, file_bytes, filename='file.bin', file_type='image'):
-        """
-        Загружает файл (изображение или видео) в MAX API.
-        Исправленная версия с правильным двухшаговым процессом загрузки.
-        """
         if not self.token:
             logger.error("❌ Нет токена для загрузки")
             return None
@@ -141,11 +137,10 @@ class APIClient:
             logger.info(f"📤 Шаг 1: Запрос URL для загрузки {file_type}: {filename}")
             logger.info(f"📤 Размер файла: {len(file_bytes)} байт ({len(file_bytes)/1024/1024:.2f} МБ)")
 
-            # 1. Запрашиваем URL для загрузки
             response = requests.post(
                 f"{self.base_url}/uploads",
                 headers={"Authorization": self.token},
-                params={"type": file_type},  # 'image', 'video', 'audio', 'file'
+                params={"type": file_type},
                 timeout=30,
                 verify=False
             )
@@ -169,15 +164,12 @@ class APIClient:
 
             logger.info(f"✅ Получен URL для загрузки: {upload_url}")
 
-            # Для видео и аудио токен приходит на этом шаге
             token_from_step1 = upload_data.get('token')
             if file_type in ['video', 'audio'] and token_from_step1:
                 logger.info(f"✅ Для {file_type} получен токен на шаге 1: {token_from_step1[:20]}...")
 
-            # 2. Загружаем файл на полученный URL
             logger.info(f"📤 Шаг 2: Загрузка файла на {upload_url}")
             
-            # Для видео используем правильный Content-Type
             if file_type == 'video':
                 files = {'data': (filename, file_bytes, 'video/mp4')}
             else:
@@ -186,7 +178,7 @@ class APIClient:
             upload_response = requests.post(
                 upload_url,
                 files=files,
-                timeout=180 if file_type == 'video' else 60,  # Увеличенный таймаут для видео
+                timeout=180 if file_type == 'video' else 60,
                 verify=False
             )
 
@@ -196,20 +188,17 @@ class APIClient:
                 logger.error(f"❌ Ошибка загрузки: {upload_response.status_code}")
                 logger.error(f"❌ Текст ответа: {upload_response.text[:500]}")
                 
-                # Пробуем альтернативный способ загрузки для видео
                 if file_type == 'video':
                     logger.info("🔄 Пробуем альтернативный способ загрузки видео...")
                     return self._upload_video_alternative(file_bytes, filename)
                 
                 return None
 
-            # 3. Извлекаем токен из ответа
             token = None
             try:
                 upload_result = upload_response.json()
                 logger.info(f"📨 Ответ сервера после загрузки: {upload_result}")
 
-                # Пытаемся найти токен в ответе на загрузку
                 if 'token' in upload_result:
                     token = upload_result['token']
                     logger.info(f"✅ Токен найден в корне ответа: {token[:20]}...")
@@ -228,7 +217,6 @@ class APIClient:
                 logger.warning(f"⚠️ Ответ на загрузку не JSON: {upload_response.text[:100]}")
                 logger.warning(f"⚠️ Ошибка парсинга: {e}")
 
-            # Если токен не найден, используем токен с шага 1 (для видео/аудио)
             if not token and file_type in ['video', 'audio'] and token_from_step1:
                 token = token_from_step1
                 logger.info(f"✅ Используем токен с шага 1 для {file_type}: {token[:20]}...")
@@ -253,13 +241,9 @@ class APIClient:
             return None
 
     def _upload_video_alternative(self, video_bytes, filename='video.mp4'):
-        """
-        Альтернативный метод загрузки видео через прямой upload с другой структурой запроса
-        """
         try:
             logger.info("📤 Пробуем альтернативный метод загрузки видео...")
             
-            # Пробуем отправить с type параметром и правильным Content-Type
             files = {
                 'data': (filename, video_bytes, 'video/mp4')
             }
@@ -281,7 +265,6 @@ class APIClient:
                     result = response.json()
                     logger.info(f"📨 JSON ответа: {result}")
                     
-                    # Ищем токен в ответе
                     token = None
                     if 'token' in result:
                         token = result['token']
@@ -380,7 +363,6 @@ STATUS_PAGE = """
             <a href="/report/{{ user_id }}" class="report-link">📥 Скачать отчет</a>
             <div class="auto-download">✅ Отчет готов к скачиванию</div>
             <script>
-                // Автоматический переход на скачивание через 3 секунды
                 setTimeout(function() {
                     window.location.href = "/report/{{ user_id }}";
                 }, 3000);
@@ -911,7 +893,6 @@ UPLOAD_PAGE = """
         async function prepareFolderData(folderName, files) {
             const txtFile = files.find(f => f.name === 'info.txt' || f.name.endsWith('.txt'));
             if (!txtFile) {
-                // Записываем ошибку в БД через API
                 try {
                     await fetch('/publish_error', {
                         method: 'POST',
@@ -1087,7 +1068,6 @@ UPLOAD_PAGE = """
                     } else {
                         errorCount++;
                         addLog(`❌ ${folderName}: ${result.message}`);
-                        // Записываем ошибку в БД
                         try {
                             await fetch('/publish_error', {
                                 method: 'POST',
@@ -1106,7 +1086,6 @@ UPLOAD_PAGE = """
                 } catch (error) {
                     errorCount++;
                     addLog(`❌ ${folderName}: ошибка - ${error.message}`);
-                    // Записываем ошибку в БД
                     try {
                         await fetch('/publish_error', {
                             method: 'POST',
@@ -1220,9 +1199,8 @@ def upload_photo():
         logger.info(f"📸 Загрузка {file_type} {photo.filename}, размер: {len(image_bytes)} байт")
         logger.info(f"📸 Content-Type: {photo.content_type}")
         
-        # Проверяем размер для видео
         if file_type == 'video':
-            max_size = 250 * 1024 * 1024  # 250 MB
+            max_size = 250 * 1024 * 1024
             if len(image_bytes) > max_size:
                 logger.error(f"❌ Видео слишком большое: {len(image_bytes)/1024/1024:.2f} МБ (макс 250 МБ)")
                 return jsonify({'success': False, 'message': 'Видео слишком большое (макс 250 МБ)'}), 400
@@ -1254,21 +1232,17 @@ def publish_error():
         if not user_id or not folder_name:
             return jsonify({'success': False, 'message': 'Нет данных'}), 400
         
-        # Извлекаем chat_id из имени папки
         chat_id = publisher.extract_chat_id_from_folder(folder_name)
         if not chat_id:
             chat_id = 'unknown'
         
-        # Добавляем запись в БД со статусом error
         db.add_publication(user_id, folder_name, chat_id, status='error', error=error)
         
         logger.info(f"❌ Записана ошибка для {folder_name}: {error}")
         
-        # Проверяем, не завершены ли все публикации
         pending_count = db.count_pending_publications(user_id)
         
         if pending_count == 0:
-            # Запускаем генерацию отчета в фоне
             def send_report_after_error():
                 time.sleep(3)
                 try:
@@ -1405,10 +1379,8 @@ def webhook():
             
             logger.info(f"📨 chat_id: {chat_id}, user_id: {user_id}, text: {text}, mid: {message_id}")
             
-            # ========== ОБРАБОТКА КОМАНД ==========
             if user_id and text:
                 if text.strip() == '/start':
-                    # ЕДИНОЕ МЕНЮ - только здесь
                     api.send_message(
                         user_id,
                         "🏠 **Главное меню**\n\n"
@@ -1450,7 +1422,6 @@ def webhook():
                     )
                     return jsonify({"ok": True}), 200
             
-            # ========== ОБРАБОТКА ВЕБХУКА ДЛЯ ССЫЛОК ==========
             if chat_id and message_id:
                 logger.info(f"📨 Получен ID сообщения: {message_id} для чата {chat_id}")
                 if user_id:
