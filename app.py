@@ -4,7 +4,7 @@ os.environ['TZ'] = 'Europe/Moscow'
 import time
 time.tzset()
 
-from flask import Flask, request, jsonify, render_template_string, send_file
+from flask import Flask, request, jsonify, render_template_string, send_file, redirect
 import requests
 import logging
 import os
@@ -471,7 +471,7 @@ UPLOAD_PAGE = """
             7️⃣ <strong>Максимум 10 медиа-файлов</strong> (фото + видео)<br>
             8️⃣ <strong>Видео: MP4 до 250MB</strong><br>
             9️⃣ <strong>Интервал между отправками: 20-40 секунд</strong><br>
-            🔟 ✅ <strong>Отчет придет автоматически</strong> после завершения
+            🔟 ✅ <strong>Отчет скачается автоматически</strong> после завершения
         </div>
         
         <div class="drop-zone" id="dropZone">
@@ -511,7 +511,7 @@ UPLOAD_PAGE = """
             </div>
             <div id="reportStatus"></div>
             <p style="margin-top: 10px; color: #666; font-size: 14px;">
-                ✅ Отчет придет автоматически после завершения публикации
+                ✅ Отчет скачается автоматически после завершения публикации
             </p>
         </div>
         
@@ -968,6 +968,39 @@ UPLOAD_PAGE = """
             return Math.floor(Math.random() * 20000) + 20000;
         }
 
+        // Функция для автоматического скачивания отчета
+        async function autoDownloadReport(userId) {
+            try {
+                addLog('📊 Проверка готовности отчета...');
+                
+                // Проверяем статус
+                const statusResponse = await fetch(`/report_status/${userId}`);
+                const statusText = await statusResponse.text();
+                let statusData;
+                try {
+                    statusData = JSON.parse(statusText);
+                } catch(e) {
+                    addLog(`⚠️ Ошибка парсинга статуса: ${e.message}`);
+                    return false;
+                }
+                
+                if (statusData.ready && statusData.success > 0) {
+                    addLog('📥 Отчет готов, начинаем скачивание...');
+                    window.location.href = `/report/${userId}`;
+                    return true;
+                } else if (statusData.pending > 0) {
+                    addLog(`⏳ Ожидание завершения ${statusData.pending} публикаций...`);
+                    return false;
+                } else {
+                    addLog(`⚠️ Отчет не готов (успешно: ${statusData.success}, ошибок: ${statusData.failed})`);
+                    return false;
+                }
+            } catch (error) {
+                addLog(`❌ Ошибка проверки отчета: ${error.message}`);
+                return false;
+            }
+        }
+
         async function uploadFolder() {
             if (selectedFiles.length === 0) {
                 showStatus('error', '❌ Выберите папку для загрузки');
@@ -1138,16 +1171,40 @@ UPLOAD_PAGE = """
             progress.textContent = `${totalFolders}/${totalFolders}`;
             queueInfo.textContent = `✅ Завершено! Обработано ${totalFolders} папок`;
             
-            if (errorCount === 0) {
-                showStatus('success', `✅ Загружено ${successCount} папок!`);
-                addLog(`✅ ВСЕ ${successCount} папок загружены!`);
-                addLog(`📊 Отчет будет автоматически отправлен в Telegram`);
-                addLog(`📋 Также отчет доступен по ссылке: https://maxbot.bothost.tech/status_page/${userId}`);
+            // ========== АВТОМАТИЧЕСКОЕ СКАЧИВАНИЕ ОТЧЕТА ==========
+            addLog('📊 Завершено! Начинаем автоматическое скачивание отчета...');
+            showStatus('info', '📊 Подготовка отчета к скачиванию...');
+            
+            // Ждем 5 секунд для завершения всех процессов
+            await new Promise(r => setTimeout(r, 5000));
+            
+            // Пытаемся скачать отчет
+            let downloadAttempts = 0;
+            let maxAttempts = 5;
+            let downloaded = false;
+            
+            while (downloadAttempts < maxAttempts && !downloaded) {
+                downloadAttempts++;
+                addLog(`📥 Попытка ${downloadAttempts}/${maxAttempts} скачать отчет...`);
+                downloaded = await autoDownloadReport(userId);
+                
+                if (!downloaded) {
+                    await new Promise(r => setTimeout(r, 5000));
+                }
+            }
+            
+            if (downloaded) {
+                addLog('✅ Отчет успешно скачан!');
+                showStatus('success', '✅ Отчет скачан!');
             } else {
-                showStatus('warning', `⚠️ Загружено ${successCount} папок, ${errorCount} с ошибками`);
+                addLog('⚠️ Не удалось автоматически скачать отчет. Попробуйте нажать "Статус публикаций"');
+                showStatus('warning', '⚠️ Отчет доступен по кнопке "Статус публикаций"');
+            }
+            
+            if (errorCount === 0) {
+                addLog(`✅ ВСЕ ${successCount} папок загружены!`);
+            } else {
                 addLog(`⚠️ Загружено ${successCount} папок, ${errorCount} с ошибками`);
-                addLog(`📊 Отчет будет автоматически отправлен в Telegram`);
-                addLog(`📋 Также отчет доступен по ссылке: https://maxbot.bothost.tech/status_page/${userId}`);
             }
             
             isProcessing = false;
@@ -1239,43 +1296,6 @@ def publish_error():
         db.add_publication(user_id, folder_name, chat_id, status='error', error=error)
         
         logger.info(f"❌ Записана ошибка для {folder_name}: {error}")
-        
-        pending_count = db.count_pending_publications(user_id)
-        
-        if pending_count == 0:
-            def send_report_after_error():
-                time.sleep(3)
-                try:
-                    from modules.report_generator import ReportGenerator
-                    report_gen = ReportGenerator(fm, db)
-                    report_path = report_gen.generate_report(user_id)
-                    
-                    if report_path:
-                        filename = os.path.basename(report_path)
-                        download_url = f"https://maxbot.bothost.tech/download_report/{user_id}/{filename}"
-                        stats = db.get_stats(user_id)
-                        
-                        status_msg = ""
-                        if stats.get('errors', 0) > 0:
-                            status_msg = f"⚠️ {stats.get('errors', 0)} публикаций с ошибками\n"
-                        if stats.get('success', 0) > 0:
-                            status_msg += f"✅ {stats.get('success', 0)} успешно\n"
-                        
-                        api.send_message(
-                            user_id,
-                            f"📊 **Отчет готов!**\n\n"
-                            f"✅ Процесс завершен\n"
-                            f"📦 Всего: {stats.get('total', 0)}\n"
-                            f"{status_msg}\n"
-                            f"🔗 [Скачать отчет]({download_url})\n\n"
-                            f"📋 Отчет также доступен по ссылке:\n"
-                            f"https://maxbot.bothost.tech/status_page/{user_id}"
-                        )
-                        logger.info(f"📊 Отчет отправлен пользователю {user_id} (из publish_error)")
-                except Exception as e:
-                    logger.error(f"❌ Ошибка отправки отчета после ошибки: {e}")
-            
-            threading.Thread(target=send_report_after_error, daemon=True).start()
         
         return jsonify({'success': True})
         
@@ -1396,7 +1416,7 @@ def webhook():
                         "4. Поддерживаются форматы: MP4, MOV, MKV, WEBM\n"
                         "5. Максимальный размер видео: 250 МБ\n"
                         "6. Интервал между отправками: 20-40 секунд\n"
-                        "7. ✅ **Отчет придет автоматически** после завершения"
+                        "7. ✅ **Отчет скачается автоматически** после завершения"
                     )
                     return jsonify({"ok": True}), 200
                 
