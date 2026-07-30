@@ -1,472 +1,352 @@
-# modules/publisher.py - финальная версия с поддержкой видео и автоотчетом
-import logging
+# modules/report_generator.py
 import os
-import time
-import re
-import requests
-import threading
-import json
-import uuid
-import base64
+import csv
+import shutil
 from datetime import datetime
 import pytz
+import logging
+import time
+import threading
 
 logger = logging.getLogger(__name__)
 
-class Publisher:
-    def __init__(self, api, file_manager, db):
-        self.api = api
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    EXCEL_AVAILABLE = True
+except ImportError:
+    EXCEL_AVAILABLE = False
+    logger.warning("⚠️ openpyxl не установлен")
+
+
+class ReportGenerator:
+    def __init__(self, file_manager, db):
         self.fm = file_manager
         self.db = db
-        self.active_publishes = {}
-        self.publish_threads = {}
-        self.FOLDER_TIMEOUT = 120
-        self.STOP_FLAG = {}
-        self.moscow_tz = pytz.timezone('Europe/Moscow')
-        self.pending_messages = {}
-        self.diagnostic_log = []
+        self._generating = {}
+        self._lock = threading.Lock()
+        self._report_downloads = {}
 
-    def extract_chat_id_from_folder(self, folder_name):
-        if not folder_name:
-            return None
-        
-        match = re.search(r'(-?\d{10,})', folder_name)
-        if match:
-            chat_id = match.group(1)
-            if not chat_id.startswith('-') and len(chat_id) >= 10:
-                chat_id = f"-{chat_id}"
-            return chat_id
-        
-        match = re.search(r'(\d{10,})', folder_name)
-        if match:
-            return f"-{match.group(1)}"
-        
-        return None
-
-    def _seq_to_max_id(self, seq: int) -> str:
-        try:
-            seq_bytes = int(seq).to_bytes(8, byteorder='big')
-            encoded = base64.urlsafe_b64encode(seq_bytes).decode('utf-8').rstrip('=')
-            return encoded
-        except Exception as e:
-            logger.error(f"❌ Ошибка конвертации seq в MAX ID: {e}")
-            return str(seq)
-
-    def _send_and_get_id(self, chat_id, text, media_tokens, media_types=None):
+    def generate_report(self, user_id):
         """
-        Отправка сообщения с медиа (фото и/или видео)
+        Генерирует отчет ИЗ ТОГО, ЧТО УЖЕ ЕСТЬ в БД.
+        НЕ ЖДЕТ все публикации. Работает в ЛЮБОЙ момент.
         """
-        try:
-            if not self.api.token:
-                return False, None
-            
-            if media_types is None:
-                media_types = ['image'] * len(media_tokens)
-            
-            attachments = []
-            for i, token in enumerate(media_tokens[:10]):
-                media_type = media_types[i] if i < len(media_types) else 'image'
-                attachments.append({
-                    "type": media_type,
-                    "payload": {"token": token}
-                })
-            
-            payload = {
-                "text": text,
-                "format": "markdown"
-            }
-            
-            if attachments:
-                payload["attachments"] = attachments
-            
-            chat_id_str = str(chat_id)
-            chat_id_for_api = chat_id_str if chat_id_str.startswith('-') else f"-{chat_id_str}"
-            
-            logger.info(f"📤 Отправка в чат {chat_id_for_api} с {len(attachments)} медиа")
-            
-            response = requests.post(
-                f"{self.api.base_url}/messages?chat_id={chat_id_for_api}",
-                headers={
-                    "Authorization": self.api.token,
-                    "Content-Type": "application/json"
-                },
-                json=payload,
-                timeout=60,
-                verify=False
-            )
-            
-            logger.info(f"📨 СТАТУС ОТВЕТА: {response.status_code}")
-            
-            if response.status_code == 200:
-                try:
-                    result = response.json()
-                    logger.info(f"📨 ПОЛНЫЙ JSON ОТВЕТА: {json.dumps(result, indent=2, ensure_ascii=False)}")
-                    
-                    seq = None
-                    if isinstance(result, dict):
-                        if 'message' in result and isinstance(result['message'], dict):
-                            msg = result['message']
-                            if 'body' in msg and isinstance(msg['body'], dict):
-                                if 'seq' in msg['body']:
-                                    seq = msg['body']['seq']
-                                    logger.info(f"✅ Найден seq: {seq}")
-                        
-                        if not seq and 'seq' in result:
-                            seq = result['seq']
-                            logger.info(f"✅ Найден seq в корне: {seq}")
-                    
-                    if seq:
-                        encoded_id = self._seq_to_max_id(seq)
-                        post_link = f"https://max.ru/c/{chat_id_str}/{encoded_id}"
-                        logger.info(f"🔗 Ссылка на пост создана: {post_link}")
-                        return True, post_link
-                    else:
-                        logger.warning(f"⚠️ seq не найден в ответе")
-                        return True, None
-                        
-                except json.JSONDecodeError as e:
-                    logger.error(f"❌ Ошибка парсинга JSON: {e}")
-                    return True, None
-                except Exception as e:
-                    logger.error(f"❌ Ошибка обработки ответа: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    return True, None
-            else:
-                logger.error(f"❌ Ошибка API: {response.status_code}")
-                return False, None
-                
-        except Exception as e:
-            logger.error(f"❌ Критическая ошибка: {e}")
-            import traceback
-            traceback.print_exc()
-            return False, None
-
-    def _send_to_user(self, user_id, text, media_tokens, media_types=None):
-        try:
-            if not self.api.token:
-                return False, None
-            
-            if media_types is None:
-                media_types = ['image'] * len(media_tokens)
-            
-            attachments = []
-            for i, token in enumerate(media_tokens[:10]):
-                media_type = media_types[i] if i < len(media_types) else 'image'
-                attachments.append({
-                    "type": media_type,
-                    "payload": {"token": token}
-                })
-            
-            payload = {
-                "user_id": user_id,
-                "text": text,
-                "format": "markdown"
-            }
-            
-            if attachments:
-                payload["attachments"] = attachments
-            
-            logger.info(f"📤 Отправка пользователю {user_id} с {len(attachments)} медиа")
-            
-            response = requests.post(
-                f"{self.api.base_url}/messages",
-                headers={
-                    "Authorization": self.api.token,
-                    "Content-Type": "application/json"
-                },
-                json=payload,
-                timeout=60,
-                verify=False
-            )
-            
-            if response.status_code == 200:
-                seq = None
-                post_link = None
-                try:
-                    result = response.json()
-                    if 'message' in result and isinstance(result['message'], dict):
-                        msg = result['message']
-                        if 'body' in msg and isinstance(msg['body'], dict):
-                            if 'seq' in msg['body']:
-                                seq = msg['body']['seq']
-                    elif 'seq' in result:
-                        seq = result['seq']
-                    
-                    if seq:
-                        encoded_id = self._seq_to_max_id(seq)
-                        post_link = f"https://max.ru/c/{user_id}/{encoded_id}"
-                    else:
-                        post_link = None
-                except:
-                    post_link = None
-                
-                if not post_link:
-                    post_link = f"https://max.ru/c/{user_id}"
-                
-                logger.info(f"✅ Отправлено пользователю {user_id}, ссылка: {post_link}")
-                return True, post_link
-            else:
-                logger.error(f"❌ Ошибка: {response.status_code}")
-                return False, None
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
-            return False, None
-
-    def _parse_metadata(self, metadata_text):
-        metadata = {}
-        if not metadata_text:
-            return metadata
-        
-        fields = {
-            'Название': r'Название:\s*(.+)',
-            'Ссылка': r'Ссылка:\s*(.+)',
-            'Код предложения': r'Код предложения:\s*(.+)',
-            'Цена в лизинге': r'Цена\s*[вВ]\s*лизинге:\s*(.+)',
-        }
-        
-        for key, pattern in fields.items():
-            match = re.search(pattern, metadata_text, re.IGNORECASE)
-            if match:
-                metadata[key] = match.group(1).strip()
-        
-        return metadata
-
-    def publish_folder_with_tokens(self, user_id, folder_name, ad_text, metadata_text, image_tokens):
-        """
-        Устаревший метод для совместимости
-        """
-        return self.publish_folder_with_media(user_id, folder_name, ad_text, metadata_text, image_tokens)
-
-    def publish_folder_with_media(self, user_id, folder_name, ad_text, metadata_text, media_tokens, media_types=None):
-        """
-        Публикация папки с медиа (фото и видео)
-        """
-        try:
-            if self.STOP_FLAG.get(user_id, False):
-                return False, "Остановка пользователем"
-            
-            chat_id = self.extract_chat_id_from_folder(folder_name)
-            
-            if not chat_id:
-                return False, f"Не удалось извлечь chat_id из {folder_name}"
-            
-            logger.info(f"📤 Извлечен chat_id: {chat_id}")
-            logger.info(f"📦 Медиа: {len(media_tokens)} файлов")
-            
-            metadata = self._parse_metadata(metadata_text)
-            metadata['chat_id'] = chat_id
-            
-            if media_types:
-                has_video = any(t == 'video' for t in media_types)
-                if has_video:
-                    logger.info("🎬 Обнаружено видео, проверяем поддержку чатом...")
-            
-            if media_types and any(t == 'video' for t in media_types):
-                logger.info("⏳ Ожидание 3 секунды перед отправкой видео...")
-                time.sleep(3)
-            
-            success, post_link = self._send_and_get_id(chat_id, ad_text, media_tokens, media_types)
-            
-            if not success:
-                logger.warning("⚠️ Отправка в чат не удалась, пробуем в личные сообщения...")
-                success, post_link = self._send_to_user(user_id, ad_text, media_tokens, media_types)
-            
-            if not success:
-                return False, "Не удалось отправить сообщение"
-            
-            if post_link:
-                metadata['post_link'] = post_link
-                logger.info(f"🔗 Ссылка на пост сохранена: {post_link}")
-            else:
-                metadata['post_link'] = ''
-                logger.warning(f"⚠️ Ссылка на пост не получена")
-            
-            if metadata['post_link'] and 'https://max.ru/u/' in metadata['post_link']:
-                logger.error(f"❌ ОШИБКА: В post_link попала ссылка-источник! Очищаем.")
-                metadata['post_link'] = ''
-            
-            now = datetime.now()
-            timestamp = now.timestamp()
-            self.db.save_ad_metadata(user_id, folder_name, chat_id, metadata, timestamp)
-            self.db.add_publication(user_id, folder_name, chat_id, status='success')
-            
-            logger.info(f"✅ Папка {folder_name} опубликована")
-            
-            # ========== АВТОМАТИЧЕСКАЯ ОТПРАВКА ОТЧЕТА ==========
-            pending_publications = self.db.get_publications_with_status(user_id, 'pending')
-            pending_count = len(pending_publications)
-            
-            logger.info(f"📊 Осталось pending публикаций: {pending_count}")
-            
-            if pending_count == 0:
-                logger.info(f"📊 Все публикации для {user_id} завершены, отправляю отчет...")
-                
-                def send_report():
-                    time.sleep(5)
-                    try:
-                        from modules.report_generator import ReportGenerator
-                        report_gen = ReportGenerator(self.fm, self.db)
-                        report_path = report_gen.generate_report(user_id)
-                        
-                        if report_path:
-                            filename = os.path.basename(report_path)
-                            download_url = f"https://maxbot.bothost.tech/download_report/{user_id}/{filename}"
-                            
-                            stats = self.db.get_stats(user_id)
-                            
-                            status_msg = ""
-                            if stats.get('errors', 0) > 0:
-                                status_msg = f"⚠️ {stats.get('errors', 0)} публикаций с ошибками\n"
-                            if stats.get('success', 0) > 0:
-                                status_msg += f"✅ {stats.get('success', 0)} успешно\n"
-                            
-                            self.api.send_message(
-                                user_id,
-                                f"📊 **Отчет готов!**\n\n"
-                                f"✅ Процесс завершен\n"
-                                f"📦 Всего: {stats.get('total', 0)}\n"
-                                f"{status_msg}\n"
-                                f"🔗 [Скачать отчет]({download_url})\n\n"
-                                f"📋 Отчет также доступен по ссылке:\n"
-                                f"https://maxbot.bothost.tech/status_page/{user_id}"
-                            )
-                            logger.info(f"📊 Отчет отправлен пользователю {user_id}")
-                        else:
-                            self.api.send_message(
-                                user_id,
-                                "❌ Не удалось создать отчет. Попробуйте позже."
-                            )
-                    except Exception as e:
-                        logger.error(f"❌ Ошибка отправки отчета: {e}")
-                        try:
-                            self.api.send_message(
-                                user_id,
-                                f"❌ Ошибка создания отчета: {str(e)}"
-                            )
-                        except:
-                            pass
-                
-                threading.Thread(target=send_report, daemon=True).start()
-            
-            if post_link:
-                return True, f"✅ Папка {folder_name} опубликована, ссылка: {post_link}"
-            else:
-                return True, f"✅ Папка {folder_name} опубликована"
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка публикации {folder_name}: {e}")
-            import traceback
-            traceback.print_exc()
-            return False, str(e)
-
-    def handle_message_created(self, chat_id, message_id, user_id=None):
-        try:
-            if not chat_id or not message_id:
-                return False
-            
-            chat_id_str = str(chat_id)
-            logger.info(f"📨 ВЕБХУК: chat_id={chat_id_str}, message_id={message_id}")
-            logger.info(f"📊 Всего pending записей: {len(self.pending_messages)}")
-            
-            found = False
-            matching_keys = []
-            
-            for key, data in self.pending_messages.items():
-                if data['chat_id'] == chat_id_str:
-                    matching_keys.append(key)
-                    found = True
-            
-            if not found:
-                logger.warning(f"⚠️ Нет pending записи для chat_id {chat_id_str}")
-                return False
-            
-            for key in matching_keys:
-                data = self.pending_messages[key]
-                folder_name = data['folder_name']
-                user_id_from_pending = data['user_id']
-                
-                post_link = f"https://max.ru/c/{chat_id_str}/{message_id}"
-                
-                self.db.update_post_link(user_id_from_pending, folder_name, post_link)
-                self.db.update_publication_status(user_id_from_pending, folder_name, 'success')
-                
-                del self.pending_messages[key]
-                logger.info(f"✅ Обновлена ссылка для {folder_name}: {post_link}")
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка обработки вебхука: {e}")
-            return False
-
-    def publish_single_folder(self, user_id, folder_name, ad_text, metadata_text, images_data):
-        try:
-            if self.STOP_FLAG.get(user_id, False):
-                return False, "Остановка пользователем"
-            
-            image_tokens = []
-            max_images = min(len(images_data), 10) if isinstance(images_data, list) else 0
-            
-            for i in range(max_images):
-                if self.STOP_FLAG.get(user_id, False):
-                    return False, "Остановка пользователем"
-                
-                img_data = images_data[i]
-                if not img_data:
-                    continue
-                
-                if isinstance(img_data, dict):
-                    data = img_data.get('data')
-                    if isinstance(data, list):
-                        image_bytes = bytes(data)
-                    elif isinstance(data, bytes):
-                        image_bytes = data
-                    else:
-                        continue
-                else:
-                    image_bytes = img_data
-                
-                token = self.api.upload_file(image_bytes, f"image_{i}.jpg", 'image')
-                if token:
-                    image_tokens.append(token)
-                    time.sleep(0.3)
-            
-            return self.publish_folder_with_media(
-                user_id, folder_name, ad_text, metadata_text, image_tokens
-            )
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
-            return False, str(e)
-
-    def stop(self, user_id):
-        logger.info(f"⏹️ Остановка для пользователя {user_id}")
-        self.STOP_FLAG[user_id] = True
+        with self._lock:
+            if user_id in self._generating:
+                elapsed = time.time() - self._generating[user_id]
+                if elapsed < 60:
+                    logger.warning(f"⚠️ Генерация уже выполняется для {user_id}")
+                    return None
+            self._generating[user_id] = time.time()
         
         try:
             user_folder = self.fm.get_user_folder(user_id)
+            
+            # ПОЛУЧАЕМ ВСЕ ПУБЛИКАЦИИ из БД
+            publications = self.db.get_publications(user_id)
+            
+            if not publications:
+                logger.warning(f"⚠️ Нет публикаций для {user_id}")
+                with self._lock:
+                    del self._generating[user_id]
+                return None
+            
+            # Разделяем по статусам
+            success_publications = [p for p in publications if p.get('status') == 'success']
+            pending_publications = [p for p in publications if p.get('status') == 'pending']
+            error_publications = [p for p in publications if p.get('status') not in ['success', 'pending']]
+            
+            logger.info(f"📊 Статистика: {len(success_publications)} успешных, {len(pending_publications)} ожидают, {len(error_publications)} с ошибками")
+            
+            # ЕСЛИ НЕТ УСПЕШНЫХ - СОЗДАЕМ ОТЧЕТ С ПРЕДУПРЕЖДЕНИЕМ
+            if not success_publications:
+                logger.warning(f"⚠️ Нет успешных публикаций для {user_id}")
+                return self._create_empty_report(user_id, pending_publications, error_publications)
+            
+            moscow_tz = pytz.timezone('Europe/Moscow')
+            success_data = []
+            
+            publications_sorted = sorted(success_publications, key=lambda x: x.get('created_at', ''))
+            current_date = None
+            index = 1
+            
+            for pub in publications_sorted:
+                folder_name = pub.get('folder_name', '')
+                chat_id = pub.get('group_id', '')
+                
+                metadata = self.db.get_ad_metadata(user_id, folder_name)
+                
+                post_link = metadata.get('post_link', '')
+                source_link = metadata.get('Ссылка', '')
+                
+                if not post_link:
+                    post_link = f"https://max.ru/c/{chat_id}" if chat_id else '⚠️ Ссылка не получена'
+                
+                created_at = pub.get('created_at')
+                if created_at:
+                    if isinstance(created_at, str):
+                        try:
+                            created_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                        except:
+                            created_at = datetime.now(moscow_tz)
+                    
+                    if hasattr(created_at, 'tzinfo') and created_at.tzinfo is None:
+                        created_at = moscow_tz.localize(created_at)
+                    elif hasattr(created_at, 'tzinfo'):
+                        created_at = created_at.astimezone(moscow_tz)
+                    
+                    date_str = created_at.strftime('%d.%m.%Y')
+                    time_str = created_at.strftime('%H.%M')
+                else:
+                    now = datetime.now(moscow_tz)
+                    date_str = now.strftime('%d.%m.%Y')
+                    time_str = now.strftime('%H.%M')
+                
+                if current_date != date_str:
+                    current_date = date_str
+                    display_date = date_str
+                else:
+                    display_date = ''
+                
+                success_data.append({
+                    '№': index,
+                    'Дата': display_date,
+                    'Время публикации (МСК)': time_str,
+                    'Ссылка на пост': post_link,
+                    'Ссылка (источник)': source_link,
+                    'Название': metadata.get('Название', ''),
+                    'Код предложения': metadata.get('Код предложения', ''),
+                    'Цена в лизинге': metadata.get('Цена в лизинге', ''),
+                })
+                index += 1
+            
+            # ДОБАВЛЯЕМ PENDING И ОШИБКИ В ОТЧЕТ
+            if pending_publications:
+                success_data.append({})
+                success_data.append({
+                    '№': '⏳',
+                    'Дата': '',
+                    'Время публикации (МСК)': '',
+                    'Ссылка на пост': f'⏳ {len(pending_publications)} публикаций ожидают ссылки',
+                    'Ссылка (источник)': 'Подождите несколько минут',
+                    'Название': 'Обновите страницу и проверьте статус',
+                    'Код предложения': '',
+                    'Цена в лизинге': '',
+                })
+            
+            if error_publications:
+                success_data.append({})
+                success_data.append({
+                    '№': '❌',
+                    'Дата': '',
+                    'Время публикации (МСК)': '',
+                    'Ссылка на пост': f'❌ {len(error_publications)} публикаций с ошибками',
+                    'Ссылка (источник)': 'Проверьте логи',
+                    'Название': 'Попробуйте загрузить заново',
+                    'Код предложения': '',
+                    'Цена в лизинге': '',
+                })
+            
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            report_filename = f"Отчет_{timestamp}.xlsx"
+            report_path = os.path.join(user_folder, report_filename)
+            
+            if EXCEL_AVAILABLE:
+                self._create_excel_report(report_path, success_data)
+            else:
+                report_filename = f"Отчет_{timestamp}.csv"
+                report_path = os.path.join(user_folder, report_filename)
+                self._create_csv_report(report_path, success_data)
+            
+            logger.info(f"📊 Отчет создан: {report_path}")
+            
+            with self._lock:
+                del self._generating[user_id]
+            
+            return report_path
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания отчета: {e}")
+            import traceback
+            traceback.print_exc()
+            with self._lock:
+                if user_id in self._generating:
+                    del self._generating[user_id]
+            return None
+
+    def _create_empty_report(self, user_id, pending_publications, error_publications):
+        """Создает отчет с сообщением, если нет успешных публикаций"""
+        try:
+            user_folder = self.fm.get_user_folder(user_id)
+            
+            empty_data = [{
+                '№': '⚠️',
+                'Дата': '',
+                'Время публикации (МСК)': '',
+                'Ссылка на пост': 'Нет успешных публикаций',
+                'Ссылка (источник)': '',
+                'Название': f'{len(pending_publications)} ожидают, {len(error_publications)} с ошибками',
+                'Код предложения': 'Попробуйте позже',
+                'Цена в лизинге': '',
+            }]
+            
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            report_filename = f"Отчет_{timestamp}.xlsx"
+            report_path = os.path.join(user_folder, report_filename)
+            
+            if EXCEL_AVAILABLE:
+                self._create_excel_report(report_path, empty_data)
+            else:
+                report_filename = f"Отчет_{timestamp}.csv"
+                report_path = os.path.join(user_folder, report_filename)
+                self._create_csv_report(report_path, empty_data)
+            
+            logger.info(f"📊 Пустой отчет создан: {report_path}")
+            return report_path
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания пустого отчета: {e}")
+            return None
+
+    def mark_report_downloaded(self, user_id):
+        self._report_downloads[user_id] = time.time()
+        logger.info(f"📥 Отмечено скачивание отчета для {user_id}")
+        
+        def cleanup_after_download():
+            time.sleep(30)
+            logger.info(f"🧹 Автоочистка данных для {user_id} после скачивания отчета")
+            self.db.clear_user_data(user_id)
+            user_folder = self.fm.get_user_folder(user_id)
             if os.path.exists(user_folder):
-                import shutil
+                for item in os.listdir(user_folder):
+                    item_path = os.path.join(user_folder, item)
+                    if os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+                    elif not item.startswith('Отчет_'):
+                        try:
+                            os.remove(item_path)
+                        except:
+                            pass
+            if user_id in self._report_downloads:
+                del self._report_downloads[user_id]
+        
+        threading.Thread(target=cleanup_after_download, daemon=True).start()
+
+    def _create_excel_report(self, filepath, success_data):
+        try:
+            wb = Workbook()
+            if 'Sheet' in wb.sheetnames:
+                wb.remove(wb['Sheet'])
+            
+            ws = wb.create_sheet("Отчет", 0)
+            headers = ['№', 'Дата', 'Время публикации (МСК)', 'Ссылка на пост', 
+                      'Ссылка (источник)', 'Название', 'Код предложения', 'Цена в лизинге']
+            
+            header_font = Font(bold=True, size=11, color="FFFFFF", name="Calibri")
+            header_fill = PatternFill(start_color="2F5597", end_color="2F5597", fill_type="solid")
+            header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            text_font = Font(size=10, name="Calibri")
+            text_alignment_left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+            text_alignment_center = Alignment(horizontal="center", vertical="center")
+            thin_border = Border(
+                left=Side(style="thin", color="D0D0D0"),
+                right=Side(style="thin", color="D0D0D0"),
+                top=Side(style="thin", color="D0D0D0"),
+                bottom=Side(style="thin", color="D0D0D0")
+            )
+            link_font = Font(color="0563C1", underline="single", size=10, name="Calibri")
+            
+            title = ws.cell(row=1, column=1, value="Отчет по публикациям")
+            title.font = Font(bold=True, size=16, name="Calibri", color="1A1A2E")
+            title.alignment = Alignment(horizontal="center", vertical="center")
+            ws.merge_cells('A1:H1')
+            ws.row_dimensions[1].height = 35
+            
+            for col, header in enumerate(headers, 1):
+                cell = ws.cell(row=2, column=col, value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_alignment
+                cell.border = thin_border
+            ws.row_dimensions[2].height = 25
+            
+            for row_idx, data in enumerate(success_data, 3):
+                for col_idx, key in enumerate(headers, 1):
+                    value = data.get(key, '')
+                    cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                    
+                    if key in ['№', 'Дата', 'Время публикации (МСК)']:
+                        cell.alignment = text_alignment_center
+                    elif key in ['Ссылка на пост', 'Ссылка (источник)'] and value and not value.startswith(('⚠️', '⏳', '❌')):
+                        cell.font = link_font
+                        cell.alignment = text_alignment_left
+                    else:
+                        cell.font = text_font
+                        cell.alignment = text_alignment_left
+                    
+                    cell.border = thin_border
+                    ws.row_dimensions[row_idx].height = 22
+            
+            for row_idx in range(3, len(success_data) + 3):
+                if row_idx % 2 == 1:
+                    for col in range(1, 9):
+                        cell = ws.cell(row=row_idx, column=col)
+                        cell.fill = PatternFill(start_color="F8F9FA", end_color="F8F9FA", fill_type="solid")
+            
+            column_widths = {'A': 5, 'B': 14, 'C': 18, 'D': 50, 'E': 40, 'F': 32, 'G': 18, 'H': 18}
+            for col_letter, width in column_widths.items():
+                ws.column_dimensions[col_letter].width = width
+            ws.freeze_panes = 'A3'
+            
+            wb.save(filepath)
+            logger.info(f"✅ Excel отчет создан: {filepath}")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания Excel: {e}")
+            raise
+
+    def _create_csv_report(self, filepath, success_data):
+        try:
+            with open(filepath, 'w', encoding='utf-8-sig', newline='') as f:
+                writer = csv.writer(f, delimiter=';')
+                writer.writerow(['№', 'Дата', 'Время публикации (МСК)', 'Ссылка на пост', 
+                               'Ссылка (источник)', 'Название', 'Код предложения', 'Цена в лизинге'])
+                for data in success_data:
+                    writer.writerow([
+                        data.get('№', ''),
+                        data.get('Дата', ''),
+                        data.get('Время публикации (МСК)', ''),
+                        data.get('Ссылка на пост', ''),
+                        data.get('Ссылка (источник)', ''),
+                        data.get('Название', ''),
+                        data.get('Код предложения', ''),
+                        data.get('Цена в лизинге', ''),
+                    ])
+            logger.info(f"✅ CSV отчет создан: {filepath}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания CSV: {e}")
+            raise
+
+    def cleanup_user_data(self, user_id, keep_report=True):
+        try:
+            user_folder = self.fm.get_user_folder(user_id)
+            if not os.path.exists(user_folder):
+                return
+            
+            if keep_report:
+                for item in os.listdir(user_folder):
+                    item_path = os.path.join(user_folder, item)
+                    if os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+                    elif not item.startswith('Отчет_'):
+                        try:
+                            os.remove(item_path)
+                        except:
+                            pass
+            else:
                 shutil.rmtree(user_folder)
                 os.makedirs(user_folder, exist_ok=True)
         except Exception as e:
-            logger.error(f"❌ Ошибка удаления: {e}")
-        
-        def reset_stop_flag():
-            time.sleep(5)
-            self.STOP_FLAG[user_id] = False
-        
-        threading.Thread(target=reset_stop_flag, daemon=True).start()
-        return True
-
-    def is_running(self, user_id):
-        return self.STOP_FLAG.get(user_id, False)
-    
-    def get_diagnostic_log(self):
-        return self.diagnostic_log
-    
-    def clear_diagnostic_log(self):
-        self.diagnostic_log = []
-        logger.info("🧹 Диагностический журнал очищен")
+            logger.error(f"❌ Ошибка очистки: {e}")
+            
