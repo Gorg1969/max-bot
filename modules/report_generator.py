@@ -349,4 +349,3 @@ class ReportGenerator:
                 os.makedirs(user_folder, exist_ok=True)
         except Exception as e:
             logger.error(f"❌ Ошибка очистки: {e}")
-            
