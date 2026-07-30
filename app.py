@@ -317,7 +317,100 @@ api = APIClient()
 publisher = Publisher(api, fm, db)
 report_gen = ReportGenerator(fm, db)
 
-# ========== HTML СТРАНИЦА ==========
+# ========== HTML СТРАНИЦА СТАТУСА ==========
+STATUS_PAGE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="refresh" content="10">
+    <title>Статус публикаций</title>
+    <style>
+        body { font-family: Arial; max-width: 600px; margin: 50px auto; padding: 20px; background: #f5f5f5; }
+        .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center; }
+        h1 { color: #333; }
+        .stat { font-size: 24px; margin: 10px 0; }
+        .stat .num { font-weight: bold; }
+        .stat.success .num { color: #28a745; }
+        .stat.pending .num { color: #ffc107; }
+        .stat.error .num { color: #dc3545; }
+        .progress { width: 100%; height: 30px; background: #e9ecef; border-radius: 15px; overflow: hidden; margin: 20px 0; }
+        .progress-bar { height: 100%; background: linear-gradient(90deg, #28a745, #20c997); transition: width 1s; }
+        .report-link { display: inline-block; padding: 15px 40px; background: #28a745; color: white; text-decoration: none; border-radius: 8px; font-size: 18px; margin-top: 20px; }
+        .report-link:hover { background: #218838; }
+        .status-msg { padding: 15px; border-radius: 5px; margin: 15px 0; }
+        .status-msg.ready { background: #d4edda; color: #155724; }
+        .status-msg.waiting { background: #fff3cd; color: #856404; }
+        .status-msg.error { background: #f8d7da; color: #721c24; }
+        .auto-download { color: #666; font-size: 14px; margin-top: 10px; }
+        .btn { padding: 12px 30px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; font-weight: bold; transition: all 0.3s; }
+        .btn-primary { background: #007bff; color: white; }
+        .btn-primary:hover { background: #0056b3; }
+        .btn-danger { background: #dc3545; color: white; }
+        .btn-danger:hover { background: #c82333; }
+        .btn-group { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📊 Статус публикаций</h1>
+        
+        <div class="stat success">✅ Успешно: <span class="num">{{ stats.success }}</span></div>
+        <div class="stat pending">⏳ Ожидают: <span class="num">{{ stats.pending }}</span></div>
+        <div class="stat error">❌ Ошибок: <span class="num">{{ stats.errors }}</span></div>
+        <div class="stat">📦 Всего: <span class="num">{{ stats.total }}</span></div>
+        
+        <div class="progress">
+            <div class="progress-bar" style="width: {{ progress }}%;"></div>
+        </div>
+        
+        <div class="status-msg {% if stats.pending == 0 and stats.success > 0 %}ready{% elif stats.pending > 0 %}waiting{% else %}error{% endif %}">
+            {% if stats.pending == 0 and stats.success > 0 %}
+                ✅ Все публикации завершены! Отчет готов.
+            {% elif stats.pending > 0 %}
+                ⏳ Ожидается завершение {{ stats.pending }} публикаций...
+            {% elif stats.total == 0 %}
+                📭 Нет публикаций
+            {% else %}
+                ⚠️ Все публикации завершились с ошибками
+            {% endif %}
+        </div>
+        
+        {% if stats.pending == 0 and stats.success > 0 %}
+            <a href="/report/{{ user_id }}" class="report-link">📥 Скачать отчет</a>
+            <div class="auto-download">✅ Отчет готов к скачиванию</div>
+            <script>
+                // Автоматический переход на скачивание через 3 секунды
+                setTimeout(function() {
+                    window.location.href = "/report/{{ user_id }}";
+                }, 3000);
+            </script>
+        {% elif stats.pending > 0 %}
+            <div class="auto-download">⏳ Страница обновится автоматически через 10 секунд</div>
+        {% endif %}
+        
+        <div class="btn-group">
+            <a href="/upload?user_id={{ user_id }}" class="btn btn-primary">⬅️ Вернуться к загрузке</a>
+            <button class="btn btn-danger" onclick="clearData()">🗑️ Очистить данные</button>
+        </div>
+    </div>
+    
+    <script>
+        function clearData() {
+            if (!confirm('⚠️ Удалить все данные?')) return;
+            fetch('/clear_user_data/{{ user_id }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            }).then(() => {
+                location.reload();
+            });
+        }
+    </script>
+</body>
+</html>
+"""
+
+# ========== HTML СТРАНИЦА ЗАГРУЗКИ ==========
 UPLOAD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -343,10 +436,6 @@ UPLOAD_PAGE = """
         .btn-danger:hover { background: #c82333; }
         .btn-stop { background: #fd7e14; color: white; }
         .btn-stop:hover { background: #e06b0a; }
-        .btn-info { background: #17a2b8; color: white; }
-        .btn-info:hover { background: #138496; }
-        .btn-warning { background: #ffc107; color: #333; }
-        .btn-warning:hover { background: #e0a800; }
         .btn:disabled { opacity: 0.5; cursor: not-allowed; }
         .status { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
         .status.success { background: #d4edda; color: #155724; display: block; border-left: 4px solid #28a745; }
@@ -368,14 +457,12 @@ UPLOAD_PAGE = """
         #log { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; font-family: 'Courier New', monospace; font-size: 12px; max-height: 350px; overflow-y: auto; margin: 20px 0; display: none; white-space: pre-wrap; line-height: 1.5; }
         .button-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px; }
         .selected-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; }
+        .queue-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; display: none; font-weight: 500; }
+        .delay-info { background: #e7f5ff; padding: 8px 15px; border-radius: 5px; margin: 5px 0; font-size: 13px; color: #0056b3; display: none; }
         .footer { text-align: center; margin-top: 30px; color: #999; font-size: 14px; border-top: 1px solid #eee; padding-top: 20px; }
         .report-section { margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 10px; border: 1px solid #dee2e6; text-align: center; }
         .report-section .btn-group { display: flex; gap: 10px; align-items: center; justify-content: center; flex-wrap: wrap; }
         #reportStatus { margin-top: 15px; padding: 15px; border-radius: 5px; display: none; font-weight: 500; white-space: pre-line; }
-        .queue-info { background: #e7f5ff; padding: 10px 15px; border-radius: 5px; margin: 10px 0; border-left: 3px solid #007bff; display: none; font-weight: 500; }
-        .clear-btn { background: #dc3545; color: white; }
-        .clear-btn:hover { background: #c82333; }
-        .delay-info { background: #e7f5ff; padding: 8px 15px; border-radius: 5px; margin: 5px 0; font-size: 13px; color: #0056b3; display: none; }
         @media (max-width: 600px) {
             body { padding: 10px; margin: 10px; }
             .container { padding: 15px; }
@@ -401,7 +488,8 @@ UPLOAD_PAGE = """
             6️⃣ Каждая папка отправляется отдельным запросом<br>
             7️⃣ <strong>Максимум 10 медиа-файлов</strong> (фото + видео)<br>
             8️⃣ <strong>Видео: MP4 до 250MB</strong><br>
-            9️⃣ <strong>Интервал между отправками: 20-40 секунд</strong>
+            9️⃣ <strong>Интервал между отправками: 20-40 секунд</strong><br>
+            🔟 ✅ <strong>Отчет придет автоматически</strong> после завершения
         </div>
         
         <div class="drop-zone" id="dropZone">
@@ -420,7 +508,6 @@ UPLOAD_PAGE = """
                 <button class="btn btn-success" id="btnStart" onclick="uploadFolder()">🚀 Загрузить</button>
                 <button class="btn btn-stop" id="btnStop" onclick="stopProcessing()" disabled>⏹ Остановить</button>
                 <button class="btn btn-danger" onclick="clearFiles()">🗑️ Очистить список</button>
-                <button class="btn btn-danger clear-btn" onclick="clearAllData()">🗑️ Очистить БД</button>
             </div>
         </div>
         
@@ -435,22 +522,14 @@ UPLOAD_PAGE = """
         
         <div class="report-section">
             <div class="btn-group">
-                <button class="btn btn-primary" id="reportBtn" onclick="getReport()" disabled>
-                    📊 Скачать отчет
+                <button class="btn btn-primary" onclick="window.location.href='/status_page/' + userId">
+                    📊 Статус публикаций
                 </button>
-                <button class="btn btn-info" onclick="checkReportStatus()">
-                    🔄 Проверить статус
-                </button>
-                <button class="btn btn-warning" onclick="forceUpdateLinks()">
-                    🔄 Обновить ссылки
-                </button>
-                <button class="btn btn-danger clear-btn" onclick="clearAllData()">
-                    🗑️ Очистить все
-                </button>
+                <button class="btn btn-danger" onclick="clearAllData()">🗑️ Очистить данные</button>
             </div>
             <div id="reportStatus"></div>
             <p style="margin-top: 10px; color: #666; font-size: 14px;">
-                После публикации подождите 1-2 минуты, затем нажмите "Проверить статус"
+                ✅ Отчет придет автоматически после завершения публикации
             </p>
         </div>
         
@@ -468,8 +547,6 @@ UPLOAD_PAGE = """
         let totalFolders = 0;
         let successCount = 0;
         let errorCount = 0;
-        let reportReady = false;
-        let statusCheckInterval = null;
         let currentDelay = 0;
         
         const dropZone = document.getElementById('dropZone');
@@ -482,23 +559,12 @@ UPLOAD_PAGE = """
         const progressBar = document.getElementById('progressBar');
         const progress = document.getElementById('progress');
         const queueInfo = document.getElementById('queueInfo');
-        const reportBtn = document.getElementById('reportBtn');
         const reportStatus = document.getElementById('reportStatus');
         const delayInfo = document.getElementById('delayInfo');
         const btnStart = document.getElementById('btnStart');
         const btnStop = document.getElementById('btnStop');
 
         delayInfo.style.display = 'block';
-
-        document.addEventListener('DOMContentLoaded', function() {
-            setTimeout(checkReportStatus, 3000);
-        });
-
-        window.addEventListener('beforeunload', function() {
-            if (statusCheckInterval) {
-                clearInterval(statusCheckInterval);
-            }
-        });
 
         dropZone.addEventListener('dragover', (e) => {
             e.preventDefault();
@@ -642,9 +708,6 @@ UPLOAD_PAGE = """
             totalFolders = 0;
             successCount = 0;
             errorCount = 0;
-            reportReady = false;
-            reportBtn.disabled = true;
-            reportStatus.style.display = 'none';
             btnStart.disabled = true;
             btnStop.disabled = true;
         }
@@ -659,180 +722,6 @@ UPLOAD_PAGE = """
             statusDiv.className = 'status ' + type;
             statusDiv.textContent = message;
             statusDiv.style.display = 'block';
-        }
-
-        function getReport() {
-            if (!reportReady) {
-                showStatus('warning', '⏳ Отчет еще не готов, подождите...');
-                return;
-            }
-            window.open(`/report/${userId}`, '_blank');
-        }
-
-        async function checkReportStatus() {
-            try {
-                const response = await fetch(`/report_status/${userId}`);
-                const text = await response.text();
-                
-                let cleanText = text;
-                const firstBrace = text.indexOf('{');
-                if (firstBrace > 0) {
-                    cleanText = text.substring(firstBrace);
-                }
-                
-                let result;
-                try {
-                    result = JSON.parse(cleanText);
-                } catch (parseError) {
-                    console.error('❌ Ошибка парсинга JSON:', parseError);
-                    reportStatus.style.display = 'block';
-                    reportStatus.className = 'status error';
-                    reportStatus.textContent = '❌ Ошибка сервера: ' + text.substring(0, 200);
-                    reportBtn.disabled = true;
-                    reportReady = false;
-                    return;
-                }
-                
-                if (result.error) {
-                    reportStatus.style.display = 'block';
-                    reportStatus.className = 'status error';
-                    reportStatus.textContent = '❌ ' + result.error;
-                    reportBtn.disabled = true;
-                    reportReady = false;
-                    return;
-                }
-                
-                reportStatus.style.display = 'block';
-                let statusText = `📊 Всего: ${result.total} | ✅ Готово: ${result.success}`;
-                
-                if (result.pending > 0) {
-                    statusText += ` | ⏳ Ожидают: ${result.pending}`;
-                    reportStatus.className = 'status info';
-                    statusText += '\\n⏳ Подождите, ссылки еще формируются...';
-                    reportBtn.disabled = true;
-                    reportReady = false;
-                } else if (result.failed > 0) {
-                    statusText += ` | ❌ Ошибок: ${result.failed}`;
-                    reportStatus.className = 'status warning';
-                    if (result.success > 0) {
-                        statusText += '\\n⚠️ Часть публикаций завершилась с ошибкой';
-                        reportBtn.disabled = false;
-                        reportReady = true;
-                    } else {
-                        statusText += '\\n❌ Все публикации завершились с ошибкой';
-                        reportBtn.disabled = true;
-                        reportReady = false;
-                    }
-                } else if (result.ready && result.success > 0) {
-                    reportStatus.className = 'status success';
-                    statusText += '\\n✅ Отчет готов! Нажмите "Скачать отчет"';
-                    reportBtn.disabled = false;
-                    reportReady = true;
-                    
-                    addLog('🧹 Автоочистка данных после формирования отчета...');
-                    fetch('/auto_cleanup/' + userId, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' }
-                    });
-                } else {
-                    reportStatus.className = 'status info';
-                    statusText += '\\n⏳ Нет готовых публикаций';
-                    reportBtn.disabled = true;
-                    reportReady = false;
-                }
-                
-                reportStatus.textContent = statusText;
-                
-                if (result.pending > 0) {
-                    if (statusCheckInterval) {
-                        clearInterval(statusCheckInterval);
-                    }
-                    statusCheckInterval = setInterval(checkReportStatus, 10000);
-                } else {
-                    if (statusCheckInterval) {
-                        clearInterval(statusCheckInterval);
-                        statusCheckInterval = null;
-                    }
-                }
-                
-            } catch (error) {
-                console.error('❌ Ошибка проверки статуса:', error);
-                reportStatus.style.display = 'block';
-                reportStatus.className = 'status error';
-                reportStatus.textContent = '❌ Ошибка проверки статуса: ' + error.message;
-            }
-        }
-
-        async function forceUpdateLinks() {
-            try {
-                addLog('🔄 Принудительное обновление ссылок...');
-                
-                const response = await fetch('/force_update_links', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ user_id: parseInt(userId) })
-                });
-                
-                const text = await response.text();
-                let cleanText = text;
-                const firstBrace = text.indexOf('{');
-                if (firstBrace > 0) {
-                    cleanText = text.substring(firstBrace);
-                }
-                
-                const result = JSON.parse(cleanText);
-                
-                if (result.success) {
-                    addLog(`✅ ${result.message}`);
-                    showStatus('success', `✅ ${result.message}`);
-                    setTimeout(checkReportStatus, 1000);
-                } else {
-                    addLog(`❌ ${result.message}`);
-                    showStatus('error', `❌ ${result.message}`);
-                }
-            } catch (error) {
-                addLog(`❌ Ошибка: ${error.message}`);
-                showStatus('error', `❌ Ошибка: ${error.message}`);
-            }
-        }
-
-        async function clearAllData() {
-            if (!confirm('⚠️ Удалить ВСЕ данные пользователя?\\n\\nОтчеты останутся, но история публикаций будет очищена.')) {
-                return;
-            }
-            
-            try {
-                addLog('🗑️ Очистка данных...');
-                
-                const response = await fetch(`/clear_user_data/${userId}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' }
-                });
-                
-                const text = await response.text();
-                let cleanText = text;
-                const firstBrace = text.indexOf('{');
-                if (firstBrace > 0) {
-                    cleanText = text.substring(firstBrace);
-                }
-                
-                const result = JSON.parse(cleanText);
-                
-                if (result.success) {
-                    showStatus('success', '✅ Данные очищены');
-                    addLog('✅ Все данные пользователя очищены');
-                    reportStatus.style.display = 'none';
-                    reportBtn.disabled = true;
-                    reportReady = false;
-                    setTimeout(checkReportStatus, 1000);
-                } else {
-                    showStatus('error', '❌ ' + result.message);
-                    addLog('❌ Ошибка: ' + result.message);
-                }
-            } catch (error) {
-                showStatus('error', '❌ Ошибка: ' + error.message);
-                addLog('❌ Ошибка: ' + error.message);
-            }
         }
 
         async function stopProcessing() {
@@ -868,6 +757,35 @@ UPLOAD_PAGE = """
             isProcessing = false;
             btnStart.disabled = false;
             btnStop.disabled = true;
+        }
+
+        async function clearAllData() {
+            if (!confirm('⚠️ Удалить ВСЕ данные пользователя?')) {
+                return;
+            }
+            
+            try {
+                addLog('🗑️ Очистка данных...');
+                
+                const response = await fetch(`/clear_user_data/${userId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    showStatus('success', '✅ Данные очищены');
+                    addLog('✅ Все данные пользователя очищены');
+                    reportStatus.style.display = 'none';
+                } else {
+                    showStatus('error', '❌ ' + result.message);
+                    addLog('❌ Ошибка: ' + result.message);
+                }
+            } catch (error) {
+                showStatus('error', '❌ Ошибка: ' + error.message);
+                addLog('❌ Ошибка: ' + error.message);
+            }
         }
 
         function compressImage(file, maxWidth = 600, maxHeight = 600, quality = 0.5) {
@@ -1034,7 +952,7 @@ UPLOAD_PAGE = """
                     mediaTokens.push(result.token);
                     mediaTypes.push(result.type);
                 }
-                await new Promise(r => setTimeout(r, 500)); // Увеличенная задержка для видео
+                await new Promise(r => setTimeout(r, 500));
             }
             
             const videoCount = mediaTypes.filter(t => t === 'video').length;
@@ -1071,8 +989,6 @@ UPLOAD_PAGE = """
             processedCount = 0;
             successCount = 0;
             errorCount = 0;
-            reportReady = false;
-            reportBtn.disabled = true;
             btnStart.disabled = true;
             btnStop.disabled = false;
             
@@ -1106,8 +1022,6 @@ UPLOAD_PAGE = """
             queueInfo.textContent = `📋 В очереди: ${totalFolders} папок | Обработано: 0/${totalFolders}`;
             showStatus('info', `⏳ Подготовка 0/${totalFolders} папок...`);
             
-            const results = [];
-            
             for (let i = 0; i < folderNames.length; i++) {
                 if (isStopped) {
                     addLog(`⏹ ОСТАНОВЛЕНО! Обработано ${i}/${totalFolders} папок`);
@@ -1130,7 +1044,6 @@ UPLOAD_PAGE = """
                     if (!folderData) {
                         addLog(`⚠️ Пропускаем ${folderName}: нет текстового файла`);
                         errorCount++;
-                        results.push(`❌ ${folderName}: нет текстового файла`);
                         continue;
                     }
                     
@@ -1157,17 +1070,14 @@ UPLOAD_PAGE = """
                     if (result.success) {
                         successCount++;
                         addLog(`✅ ${folderName}: опубликовано`);
-                        results.push(`✅ ${folderName}: успешно`);
                     } else {
                         errorCount++;
                         addLog(`❌ ${folderName}: ${result.message}`);
-                        results.push(`❌ ${folderName}: ${result.message}`);
                     }
                     
                 } catch (error) {
                     errorCount++;
                     addLog(`❌ ${folderName}: ошибка - ${error.message}`);
-                    results.push(`❌ ${folderName}: ${error.message}`);
                 }
                 
                 processedCount = i + 1;
@@ -1210,33 +1120,16 @@ UPLOAD_PAGE = """
             if (errorCount === 0) {
                 showStatus('success', `✅ Загружено ${successCount} папок!`);
                 addLog(`✅ ВСЕ ${successCount} папок загружены!`);
-                addLog(`⏳ Подождите 1-2 минуты для получения ссылок`);
-                addLog(`📊 Затем нажмите "Проверить статус"`);
+                addLog(`📊 Отчет будет автоматически отправлен в Telegram`);
+                addLog(`📋 Также отчет доступен по ссылке: https://maxbot.bothost.tech/status_page/${userId}`);
             } else {
                 showStatus('warning', `⚠️ Загружено ${successCount} папок, ${errorCount} с ошибками`);
                 addLog(`⚠️ Загружено ${successCount} папок, ${errorCount} с ошибками`);
             }
             
-            if (results.length > 0) {
-                addLog('\\n📋 Детали:');
-                results.slice(0, 20).forEach(r => addLog(r));
-                if (results.length > 20) {
-                    addLog(`... и еще ${results.length - 20} папок`);
-                }
-            }
-            
-            if (successCount > 0) {
-                addLog(`\\n📊 После ожидания нажмите "Проверить статус"`);
-            }
-            
             isProcessing = false;
             btnStart.disabled = false;
             btnStop.disabled = true;
-            
-            setTimeout(function() {
-                addLog('🔄 Автоматическая проверка статуса...');
-                checkReportStatus();
-            }, 30000);
         }
     </script>
 </body>
@@ -1256,6 +1149,13 @@ def index():
 @app.route('/upload', methods=['GET'])
 def upload_page():
     return render_template_string(UPLOAD_PAGE)
+
+
+@app.route('/status_page/<int:user_id>')
+def status_page(user_id):
+    stats = db.get_stats(user_id)
+    progress = min(100, int((stats.get('success', 0) / max(1, stats.get('total', 1))) * 100))
+    return render_template_string(STATUS_PAGE, stats=stats, user_id=user_id, progress=progress)
 
 
 @app.route('/upload_photo', methods=['POST'])
@@ -1394,15 +1294,17 @@ def webhook():
             
             logger.info(f"📨 chat_id: {chat_id}, user_id: {user_id}, text: {text}, mid: {message_id}")
             
+            # ========== ОБРАБОТКА КОМАНД ==========
             if user_id and text:
                 if text.strip() == '/start':
+                    # ЕДИНОЕ МЕНЮ - только здесь
                     api.send_message(
                         user_id,
                         "🏠 **Главное меню**\n\n"
                         "🌐 **Загрузить папку:**\n"
                         f"🔗 https://maxbot.bothost.tech/upload?user_id={user_id}\n\n"
-                        "📊 **Получить отчет:**\n"
-                        f"🔗 https://maxbot.bothost.tech/report/{user_id}\n\n"
+                        "📊 **Статус публикаций:**\n"
+                        f"🔗 https://maxbot.bothost.tech/status_page/{user_id}\n\n"
                         "⏹ **Остановить публикацию:** `/stop`\n\n"
                         "📋 **Инструкция:**\n"
                         "1. Подготовьте папки с объявлениями\n"
@@ -1410,7 +1312,8 @@ def webhook():
                         "3. Фото до 10 шт, видео до 3 шт на объявление\n"
                         "4. Поддерживаются форматы: MP4, MOV, MKV, WEBM\n"
                         "5. Максимальный размер видео: 250 МБ\n"
-                        "6. Интервал между отправками: 20-40 секунд"
+                        "6. Интервал между отправками: 20-40 секунд\n"
+                        "7. ✅ **Отчет придет автоматически** после завершения"
                     )
                     return jsonify({"ok": True}), 200
                 
@@ -1424,21 +1327,19 @@ def webhook():
                     )
                     return jsonify({"ok": True}), 200
                 
-                if text.strip() == '/report':
-                    api.send_message(user_id, "📊 Создаю отчет...")
-                    report_path = report_gen.generate_report(user_id)
-                    if report_path:
-                        filename = os.path.basename(report_path)
-                        download_url = f"https://maxbot.bothost.tech/download_report/{user_id}/{filename}"
-                        api.send_message(
-                            user_id,
-                            f"📊 **Отчет создан!**\n\n"
-                            f"🔗 [Скачать отчет]({download_url})"
-                        )
-                    else:
-                        api.send_message(user_id, "❌ Нет данных для отчета.")
+                if text.strip() == '/status':
+                    stats = db.get_stats(user_id)
+                    api.send_message(
+                        user_id,
+                        f"📊 **Статус публикаций:**\n\n"
+                        f"📦 Всего: {stats.get('total', 0)}\n"
+                        f"✅ Успешно: {stats.get('success', 0)}\n"
+                        f"⏳ Ожидают: {stats.get('pending', 0)}\n"
+                        f"❌ Ошибок: {stats.get('errors', 0)}"
+                    )
                     return jsonify({"ok": True}), 200
             
+            # ========== ОБРАБОТКА ВЕБХУКА ДЛЯ ССЫЛОК ==========
             if chat_id and message_id:
                 logger.info(f"📨 Получен ID сообщения: {message_id} для чата {chat_id}")
                 if user_id:
