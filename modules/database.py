@@ -1,8 +1,10 @@
-# modules/database.py
+# modules/database.py - исправленная версия с конвертацией времени в МСК
+
 import sqlite3
 import os
 import logging
 from datetime import datetime, timedelta
+import pytz
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +14,7 @@ class Database:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._init_db()
         self.migrate_db()
+        self.moscow_tz = pytz.timezone('Europe/Moscow')
     
     def _init_db(self):
         conn = sqlite3.connect(self.db_path)
@@ -85,6 +88,28 @@ class Database:
             
         except Exception as e:
             logger.error(f"❌ Ошибка миграции БД: {e}")
+    
+    def _convert_to_moscow(self, dt):
+        """Конвертирует время из UTC в МСК"""
+        if dt is None:
+            return None
+        try:
+            if isinstance(dt, str):
+                # Парсим строку
+                try:
+                    dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+                except:
+                    dt = datetime.strptime(dt, '%Y-%m-%d %H:%M:%S')
+            
+            # Если время без часового пояса - считаем что это UTC
+            if dt.tzinfo is None:
+                dt = pytz.UTC.localize(dt)
+            
+            # Конвертируем в МСК
+            return dt.astimezone(self.moscow_tz)
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка конвертации времени: {e}")
+            return dt
     
     def add_publication(self, user_id, folder_name, group_id, status='pending', error=None):
         try:
@@ -226,6 +251,7 @@ class Database:
             }
     
     def get_publications(self, user_id, limit=None):
+        """Возвращает публикации с временем в МСК"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
@@ -244,11 +270,12 @@ class Database:
             
             publications = []
             for row in rows:
+                created_at = self._convert_to_moscow(row[3])
                 publications.append({
                     'folder_name': row[0],
                     'group_id': row[1],
                     'status': row[2],
-                    'created_at': row[3],
+                    'created_at': created_at,
                     'error': row[4] if len(row) > 4 else None
                 })
             return publications
@@ -257,6 +284,7 @@ class Database:
             return []
     
     def get_publications_with_status(self, user_id, status=None):
+        """Возвращает публикации с временем в МСК"""
         try:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
@@ -283,11 +311,12 @@ class Database:
             
             publications = []
             for row in rows:
+                created_at = self._convert_to_moscow(row[3])
                 publications.append({
                     'folder_name': row[0],
                     'group_id': row[1],
                     'status': row[2],
-                    'created_at': row[3],
+                    'created_at': created_at,
                     'error': row[4] if len(row) > 4 else None
                 })
             return publications
